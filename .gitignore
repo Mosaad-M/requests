@@ -1,0 +1,12 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# build artifacts
+.build/
+libssl_wrapper.so
+
+# workspace symlinks (deps managed by mojo-pkg)
+json.mojo
+tcp.mojo
+url.mojo

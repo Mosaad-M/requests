@@ -1,0 +1,13 @@
+[workspace]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "requests"
+platforms = ["linux-64"]
+version = "0.3.0"
+
+[tasks]
+run = "bash build_and_run.sh main.mojo"
+test = "bash -c 'python test_server.py & sleep 1 && bash build_and_run.sh test_client.mojo; RET=$?; kill %1 2>/dev/null; exit $RET'"
+format = "mblack http_client.mojo main.mojo test_client.mojo"
+
+[dependencies]
+mojo = ">=0.26.1"

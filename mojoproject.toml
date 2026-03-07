@@ -1,0 +1,15 @@
+[package]
+name = "requests"
+version = "1.0.0"
+description = "Pure-Mojo HTTP/1.1 client with TLS support"
+license = "MIT"
+platforms = ["linux-64", "osx-arm64"]
+
+[mojo]
+requires = ">=0.26.1"
+
+[dependencies]
+tls  = { git = "Mosaad-M/tls",      version = ">=1.0.0" }
+tcp  = { git = "Mosaad-M/tcp",      version = ">=1.0.0" }
+url  = { git = "Mosaad-M/url",      version = ">=1.0.0" }
+json = { git = "Mosaad-M/json",     version = ">=1.0.0" }
