@@ -11,8 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone tls
-        run: git clone --depth 1 https://github.com/Mosaad-M/tls.git ../tls
+      - name: Clone dependencies
+        run: |
+          git clone --depth 1 https://github.com/Mosaad-M/tls.git ../tls
+          git clone --depth 1 https://github.com/Mosaad-M/json.git ../json
+          git clone --depth 1 https://github.com/Mosaad-M/tcp.git ../tcp
+          git clone --depth 1 https://github.com/Mosaad-M/url.git ../url
+          ln -s ../json/json.mojo json.mojo
+          ln -s ../tcp/tcp.mojo tcp.mojo
+          ln -s ../url/url.mojo url.mojo
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.1
