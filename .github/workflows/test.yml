@@ -11,18 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone dependencies
-        run: |
-          git clone --depth 1 https://github.com/Mosaad-M/tls.git ../tls
-          git clone --depth 1 https://github.com/Mosaad-M/json.git ../json
-          git clone --depth 1 https://github.com/Mosaad-M/tcp.git ../tcp
-          git clone --depth 1 https://github.com/Mosaad-M/url.git ../url
-          ln -s ../json/json.mojo json.mojo
-          ln -s ../tcp/tcp.mojo tcp.mojo
-          ln -s ../url/url.mojo url.mojo
-
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.1
+
+      - name: Install mojo-pkg
+        run: |
+          mkdir -p "$HOME/.mojo/bin"
+          curl -fsSL https://github.com/Mosaad-M/mojo-pkg/releases/latest/download/mojo-pkg-linux-64.tar.gz \
+            | tar xz -C "$HOME/.mojo/bin"
+          echo "$HOME/.mojo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: mojo-pkg install
 
       - name: Run tests
         run: pixi run test

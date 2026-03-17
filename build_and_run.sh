@@ -11,8 +11,14 @@ BASENAME="$(basename "$MOJO_FILE" .mojo)"
 BUILD_DIR="$SCRIPT_DIR/.build"
 mkdir -p "$BUILD_DIR"
 
-TLS_PURE="${TLS_PURE:-$(cd "$SCRIPT_DIR/../tls" 2>/dev/null && pwd || echo "$SCRIPT_DIR/../tls")}"
-mojo build "$MOJO_FILE" -o "$BUILD_DIR/$BASENAME" \
-    -I "$TLS_PURE"
+# Use mojo-pkg flags if available (CI), else fall back to TLS_PURE (local dev)
+if [ -f "$SCRIPT_DIR/.mojo_flags" ]; then
+    FLAGS=$(cat "$SCRIPT_DIR/.mojo_flags")
+else
+    TLS_PURE="${TLS_PURE:-$(cd "$SCRIPT_DIR/../tls" 2>/dev/null && pwd || echo "$SCRIPT_DIR/../tls")}"
+    FLAGS="-I $TLS_PURE"
+fi
+
+mojo build "$MOJO_FILE" -o "$BUILD_DIR/$BASENAME" $FLAGS
 
 "$BUILD_DIR/$BASENAME" "$@"
