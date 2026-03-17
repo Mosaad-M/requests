@@ -22,7 +22,7 @@ jobs:
           echo "$HOME/.mojo/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        run: mojo-pkg install
+        run: pixi run bash -c "$HOME/.mojo/bin/mojo-pkg install"
 
       - name: Run tests
         run: pixi run test
