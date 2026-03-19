@@ -15,7 +15,7 @@ mkdir -p "$BUILD_DIR"
 if [ -f "$SCRIPT_DIR/.mojo_flags" ]; then
     FLAGS=$(cat "$SCRIPT_DIR/.mojo_flags")
 else
-    TLS_PURE="${TLS_PURE:-$(cd "$SCRIPT_DIR/../tls" 2>/dev/null && pwd || echo "$SCRIPT_DIR/../tls")}"
+    TLS_PURE="${TLS_PURE:-$(cd "$SCRIPT_DIR/../tls_pure" 2>/dev/null && pwd || echo "$SCRIPT_DIR/../tls_pure")}"
     FLAGS="-I $TLS_PURE"
 fi
 

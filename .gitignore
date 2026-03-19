@@ -10,3 +10,6 @@ libssl_wrapper.so
 json.mojo
 tcp.mojo
 url.mojo
+
+# claude code local files
+.claude/
