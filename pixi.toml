@@ -13,4 +13,4 @@ test = "bash -c 'python test_server.py & sleep 1 && bash build_and_run.sh test_c
 format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]
-mojo = ">=0.26.1"
+mojo = ">=0.26.2"
