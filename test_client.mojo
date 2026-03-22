@@ -16,26 +16,26 @@ from json import JsonValue
 # ============================================================================
 
 
-fn assert_eq(actual: Int, expected: Int, label: String) raises:
+def assert_eq(actual: Int, expected: Int, label: String) raises:
     if actual != expected:
         raise Error(
             label + ": expected " + String(expected) + ", got " + String(actual)
         )
 
 
-fn assert_str_eq(actual: String, expected: String, label: String) raises:
+def assert_str_eq(actual: String, expected: String, label: String) raises:
     if actual != expected:
         raise Error(
             label + ": expected '" + expected + "', got '" + actual + "'"
         )
 
 
-fn assert_true(condition: Bool, label: String) raises:
+def assert_true(condition: Bool, label: String) raises:
     if not condition:
         raise Error(label + ": expected True")
 
 
-fn assert_contains(haystack: String, needle: String, label: String) raises:
+def assert_contains(haystack: String, needle: String, label: String) raises:
     """Check that haystack contains needle."""
     var h_bytes = haystack.as_bytes()
     var n_bytes = needle.as_bytes()
@@ -61,7 +61,7 @@ fn assert_contains(haystack: String, needle: String, label: String) raises:
 alias BASE = "http://127.0.0.1:18080"
 
 
-fn test_get_root() raises:
+def test_get_root() raises:
     """GET / should return 200 with JSON body."""
     var client = HttpClient()
     var resp = client.get(BASE + "/")
@@ -70,14 +70,14 @@ fn test_get_root() raises:
     assert_contains(resp.body, "hello from test server", "body")
 
 
-fn test_status_200() raises:
+def test_status_200() raises:
     var client = HttpClient()
     var resp = client.get(BASE + "/status/200")
     assert_eq(resp.status_code, 200, "status_code")
     assert_true(resp.ok, "ok")
 
 
-fn test_status_404() raises:
+def test_status_404() raises:
     var client = HttpClient()
     var resp = client.get(BASE + "/status/404")
     assert_eq(resp.status_code, 404, "status_code")
@@ -85,14 +85,14 @@ fn test_status_404() raises:
     assert_contains(resp.body, "not found", "body")
 
 
-fn test_status_500() raises:
+def test_status_500() raises:
     var client = HttpClient()
     var resp = client.get(BASE + "/status/500")
     assert_eq(resp.status_code, 500, "status_code")
     assert_true(not resp.ok, "not ok")
 
 
-fn test_response_headers() raises:
+def test_response_headers() raises:
     var client = HttpClient()
     var resp = client.get(BASE + "/")
     assert_str_eq(
@@ -104,7 +104,7 @@ fn test_response_headers() raises:
     )
 
 
-fn test_custom_headers() raises:
+def test_custom_headers() raises:
     """Custom headers should be sent and echoed back by /headers endpoint."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -115,14 +115,14 @@ fn test_custom_headers() raises:
     assert_contains(resp.body, "TestValue123", "header value echoed")
 
 
-fn test_user_agent() raises:
+def test_user_agent() raises:
     """Default User-Agent should be MojoHTTP/0.1."""
     var client = HttpClient()
     var resp = client.get(BASE + "/headers")
     assert_contains(resp.body, "MojoHTTP/0.1", "user-agent")
 
 
-fn test_large_response() raises:
+def test_large_response() raises:
     """Test receiving a large response body (100KB)."""
     var client = HttpClient()
     var resp = client.get(BASE + "/large")
@@ -130,7 +130,7 @@ fn test_large_response() raises:
     assert_eq(len(resp.body), 100000, "body length")
 
 
-fn test_query_string() raises:
+def test_query_string() raises:
     """Query string should be sent correctly."""
     var client = HttpClient()
     var resp = client.get(BASE + "/echo?foo=bar&baz=42")
@@ -138,7 +138,7 @@ fn test_query_string() raises:
     assert_contains(resp.body, "foo=bar&baz=42", "query echoed")
 
 
-fn test_case_insensitive_headers() raises:
+def test_case_insensitive_headers() raises:
     """Header lookup should be case-insensitive."""
     var client = HttpClient()
     var resp = client.get(BASE + "/")
@@ -147,7 +147,7 @@ fn test_case_insensitive_headers() raises:
     assert_str_eq(ct, "application/json", "case-insensitive lookup")
 
 
-fn test_chunked_response() raises:
+def test_chunked_response() raises:
     """GET /chunked should decode chunked transfer-encoding and return clean JSON."""
     var client = HttpClient()
     var resp = client.get(BASE + "/chunked")
@@ -164,7 +164,7 @@ fn test_chunked_response() raises:
 # ============================================================================
 
 
-fn test_post_json() raises:
+def test_post_json() raises:
     """POST /echo with JSON body should echo back method and body."""
     var client = HttpClient()
     var body = String('{"name":"mojo","version":1}')
@@ -178,7 +178,7 @@ fn test_post_json() raises:
     )
 
 
-fn test_post_custom_content_type() raises:
+def test_post_custom_content_type() raises:
     """POST with custom Content-Type should use that instead of default."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -191,7 +191,7 @@ fn test_post_custom_content_type() raises:
     assert_str_eq(data["content_type"].as_string(), "text/plain", "custom content-type")
 
 
-fn test_put_json() raises:
+def test_put_json() raises:
     """PUT /echo with JSON body should echo back method and body."""
     var client = HttpClient()
     var body = String('{"id":42,"updated":true}')
@@ -202,7 +202,7 @@ fn test_put_json() raises:
     assert_contains(data["body"].as_string(), "42", "body echoed")
 
 
-fn test_delete_no_body() raises:
+def test_delete_no_body() raises:
     """DELETE /method with no body should return method=DELETE."""
     var client = HttpClient()
     var resp = client.delete(BASE + "/method")
@@ -211,7 +211,7 @@ fn test_delete_no_body() raises:
     assert_str_eq(data["method"].as_string(), "DELETE", "method")
 
 
-fn test_delete_with_body() raises:
+def test_delete_with_body() raises:
     """DELETE /echo with body should echo back method and body."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -223,7 +223,7 @@ fn test_delete_with_body() raises:
     assert_contains(data["body"].as_string(), "99", "body echoed")
 
 
-fn test_patch_json() raises:
+def test_patch_json() raises:
     """PATCH /echo with JSON body should echo back method and body."""
     var client = HttpClient()
     var body = String('{"field":"patched"}')
@@ -234,7 +234,7 @@ fn test_patch_json() raises:
     assert_contains(data["body"].as_string(), "patched", "body echoed")
 
 
-fn test_post_empty_body() raises:
+def test_post_empty_body() raises:
     """POST /echo with empty body should still work."""
     var client = HttpClient()
     var resp = client.post(BASE + "/echo", String(""))
@@ -244,7 +244,7 @@ fn test_post_empty_body() raises:
     assert_str_eq(data["body"].as_string(), "", "empty body")
 
 
-fn test_post_custom_headers() raises:
+def test_post_custom_headers() raises:
     """POST /echo with extra custom headers should work."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -262,7 +262,7 @@ fn test_post_custom_headers() raises:
 # ============================================================================
 
 
-fn test_crlf_header_value_rejected() raises:
+def test_crlf_header_value_rejected() raises:
     """Header values containing CRLF should be rejected."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -276,7 +276,7 @@ fn test_crlf_header_value_rejected() raises:
         raise Error("expected error for CRLF in header value")
 
 
-fn test_crlf_header_key_rejected() raises:
+def test_crlf_header_key_rejected() raises:
     """Header keys containing CRLF should be rejected."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -290,7 +290,7 @@ fn test_crlf_header_key_rejected() raises:
         raise Error("expected error for CRLF in header key")
 
 
-fn test_header_key_with_colon_rejected() raises:
+def test_header_key_with_colon_rejected() raises:
     """Header keys containing colon should be rejected."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -304,7 +304,7 @@ fn test_header_key_with_colon_rejected() raises:
         raise Error("expected error for colon in header key")
 
 
-fn test_ssrf_private_ip_blocked() raises:
+def test_ssrf_private_ip_blocked() raises:
     """Client with allow_private_ips=False should reject connections to 127.0.0.1."""
     var client = HttpClient()
     client.allow_private_ips = False
@@ -324,7 +324,7 @@ fn test_ssrf_private_ip_blocked() raises:
 alias HTTPS_BASE = "https://jsonplaceholder.typicode.com"
 
 
-fn test_https_get() raises:
+def test_https_get() raises:
     """HTTPS GET should return 200 with JSON body."""
     var client = HttpClient()
     var resp = client.get(HTTPS_BASE + "/posts/1")
@@ -334,7 +334,7 @@ fn test_https_get() raises:
     assert_contains(resp.body, "title", "body has title")
 
 
-fn test_https_large() raises:
+def test_https_large() raises:
     """HTTPS GET /posts should return a large JSON array."""
     var client = HttpClient()
     var resp = client.get(HTTPS_BASE + "/posts")
@@ -342,7 +342,7 @@ fn test_https_large() raises:
     assert_true(len(resp.body) > 1000, "body length > 1000")
 
 
-fn test_https_custom_headers() raises:
+def test_https_custom_headers() raises:
     """HTTPS GET with custom Accept header."""
     var client = HttpClient()
     var headers = HttpHeaders()
@@ -352,7 +352,7 @@ fn test_https_custom_headers() raises:
     assert_true(resp.ok, "ok")
 
 
-fn test_https_json_parse() raises:
+def test_https_json_parse() raises:
     """HTTPS GET /posts/1 should parse as JSON with correct fields."""
     var client = HttpClient()
     var resp = client.get(HTTPS_BASE + "/posts/1")
@@ -368,15 +368,15 @@ fn test_https_json_parse() raises:
 # ============================================================================
 
 
-fn main() raises:
+def main() raises:
     var passed = 0
     var failed = 0
 
-    fn run_test(
+    def run_test(
         name: String,
         mut passed: Int,
         mut failed: Int,
-        test_fn: fn () raises -> None,
+        test_fn: def () raises -> None,
     ):
         try:
             test_fn()

@@ -38,38 +38,38 @@ struct HttpHeaders(Copyable, Movable, Sized):
     var _keys: List[String]
     var _values: List[String]
 
-    fn __init__(out self):
+    def __init__(out self):
         self._keys = List[String]()
         self._values = List[String]()
 
-    fn __copyinit__(out self, copy: Self):
+    def __copyinit__(out self, copy: Self):
         self._keys = copy._keys.copy()
         self._values = copy._values.copy()
 
-    fn __moveinit__(out self, deinit take: Self):
+    def __moveinit__(out self, deinit take: Self):
         self._keys = take._keys^
         self._values = take._values^
 
-    fn add(mut self, key: String, value: String):
+    def add(mut self, key: String, value: String):
         """Add a header key-value pair."""
         self._keys.append(key)
         self._values.append(value)
 
-    fn get(self, key: String) -> String:
+    def get(self, key: String) -> String:
         """Get header value by key (case-insensitive). Returns empty string if not found."""
         for i in range(len(self._keys)):
             if _eq_ignore_case(self._keys[i], key):
                 return self._values[i]
         return String("")
 
-    fn has(self, key: String) -> Bool:
+    def has(self, key: String) -> Bool:
         """Check if a header exists (case-insensitive)."""
         for i in range(len(self._keys)):
             if _eq_ignore_case(self._keys[i], key):
                 return True
         return False
 
-    fn __len__(self) -> Int:
+    def __len__(self) -> Int:
         return len(self._keys)
 
 
@@ -88,7 +88,7 @@ struct HttpResponse(Copyable, Movable):
     var url: String
     var ok: Bool  # True if status_code is 200-299
 
-    fn __init__(out self):
+    def __init__(out self):
         self.status_code = 0
         self.status_text = String("")
         self.headers = HttpHeaders()
@@ -96,7 +96,7 @@ struct HttpResponse(Copyable, Movable):
         self.url = String("")
         self.ok = False
 
-    fn __copyinit__(out self, copy: Self):
+    def __copyinit__(out self, copy: Self):
         self.status_code = copy.status_code
         self.status_text = copy.status_text
         self.headers = copy.headers.copy()
@@ -104,7 +104,7 @@ struct HttpResponse(Copyable, Movable):
         self.url = copy.url
         self.ok = copy.ok
 
-    fn __moveinit__(out self, deinit take: Self):
+    def __moveinit__(out self, deinit take: Self):
         self.status_code = take.status_code
         self.status_text = take.status_text^
         self.headers = take.headers^
@@ -112,7 +112,7 @@ struct HttpResponse(Copyable, Movable):
         self.url = take.url^
         self.ok = take.ok
 
-    fn json(self) raises -> JsonValue:
+    def json(self) raises -> JsonValue:
         """Parse response body as JSON.
 
         Returns:
@@ -159,7 +159,7 @@ struct HttpClient(Movable):
     var _tls_sock: TlsSocket
     var _tls_valid: Bool     # True if _tls_sock is usable
 
-    fn __init__(out self):
+    def __init__(out self):
         self.user_agent = String("MojoHTTP/0.1")
         self.allow_private_ips = True
         self._ca_bundle = List[X509Cert]()
@@ -171,7 +171,7 @@ struct HttpClient(Movable):
         self._tls_sock = TlsSocket(0)
         self._tls_valid = False
 
-    fn __moveinit__(out self, deinit take: Self):
+    def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
         self.allow_private_ips = take.allow_private_ips
         self._ca_bundle = take._ca_bundle^
@@ -185,23 +185,23 @@ struct HttpClient(Movable):
 
     # === GET ===
 
-    fn get(mut self, url: String) raises -> HttpResponse:
+    def get(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP GET request."""
         var headers = HttpHeaders()
         return self._do_request("GET", url, String(""), headers)
 
-    fn get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
+    def get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP GET request with custom headers."""
         return self._do_request("GET", url, String(""), headers)
 
     # === POST ===
 
-    fn post(mut self, url: String, body: String) raises -> HttpResponse:
+    def post(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform an HTTP POST request."""
         var headers = HttpHeaders()
         return self._do_request("POST", url, body, headers)
 
-    fn post(
+    def post(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP POST request with custom headers."""
@@ -209,12 +209,12 @@ struct HttpClient(Movable):
 
     # === PUT ===
 
-    fn put(mut self, url: String, body: String) raises -> HttpResponse:
+    def put(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform an HTTP PUT request."""
         var headers = HttpHeaders()
         return self._do_request("PUT", url, body, headers)
 
-    fn put(
+    def put(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP PUT request with custom headers."""
@@ -222,16 +222,16 @@ struct HttpClient(Movable):
 
     # === DELETE ===
 
-    fn delete(mut self, url: String) raises -> HttpResponse:
+    def delete(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP DELETE request with no body."""
         var headers = HttpHeaders()
         return self._do_request("DELETE", url, String(""), headers)
 
-    fn delete(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
+    def delete(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP DELETE request with custom headers."""
         return self._do_request("DELETE", url, String(""), headers)
 
-    fn delete(
+    def delete(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP DELETE request with body and custom headers."""
@@ -239,12 +239,12 @@ struct HttpClient(Movable):
 
     # === PATCH ===
 
-    fn patch(mut self, url: String, body: String) raises -> HttpResponse:
+    def patch(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform an HTTP PATCH request."""
         var headers = HttpHeaders()
         return self._do_request("PATCH", url, body, headers)
 
-    fn patch(
+    def patch(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP PATCH request with custom headers."""
@@ -252,7 +252,7 @@ struct HttpClient(Movable):
 
     # === Internal ===
 
-    fn _do_request(
+    def _do_request(
         mut self,
         method: String,
         url_str: String,
@@ -411,14 +411,14 @@ struct HttpClient(Movable):
 # ============================================================================
 
 
-fn _list_append(mut out: List[UInt8], src: List[UInt8]):
+def _list_append(mut out: List[UInt8], src: List[UInt8]):
     """Append src bytes to out with pre-reservation."""
     out.reserve(len(out) + len(src))
     for i in range(len(src)):
         out.append(src[i])
 
 
-fn _buf_find_crlf_crlf(buf: List[UInt8]) -> Int:
+def _buf_find_crlf_crlf(buf: List[UInt8]) -> Int:
     """Find \\r\\n\\r\\n in a List[UInt8]. Returns index of \\r or -1."""
     var n = len(buf)
     for i in range(n - 3):
@@ -427,7 +427,7 @@ fn _buf_find_crlf_crlf(buf: List[UInt8]) -> Int:
     return -1
 
 
-fn _buf_find_crlf(buf: List[UInt8], start: Int) -> Int:
+def _buf_find_crlf(buf: List[UInt8], start: Int) -> Int:
     """Find \\r\\n in List[UInt8] starting at start. Returns index of \\r or -1."""
     var n = len(buf)
     for i in range(start, n - 1):
@@ -436,7 +436,7 @@ fn _buf_find_crlf(buf: List[UInt8], start: Int) -> Int:
     return -1
 
 
-fn _buf_parse_hex(buf: List[UInt8], start: Int, end: Int) -> Int:
+def _buf_parse_hex(buf: List[UInt8], start: Int, end: Int) -> Int:
     """Parse hex integer from buf[start..end). Stops at non-hex or ';'."""
     var result = 0
     for i in range(start, end):
@@ -452,7 +452,7 @@ fn _buf_parse_hex(buf: List[UInt8], start: Int, end: Int) -> Int:
     return result
 
 
-fn _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
+def _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
     """Check if buf[start..] contains a complete chunked body.
 
     Parses chunk boundaries until terminal 0-size chunk is found and confirmed.
@@ -477,14 +477,14 @@ fn _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
         pos = pos + chunk_size + 2  # skip data + \r\n
 
 
-fn _lc(b: UInt8) -> UInt8:
+def _lc(b: UInt8) -> UInt8:
     """Convert a byte to lowercase (ASCII A-Z only)."""
     if b >= 65 and b <= 90:
         return b + 32
     return b
 
 
-fn _buf_content_length(buf: List[UInt8], header_end: Int) -> Int:
+def _buf_content_length(buf: List[UInt8], header_end: Int) -> Int:
     """Scan buf[0..header_end] case-insensitively for 'content-length: N'.
 
     Returns N or -1 if not found.
@@ -525,7 +525,7 @@ fn _buf_content_length(buf: List[UInt8], header_end: Int) -> Int:
     return -1
 
 
-fn _buf_has_chunked(buf: List[UInt8], header_end: Int) -> Bool:
+def _buf_has_chunked(buf: List[UInt8], header_end: Int) -> Bool:
     """Check if Transfer-Encoding: chunked is present in buf[0..header_end].
 
     "transfer-encoding:" is 18 bytes; "chunked" is 7 bytes.
@@ -580,7 +580,7 @@ fn _buf_has_chunked(buf: List[UInt8], header_end: Int) -> Bool:
     return False
 
 
-fn _str_contains(haystack: String, needle: String) -> Bool:
+def _str_contains(haystack: String, needle: String) -> Bool:
     """Check if haystack string contains needle (simple byte scan)."""
     var h = haystack.as_bytes()
     var n = needle.as_bytes()
@@ -599,7 +599,7 @@ fn _str_contains(haystack: String, needle: String) -> Bool:
     return False
 
 
-fn _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
+def _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
     """Read exactly one complete HTTP response from a TLS keep-alive connection.
 
     Phase 1: accumulate data until \\r\\n\\r\\n (end of headers) is found.
@@ -661,7 +661,7 @@ fn _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
         return buf^
 
 
-fn _recv_http_keepalive(mut sock: TcpSocket) raises -> List[UInt8]:
+def _recv_http_keepalive(mut sock: TcpSocket) raises -> List[UInt8]:
     """Read exactly one complete HTTP response from a TCP keep-alive connection.
 
     Same phase logic as _recv_tls_keepalive but uses TcpSocket primitives.
@@ -708,7 +708,7 @@ fn _recv_http_keepalive(mut sock: TcpSocket) raises -> List[UInt8]:
 # ============================================================================
 
 
-fn _validate_method(method: String) raises:
+def _validate_method(method: String) raises:
     """Validate HTTP method contains only uppercase ASCII letters (A-Z)."""
     if len(method) == 0:
         raise Error("HTTP method must not be empty")
@@ -719,7 +719,7 @@ fn _validate_method(method: String) raises:
             raise Error("invalid HTTP method: must be uppercase ASCII letters")
 
 
-fn _validate_header_key(key: String) raises:
+def _validate_header_key(key: String) raises:
     """Validate header key contains no CR, LF, or colon characters."""
     var bytes = key.as_bytes()
     for i in range(len(key)):
@@ -728,7 +728,7 @@ fn _validate_header_key(key: String) raises:
             raise Error("invalid header key: contains CR, LF, or colon")
 
 
-fn _validate_header_value(value: String) raises:
+def _validate_header_value(value: String) raises:
     """Validate header value contains no CR or LF characters."""
     var bytes = value.as_bytes()
     for i in range(len(value)):
@@ -737,7 +737,7 @@ fn _validate_header_value(value: String) raises:
             raise Error("invalid header value: contains CR or LF")
 
 
-fn _validate_path(path: String) raises:
+def _validate_path(path: String) raises:
     """Validate request path contains no CR or LF characters."""
     var bytes = path.as_bytes()
     for i in range(len(path)):
@@ -751,7 +751,7 @@ fn _validate_path(path: String) raises:
 # ============================================================================
 
 
-fn _to_lower(s: String) -> String:
+def _to_lower(s: String) -> String:
     """Convert string to lowercase (ASCII only)."""
     var s_bytes = s.as_bytes()
     var result = List[UInt8](capacity=len(s))
@@ -764,7 +764,7 @@ fn _to_lower(s: String) -> String:
     return String(unsafe_from_utf8=result^)
 
 
-fn _eq_ignore_case(a: String, b: String) -> Bool:
+def _eq_ignore_case(a: String, b: String) -> Bool:
     """Case-insensitive string comparison. Zero allocations."""
     if len(a) != len(b):
         return False
@@ -782,15 +782,15 @@ fn _eq_ignore_case(a: String, b: String) -> Bool:
     return True
 
 
-fn _append_str(mut buf: List[UInt8], s: String):
+def _append_str(mut buf: List[UInt8], s: String):
     """Append all bytes of a string to a byte buffer."""
     var s_bytes = s.as_bytes()
     for i in range(len(s)):
         buf.append(s_bytes[i])
 
 
-fn _ptr_to_string(
-    data_ptr: UnsafePointer[UInt8], start: Int, end: Int
+def _ptr_to_string(
+    data_ptr: UnsafePointer[UInt8, _], start: Int, end: Int
 ) -> String:
     """Materialize a String from a pointer byte range [start, end).
 
@@ -805,7 +805,7 @@ fn _ptr_to_string(
     return String(unsafe_from_utf8=result^)
 
 
-fn _find_crlf_crlf(data_ptr: UnsafePointer[UInt8], data_len: Int) -> Int:
+def _find_crlf_crlf(data_ptr: UnsafePointer[UInt8, _], data_len: Int) -> Int:
     """Find \\r\\n\\r\\n (header/body separator) in pointer data.
 
     Returns the index of the first \\r in the separator, or -1 if not found.
@@ -823,7 +823,7 @@ fn _find_crlf_crlf(data_ptr: UnsafePointer[UInt8], data_len: Int) -> Int:
     return -1
 
 
-fn _find_crlf(data_ptr: UnsafePointer[UInt8], data_len: Int, start: Int) -> Int:
+def _find_crlf(data_ptr: UnsafePointer[UInt8, _], data_len: Int, start: Int) -> Int:
     """Find \\r\\n starting from start in pointer data.
 
     Returns the index of \\r, or -1 if not found.
@@ -836,8 +836,8 @@ fn _find_crlf(data_ptr: UnsafePointer[UInt8], data_len: Int, start: Int) -> Int:
     return -1
 
 
-fn _find_char(
-    data_ptr: UnsafePointer[UInt8],
+def _find_char(
+    data_ptr: UnsafePointer[UInt8, _],
     data_len: Int,
     c: UInt8,
     start: Int = 0,
@@ -849,8 +849,8 @@ fn _find_char(
     return -1
 
 
-fn _hex_to_int(
-    data_ptr: UnsafePointer[UInt8], start: Int, end: Int
+def _hex_to_int(
+    data_ptr: UnsafePointer[UInt8, _], start: Int, end: Int
 ) raises -> Int:
     """Parse a hex string from pointer range [start, end) to integer.
 
@@ -879,7 +879,7 @@ fn _hex_to_int(
     return result
 
 
-fn _decode_chunked(body: String) raises -> String:
+def _decode_chunked(body: String) raises -> String:
     """Decode a chunked transfer-encoded body.
 
     Format: <hex-size>\\r\\n<data>\\r\\n ... 0\\r\\n\\r\\n
@@ -922,7 +922,7 @@ fn _decode_chunked(body: String) raises -> String:
     return String(unsafe_from_utf8=result^)
 
 
-fn _parse_response(raw: String, url: String) raises -> HttpResponse:
+def _parse_response(raw: String, url: String) raises -> HttpResponse:
     """Parse a raw HTTP response string into an HttpResponse.
 
     Uses UnsafePointer for zero-copy parsing — converts the raw response
@@ -1026,8 +1026,8 @@ fn _parse_response(raw: String, url: String) raises -> HttpResponse:
     return response^
 
 
-fn _parse_status_code(
-    data_ptr: UnsafePointer[UInt8], start: Int, end: Int
+def _parse_status_code(
+    data_ptr: UnsafePointer[UInt8, _], start: Int, end: Int
 ) raises -> Int:
     """Parse HTTP status code from pointer range [start, end).
 
