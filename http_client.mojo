@@ -757,8 +757,8 @@ def _to_lower(s: String) -> String:
     var result = List[UInt8](capacity=len(s))
     for i in range(len(s)):
         var c = s_bytes[i]
-        if c >= ord("A") and c <= ord("Z"):
-            result.append(c + 32)
+        if c >= UInt8(ord("A")) and c <= UInt8(ord("Z")):
+            result.append(c + UInt8(32))
         else:
             result.append(c)
     return String(unsafe_from_utf8=result^)

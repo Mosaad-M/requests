@@ -12,7 +12,7 @@
 #
 # ============================================================================
 
-from time import perf_counter_ns
+from std.time import perf_counter_ns
 from url import parse_url
 from json import parse_json, JsonValue
 from http_client import (
@@ -144,7 +144,7 @@ def make_float_heavy_json() -> String:
 def make_raw_http_response(body_size: Int) -> String:
     var body_bytes = List[UInt8](capacity=body_size)
     for i in range(body_size):
-        body_bytes.append(ord("A") + UInt8(i % 26))
+        body_bytes.append(UInt8(ord("A")) + UInt8(i % 26))
     var body = String(unsafe_from_utf8=body_bytes^)
     var parts = List[UInt8](capacity=body_size + 500)
     _append(parts, "HTTP/1.1 200 OK\r\n")
@@ -169,15 +169,15 @@ def make_chunked_body() -> String:
     var parts = List[UInt8](capacity=2000)
     _append(parts, "100\r\n")
     for _ in range(256):
-        parts.append(ord("X"))
+        parts.append(UInt8(ord("X")))
     _append(parts, "\r\n")
     _append(parts, "200\r\n")
     for _ in range(512):
-        parts.append(ord("Y"))
+        parts.append(UInt8(ord("Y")))
     _append(parts, "\r\n")
     _append(parts, "80\r\n")
     for _ in range(128):
-        parts.append(ord("Z"))
+        parts.append(UInt8(ord("Z")))
     _append(parts, "\r\n")
     _append(parts, "0\r\n\r\n")
     return String(unsafe_from_utf8=parts^)
@@ -190,7 +190,7 @@ def make_chunked_body() -> String:
 
 def bench_url_parsing() raises:
     print("\n=== URL Parsing ===")
-    alias N = 10000
+    comptime N = 10000
 
     var urls = List[String]()
     urls.append("http://example.com")
@@ -216,7 +216,7 @@ def bench_json_parsing() raises:
     var small = make_small_json()
     print("  [small: " + String(len(small)) + " bytes]")
     var total: Int = 0
-    alias N_SMALL = 10000
+    comptime N_SMALL = 10000
     for _ in range(N_SMALL):
         var start = perf_counter_ns()
         _ = parse_json(small)
@@ -227,7 +227,7 @@ def bench_json_parsing() raises:
     var medium = make_medium_json()
     print("  [medium: " + String(len(medium)) + " bytes]")
     total = 0
-    alias N_MED = 5000
+    comptime N_MED = 5000
     for _ in range(N_MED):
         var start = perf_counter_ns()
         _ = parse_json(medium)
@@ -238,7 +238,7 @@ def bench_json_parsing() raises:
     var large = make_large_json()
     print("  [large: " + String(len(large)) + " bytes]")
     total = 0
-    alias N_LRG = 500
+    comptime N_LRG = 500
     for _ in range(N_LRG):
         var start = perf_counter_ns()
         _ = parse_json(large)
@@ -249,7 +249,7 @@ def bench_json_parsing() raises:
     var int_json = make_integer_heavy_json()
     print("  [integer-heavy: " + String(len(int_json)) + " bytes]")
     total = 0
-    alias N_INT = 2000
+    comptime N_INT = 2000
     for _ in range(N_INT):
         var start = perf_counter_ns()
         _ = parse_json(int_json)
@@ -260,7 +260,7 @@ def bench_json_parsing() raises:
     var float_json = make_float_heavy_json()
     print("  [float-heavy: " + String(len(float_json)) + " bytes]")
     total = 0
-    alias N_FLT = 2000
+    comptime N_FLT = 2000
     for _ in range(N_FLT):
         var start = perf_counter_ns()
         _ = parse_json(float_json)
@@ -271,7 +271,7 @@ def bench_json_parsing() raises:
     var str_json = make_string_heavy_json()
     print("  [string-heavy: " + String(len(str_json)) + " bytes]")
     total = 0
-    alias N_STR = 2000
+    comptime N_STR = 2000
     for _ in range(N_STR):
         var start = perf_counter_ns()
         _ = parse_json(str_json)
@@ -282,7 +282,7 @@ def bench_json_parsing() raises:
 def bench_json_access() raises:
     """Benchmark accessing values after parsing (copy overhead)."""
     print("\n=== JSON Value Access ===")
-    alias N = 10000
+    comptime N = 10000
 
     var medium = make_medium_json()
     var parsed = parse_json(medium)
@@ -305,9 +305,9 @@ def bench_json_access() raises:
     total = 0
     for _ in range(N):
         var start = perf_counter_ns()
-        var has_users = "users" in parsed
-        var has_total = "total" in parsed
-        var has_missing = "missing" in parsed
+        _ = "users" in parsed
+        _ = "total" in parsed
+        _ = "missing" in parsed
         total += Int(perf_counter_ns() - start)
     report("contains check (3 checks)", total, N)
 
@@ -319,20 +319,20 @@ def bench_json_stringify() raises:
     var medium = make_medium_json()
     var parsed_med = parse_json(medium)
     var total: Int = 0
-    alias N_MED = 5000
+    comptime N_MED = 5000
     for _ in range(N_MED):
         var start = perf_counter_ns()
-        var s = String(parsed_med)
+        _ = String(parsed_med)
         total += Int(perf_counter_ns() - start)
     report("String(medium_json)", total, N_MED)
 
     var large = make_large_json()
     var parsed_lg = parse_json(large)
     total = 0
-    alias N_LRG = 500
+    comptime N_LRG = 500
     for _ in range(N_LRG):
         var start = perf_counter_ns()
-        var s = String(parsed_lg)
+        _ = String(parsed_lg)
         total += Int(perf_counter_ns() - start)
     report("String(large_json)", total, N_LRG)
 
@@ -344,7 +344,7 @@ def bench_http_parsing() raises:
     var small_resp = make_raw_http_response(500)
     print("  [small response: " + String(len(small_resp)) + " bytes]")
     var total: Int = 0
-    alias N_SM = 5000
+    comptime N_SM = 5000
     for _ in range(N_SM):
         var start = perf_counter_ns()
         _ = _parse_response(small_resp, "http://example.com/test")
@@ -355,7 +355,7 @@ def bench_http_parsing() raises:
     var med_resp = make_raw_http_response(10000)
     print("  [medium response: " + String(len(med_resp)) + " bytes]")
     total = 0
-    alias N_MD = 2000
+    comptime N_MD = 2000
     for _ in range(N_MD):
         var start = perf_counter_ns()
         _ = _parse_response(med_resp, "http://example.com/test")
@@ -366,7 +366,7 @@ def bench_http_parsing() raises:
     var large_resp = make_raw_http_response(100000)
     print("  [large response: " + String(len(large_resp)) + " bytes]")
     total = 0
-    alias N_LG = 500
+    comptime N_LG = 500
     for _ in range(N_LG):
         var start = perf_counter_ns()
         _ = _parse_response(large_resp, "http://example.com/test")
@@ -382,7 +382,7 @@ def bench_chunked_decoding() raises:
         "  [chunked body: " + String(len(chunked)) + " bytes -> 896 decoded]"
     )
     var total: Int = 0
-    alias N = 5000
+    comptime N = 5000
     for _ in range(N):
         var start = perf_counter_ns()
         _ = _decode_chunked(chunked)
@@ -392,7 +392,7 @@ def bench_chunked_decoding() raises:
 
 def bench_case_insensitive() raises:
     print("\n=== Case-Insensitive Compare ===")
-    alias N = 50000
+    comptime N = 50000
 
     # _eq_ignore_case (allocation-free)
     var total: Int = 0
@@ -417,7 +417,7 @@ def bench_case_insensitive() raises:
     # Header lookups in a real parsed response
     var resp_raw = make_raw_http_response(100)
     var resp = _parse_response(resp_raw, "http://test.com")
-    alias N2 = 10000
+    comptime N2 = 10000
     total = 0
     for _ in range(N2):
         var start = perf_counter_ns()
@@ -534,7 +534,7 @@ def bench_full_pipeline_local() raises:
         return
 
     # GET / (small JSON)
-    alias N1 = 100
+    comptime N1 = 100
     var total: Int = 0
     for _ in range(N1):
         var start = perf_counter_ns()
@@ -543,7 +543,7 @@ def bench_full_pipeline_local() raises:
     report("GET / (small JSON)", total, N1)
 
     # GET /large (100KB)
-    alias N2 = 50
+    comptime N2 = 50
     total = 0
     for _ in range(N2):
         var start = perf_counter_ns()
@@ -552,7 +552,7 @@ def bench_full_pipeline_local() raises:
     report("GET /large (100KB)", total, N2)
 
     # GET /headers
-    alias N3 = 100
+    comptime N3 = 100
     total = 0
     for _ in range(N3):
         var start = perf_counter_ns()
@@ -561,7 +561,7 @@ def bench_full_pipeline_local() raises:
     report("GET /headers", total, N3)
 
     # GET /chunked
-    alias N4 = 100
+    comptime N4 = 100
     total = 0
     for _ in range(N4):
         var start = perf_counter_ns()
@@ -570,7 +570,7 @@ def bench_full_pipeline_local() raises:
     report("GET /chunked", total, N4)
 
     # GET + JSON parse
-    alias N5 = 100
+    comptime N5 = 100
     total = 0
     for _ in range(N5):
         var start = perf_counter_ns()
