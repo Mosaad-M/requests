@@ -19,6 +19,6 @@ else
     FLAGS="-I $TLS_PURE"
 fi
 
-mojo build "$MOJO_FILE" -o "$BUILD_DIR/$BASENAME" $FLAGS
+mojo build "$MOJO_FILE" -o "$BUILD_DIR/$BASENAME" $FLAGS -Xlinker -lz
 
 "$BUILD_DIR/$BASENAME" "$@"

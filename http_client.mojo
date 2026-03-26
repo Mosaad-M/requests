@@ -20,8 +20,10 @@
 from tcp import TcpSocket
 from tls.socket import TlsSocket, load_system_ca_bundle
 from crypto.cert import X509Cert
+from crypto.base64 import base64_encode
 from url import Url, parse_url
 from json import JsonValue, parse_json
+from zlib_decompress import zlib_decompress
 
 
 # ============================================================================
@@ -85,8 +87,12 @@ struct HttpResponse(Copyable, Movable):
     var status_text: String
     var headers: HttpHeaders
     var body: String
+    # WARNING: url stores the full request URL including any query parameters.
+    # Error messages may also include the URL. Do not pass secrets in query strings
+    # — use request headers or a POST body instead.
     var url: String
     var ok: Bool  # True if status_code is 200-299
+    var history: List[HttpResponse]  # intermediate redirect responses (empty if no redirects)
 
     def __init__(out self):
         self.status_code = 0
@@ -95,6 +101,7 @@ struct HttpResponse(Copyable, Movable):
         self.body = String("")
         self.url = String("")
         self.ok = False
+        self.history = List[HttpResponse]()
 
     def __copyinit__(out self, copy: Self):
         self.status_code = copy.status_code
@@ -103,6 +110,7 @@ struct HttpResponse(Copyable, Movable):
         self.body = copy.body
         self.url = copy.url
         self.ok = copy.ok
+        self.history = copy.history.copy()
 
     def __moveinit__(out self, deinit take: Self):
         self.status_code = take.status_code
@@ -111,6 +119,18 @@ struct HttpResponse(Copyable, Movable):
         self.body = take.body^
         self.url = take.url^
         self.ok = take.ok
+        self.history = take.history^
+
+    def raise_for_status(self) raises:
+        """Raise an error if the response status code is 4xx or 5xx.
+
+        Raises:
+            Error with message "HTTP <code> <reason>" if status_code >= 400.
+        """
+        if self.status_code >= 400:
+            raise Error(
+                "HTTP " + String(self.status_code) + " " + self.status_text
+            )
 
     def json(self) raises -> JsonValue:
         """Parse response body as JSON.
@@ -122,6 +142,66 @@ struct HttpResponse(Copyable, Movable):
             Error if body is not valid JSON.
         """
         return parse_json(self.body)
+
+
+# ============================================================================
+# Auth Helpers
+# ============================================================================
+
+
+struct BasicAuth(Copyable, Movable):
+    """HTTP Basic Authentication (RFC 7617).
+
+    Encodes credentials as Base64(username:password) and adds the
+    Authorization: Basic <credentials> header to requests.
+    """
+
+    var username: String
+    var password: String
+
+    def __init__(out self, username: String, password: String):
+        self.username = username
+        self.password = password
+
+    def __copyinit__(out self, copy: Self):
+        self.username = copy.username
+        self.password = copy.password
+
+    def __moveinit__(out self, deinit take: Self):
+        self.username = take.username^
+        self.password = take.password^
+
+    def header(self) -> String:
+        """Return the Authorization header value: 'Basic <base64(user:pass)>'."""
+        var credentials = self.username + ":" + self.password
+        var span = credentials.as_bytes()
+        var cred_bytes = List[UInt8](capacity=len(span))
+        for i in range(len(span)):
+            cred_bytes.append(span[i])
+        var encoded = base64_encode(cred_bytes^)
+        return "Basic " + encoded
+
+
+struct BearerAuth(Copyable, Movable):
+    """HTTP Bearer Token Authentication (RFC 6750).
+
+    Adds the Authorization: Bearer <token> header to requests.
+    """
+
+    var token: String
+
+    def __init__(out self, token: String):
+        self.token = token
+
+    def __copyinit__(out self, copy: Self):
+        self.token = copy.token
+
+    def __moveinit__(out self, deinit take: Self):
+        self.token = take.token^
+
+    def header(self) -> String:
+        """Return the Authorization header value: 'Bearer <token>'."""
+        return "Bearer " + self.token
 
 
 # ============================================================================
@@ -144,6 +224,7 @@ struct HttpClient(Movable):
 
     var user_agent: String
     var allow_private_ips: Bool
+    var _timeout_secs: Int  # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
     var _ca_bundle: List[X509Cert]
@@ -159,9 +240,23 @@ struct HttpClient(Movable):
     var _tls_sock: TlsSocket
     var _tls_valid: Bool     # True if _tls_sock is usable
 
-    def __init__(out self):
+    # Cookie jar: parallel lists of (domain, name, value)
+    var _jar_domains: List[String]
+    var _jar_names: List[String]
+    var _jar_values: List[String]
+
+    def __init__(
+        out self,
+        allow_private_ips: Bool = False,
+        timeout_secs: Int = 30,
+    ) raises:
+        if timeout_secs <= 0:
+            raise Error(
+                "HttpClient: timeout_secs must be > 0, got " + String(timeout_secs)
+            )
         self.user_agent = String("MojoHTTP/0.1")
-        self.allow_private_ips = True
+        self.allow_private_ips = allow_private_ips
+        self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
         self._http_key = String("")
@@ -170,10 +265,14 @@ struct HttpClient(Movable):
         self._tls_key = String("")
         self._tls_sock = TlsSocket(0)
         self._tls_valid = False
+        self._jar_domains = List[String]()
+        self._jar_names = List[String]()
+        self._jar_values = List[String]()
 
     def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
         self.allow_private_ips = take.allow_private_ips
+        self._timeout_secs = take._timeout_secs
         self._ca_bundle = take._ca_bundle^
         self._ca_loaded = take._ca_loaded
         self._http_key = take._http_key^
@@ -182,17 +281,54 @@ struct HttpClient(Movable):
         self._tls_key = take._tls_key^
         self._tls_sock = take._tls_sock^
         self._tls_valid = take._tls_valid
+        self._jar_domains = take._jar_domains^
+        self._jar_names = take._jar_names^
+        self._jar_values = take._jar_values^
 
     # === GET ===
 
     def get(mut self, url: String) raises -> HttpResponse:
-        """Perform an HTTP GET request."""
+        """Perform an HTTP GET request, following redirects."""
         var headers = HttpHeaders()
-        return self._do_request("GET", url, String(""), headers)
+        return self._follow_redirects("GET", url, String(""), headers, True, 10)
 
     def get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP GET request with custom headers."""
-        return self._do_request("GET", url, String(""), headers)
+        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+
+    def get(mut self, url: String, params: Dict[String, String]) raises -> HttpResponse:
+        """Perform an HTTP GET request with URL query parameters."""
+        var headers = HttpHeaders()
+        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, 10)
+
+    def get(
+        mut self, url: String, headers: HttpHeaders, params: Dict[String, String]
+    ) raises -> HttpResponse:
+        """Perform an HTTP GET request with custom headers and URL query parameters."""
+        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, 10)
+
+    def get(mut self, url: String, auth: BasicAuth) raises -> HttpResponse:
+        """Perform an HTTP GET request with Basic Authentication."""
+        var headers = HttpHeaders()
+        headers.add("Authorization", auth.header())
+        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+
+    def get(mut self, url: String, auth: BearerAuth) raises -> HttpResponse:
+        """Perform an HTTP GET request with Bearer Token Authentication."""
+        var headers = HttpHeaders()
+        headers.add("Authorization", auth.header())
+        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+
+    def get(
+        mut self, url: String, allow_redirects: Bool
+    ) raises -> HttpResponse:
+        """Perform an HTTP GET request, optionally not following redirects."""
+        var headers = HttpHeaders()
+        return self._follow_redirects("GET", url, String(""), headers, allow_redirects, 10)
+
+    def cookie_count(self) -> Int:
+        """Return the number of cookies stored in the cookie jar."""
+        return len(self._jar_names)
 
     # === POST ===
 
@@ -206,6 +342,15 @@ struct HttpClient(Movable):
     ) raises -> HttpResponse:
         """Perform an HTTP POST request with custom headers."""
         return self._do_request("POST", url, body, headers)
+
+    def post_form(
+        mut self, url: String, data: Dict[String, String]
+    ) raises -> HttpResponse:
+        """Perform an HTTP POST with application/x-www-form-urlencoded body."""
+        var form_body = _encode_params(data)
+        var headers = HttpHeaders()
+        headers.add("Content-Type", "application/x-www-form-urlencoded")
+        return self._do_request("POST", url, form_body, headers)
 
     # === PUT ===
 
@@ -250,7 +395,102 @@ struct HttpClient(Movable):
         """Perform an HTTP PATCH request with custom headers."""
         return self._do_request("PATCH", url, body, headers)
 
+    # === HEAD ===
+
+    def head(mut self, url: String) raises -> HttpResponse:
+        """Perform an HTTP HEAD request. Returns headers with empty body."""
+        var headers = HttpHeaders()
+        return self._do_request("HEAD", url, String(""), headers)
+
+    def head(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
+        """Perform an HTTP HEAD request with custom headers."""
+        return self._do_request("HEAD", url, String(""), headers)
+
+    # === OPTIONS ===
+
+    def options(mut self, url: String) raises -> HttpResponse:
+        """Perform an HTTP OPTIONS request."""
+        var headers = HttpHeaders()
+        return self._do_request("OPTIONS", url, String(""), headers)
+
+    def options(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
+        """Perform an HTTP OPTIONS request with custom headers."""
+        return self._do_request("OPTIONS", url, String(""), headers)
+
     # === Internal ===
+
+    def _follow_redirects(
+        mut self,
+        method: String,
+        url: String,
+        body: String,
+        headers: HttpHeaders,
+        allow_redirects: Bool,
+        max_redirects: Int,
+    ) raises -> HttpResponse:
+        """Perform a request and follow HTTP redirects up to max_redirects hops.
+
+        Redirect semantics:
+        - 301/302/303: follow with GET, discard body
+        - 307/308:     follow with original method and body
+        - Authorization header is stripped when the host changes
+        - response.history contains all intermediate responses
+        - response.url is the final URL after all redirects
+        """
+        if not allow_redirects:
+            return self._do_request(method, url, body, headers)
+
+        var current_method = method
+        var current_url = url
+        var current_body = body
+        var current_headers = headers.copy()
+        var history = List[HttpResponse]()
+
+        for _ in range(max_redirects + 1):
+            var resp = self._do_request(
+                current_method, current_url, current_body, current_headers
+            )
+            var sc = resp.status_code
+            if sc != 301 and sc != 302 and sc != 303 and sc != 307 and sc != 308:
+                resp.history = history^
+                return resp^
+
+            var location = resp.headers.get("Location")
+            if len(location) == 0:
+                # No Location header — return as-is
+                resp.history = history^
+                return resp^
+
+            var next_url = _resolve_url(current_url, location)
+
+            # Determine next method and body
+            var next_method = current_method
+            var next_body = current_body
+            if sc == 301 or sc == 302 or sc == 303:
+                # Convert to GET, drop body (python requests behaviour)
+                next_method = "GET"
+                next_body = String("")
+
+            # Strip Authorization when host changes
+            var next_headers = current_headers.copy()
+            var base_parsed = parse_url(current_url)
+            var next_parsed = parse_url(next_url)
+            if base_parsed.host != next_parsed.host:
+                var stripped = HttpHeaders()
+                for i in range(len(next_headers)):
+                    if not _eq_ignore_case(next_headers._keys[i], "Authorization"):
+                        stripped.add(next_headers._keys[i], next_headers._values[i])
+                next_headers = stripped^
+
+            history.append(resp^)
+            current_method = next_method
+            current_url = next_url
+            current_body = next_body
+            current_headers = next_headers^
+
+        raise Error(
+            "Too many redirects (max " + String(max_redirects) + ")"
+        )
 
     def _do_request(
         mut self,
@@ -285,6 +525,8 @@ struct HttpClient(Movable):
         _append_str(req_buf, "\r\n")
         if not extra_headers.has("Accept"):
             _append_str(req_buf, "Accept: */*\r\n")
+        if not extra_headers.has("Accept-Encoding"):
+            _append_str(req_buf, "Accept-Encoding: gzip, deflate\r\n")
         _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
@@ -294,6 +536,13 @@ struct HttpClient(Movable):
             _append_str(req_buf, "\r\n")
             if not extra_headers.has("Content-Type"):
                 _append_str(req_buf, "Content-Type: application/json\r\n")
+
+        # Auto-send cookies from jar for this host
+        var jar_cookie = self._jar_cookie_for(url.host)
+        if len(jar_cookie) > 0 and not extra_headers.has("Cookie"):
+            _append_str(req_buf, "Cookie: ")
+            _append_str(req_buf, jar_cookie)
+            _append_str(req_buf, "\r\n")
 
         # Add extra headers
         for i in range(len(extra_headers)):
@@ -311,6 +560,8 @@ struct HttpClient(Movable):
         # Step 3: Send request and receive response (TLS or plain TCP)
         var raw_bytes = List[UInt8]()
         var conn_key = url.host + ":" + String(url.port)
+        # HEAD responses have no body — stop reading after headers
+        var skip_body = (method == "HEAD")
 
         if url.scheme == "https":
             # Lazy-load CA bundle (once per HttpClient lifetime)
@@ -323,7 +574,7 @@ struct HttpClient(Movable):
             if self._tls_valid and self._tls_key == conn_key:
                 try:
                     _ = self._tls_sock.send(req_buf.copy())
-                    raw_bytes = _recv_tls_keepalive(self._tls_sock)
+                    raw_bytes = _recv_tls_keepalive(self._tls_sock, skip_body)
                     reused = True
                 except:
                     try:
@@ -339,11 +590,12 @@ struct HttpClient(Movable):
                     url.host,
                     url.port,
                     reject_private_ips=not self.allow_private_ips,
+                    timeout_secs=self._timeout_secs,
                 )
                 var new_tls = TlsSocket(tcp_sock.fd)
                 new_tls.connect(url.host, self._ca_bundle.copy())
                 _ = new_tls.send(req_buf)
-                raw_bytes = _recv_tls_keepalive(new_tls)
+                raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
                 # Evict old cached connection (different host)
                 if self._tls_valid:
                     try:
@@ -360,7 +612,7 @@ struct HttpClient(Movable):
                 try:
                     var request = String(unsafe_from_utf8=req_buf.copy())
                     _ = self._http_sock.send(request)
-                    raw_bytes = _recv_http_keepalive(self._http_sock)
+                    raw_bytes = _recv_http_keepalive(self._http_sock, skip_body)
                     reused = True
                 except:
                     self._http_sock.close()
@@ -372,10 +624,11 @@ struct HttpClient(Movable):
                     url.host,
                     url.port,
                     reject_private_ips=not self.allow_private_ips,
+                    timeout_secs=self._timeout_secs,
                 )
                 var request = String(unsafe_from_utf8=req_buf^)
                 _ = new_sock.send(request)
-                raw_bytes = _recv_http_keepalive(new_sock)
+                raw_bytes = _recv_http_keepalive(new_sock, skip_body)
                 # Evict old cached connection
                 if self._http_valid:
                     self._http_sock.close()
@@ -389,6 +642,28 @@ struct HttpClient(Movable):
         # Convert to string and parse
         var raw_response = String(unsafe_from_utf8=raw_bytes^)
         var parsed = _parse_response(raw_response, url_str)
+
+        # Decompress body if Content-Encoding: gzip or deflate
+        var ce = parsed.headers.get("Content-Encoding")
+        if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip"):
+            var body_bytes = parsed.body.as_bytes()
+            var compressed = List[UInt8](capacity=len(body_bytes))
+            for i in range(len(body_bytes)):
+                compressed.append(body_bytes[i])
+            var decompressed = zlib_decompress(compressed^, True)
+            parsed.body = String(unsafe_from_utf8=decompressed^)
+        elif _eq_ignore_case(ce, "deflate"):
+            var body_bytes = parsed.body.as_bytes()
+            var compressed = List[UInt8](capacity=len(body_bytes))
+            for i in range(len(body_bytes)):
+                compressed.append(body_bytes[i])
+            var decompressed = zlib_decompress(compressed^, False)
+            parsed.body = String(unsafe_from_utf8=decompressed^)
+
+        # Store Set-Cookie headers in the cookie jar
+        var set_cookie = parsed.headers.get("Set-Cookie")
+        if len(set_cookie) > 0:
+            self._jar_store(url.host, set_cookie)
 
         # If server requested connection close, invalidate cache
         var conn_hdr = parsed.headers.get("Connection")
@@ -404,6 +679,90 @@ struct HttpClient(Movable):
                 self._http_valid = False
 
         return parsed^
+
+    def _jar_store(mut self, domain: String, set_cookie: String):
+        """Parse Set-Cookie header value and store name=value in the jar."""
+        var bytes = set_cookie.as_bytes()
+        var n = len(bytes)
+        # Find '=' (name/value separator)
+        var eq = -1
+        var semi = n  # end of name=value before first ';'
+        for i in range(n):
+            if bytes[i] == UInt8(61) and eq < 0:  # '='
+                eq = i
+            if bytes[i] == UInt8(59):  # ';'
+                semi = i
+                break
+        if eq < 0:
+            return  # no name=value, skip
+        var name_buf = List[UInt8](capacity=eq)
+        for i in range(eq):
+            name_buf.append(bytes[i])
+        var val_buf = List[UInt8](capacity=semi - eq - 1)
+        for i in range(eq + 1, semi):
+            val_buf.append(bytes[i])
+        var name = String(unsafe_from_utf8=name_buf^)
+        var value = String(unsafe_from_utf8=val_buf^)
+        # Update if name already exists for this domain, else append
+        for i in range(len(self._jar_names)):
+            if self._jar_domains[i] == domain and self._jar_names[i] == name:
+                self._jar_values[i] = value
+                return
+        self._jar_domains.append(domain)
+        self._jar_names.append(name)
+        self._jar_values.append(value)
+
+    def _jar_cookie_for(self, domain: String) -> String:
+        """Build Cookie header value from jar entries matching domain."""
+        var result = List[UInt8](capacity=64)
+        var first = True
+        for i in range(len(self._jar_names)):
+            if self._jar_domains[i] == domain:
+                if not first:
+                    result.append(UInt8(59))  # ';'
+                    result.append(UInt8(32))  # ' '
+                first = False
+                _append_str(result, self._jar_names[i])
+                result.append(UInt8(61))  # '='
+                _append_str(result, self._jar_values[i])
+        if len(result) == 0:
+            return String("")
+        return String(unsafe_from_utf8=result^)
+
+
+# ============================================================================
+# Module-Level Convenience Functions (Phase 6.1)
+# ============================================================================
+
+
+def http_get(url: String) raises -> HttpResponse:
+    """One-shot HTTP GET with a default client."""
+    var client = HttpClient()
+    return client.get(url)
+
+
+def http_post(url: String, body: String) raises -> HttpResponse:
+    """One-shot HTTP POST with a default client."""
+    var client = HttpClient()
+    return client.post(url, body)
+
+
+def http_put(url: String, body: String) raises -> HttpResponse:
+    """One-shot HTTP PUT with a default client."""
+    var client = HttpClient()
+    return client.put(url, body)
+
+
+def http_delete(url: String) raises -> HttpResponse:
+    """One-shot HTTP DELETE with a default client."""
+    var client = HttpClient()
+    return client.delete(url)
+
+
+def http_patch(url: String, body: String) raises -> HttpResponse:
+    """One-shot HTTP PATCH with a default client."""
+    var client = HttpClient()
+    return client.patch(url, body)
 
 
 # ============================================================================
@@ -599,7 +958,9 @@ def _str_contains(haystack: String, needle: String) -> Bool:
     return False
 
 
-def _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
+def _recv_tls_keepalive(
+    mut sock: TlsSocket, skip_body: Bool = False
+) raises -> List[UInt8]:
     """Read exactly one complete HTTP response from a TLS keep-alive connection.
 
     Phase 1: accumulate data until \\r\\n\\r\\n (end of headers) is found.
@@ -607,6 +968,9 @@ def _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
       - Content-Length: N  → read exactly N body bytes
       - Transfer-Encoding: chunked → read until terminal 0-chunk
       - Neither → read until connection closes (graceful fallback)
+
+    Args:
+        skip_body: If True, stop after headers (used for HEAD responses).
     """
     var buf = List[UInt8]()
 
@@ -619,9 +983,18 @@ def _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
         _list_append(buf, chunk)
         header_end = _buf_find_crlf_crlf(buf)
 
+    # HEAD response: no body — return headers only
+    if skip_body:
+        var headers_only = List[UInt8](capacity=header_end + 4)
+        for i in range(header_end + 4):
+            headers_only.append(buf[i])
+        return headers_only^
+
     # Phase 2: read body based on transfer mode
     var cl = _buf_content_length(buf, header_end)
     if cl >= 0:
+        # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
+        buf.reserve(header_end + 4 + cl)
         var body_start = header_end + 4
         var have = len(buf) - body_start
         if cl > have:
@@ -661,10 +1034,15 @@ def _recv_tls_keepalive(mut sock: TlsSocket) raises -> List[UInt8]:
         return buf^
 
 
-def _recv_http_keepalive(mut sock: TcpSocket) raises -> List[UInt8]:
+def _recv_http_keepalive(
+    mut sock: TcpSocket, skip_body: Bool = False
+) raises -> List[UInt8]:
     """Read exactly one complete HTTP response from a TCP keep-alive connection.
 
     Same phase logic as _recv_tls_keepalive but uses TcpSocket primitives.
+
+    Args:
+        skip_body: If True, stop after headers (used for HEAD responses).
     """
     var buf = List[UInt8]()
 
@@ -677,9 +1055,18 @@ def _recv_http_keepalive(mut sock: TcpSocket) raises -> List[UInt8]:
         _list_append(buf, chunk)
         header_end = _buf_find_crlf_crlf(buf)
 
+    # HEAD response: no body — return headers only
+    if skip_body:
+        var headers_only = List[UInt8](capacity=header_end + 4)
+        for i in range(header_end + 4):
+            headers_only.append(buf[i])
+        return headers_only^
+
     # Phase 2: read body based on transfer mode
     var cl = _buf_content_length(buf, header_end)
     if cl >= 0:
+        # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
+        buf.reserve(header_end + 4 + cl)
         var body_start = header_end + 4
         var have = len(buf) - body_start
         if cl > have:
@@ -744,6 +1131,186 @@ def _validate_path(path: String) raises:
         var b = bytes[i]
         if b == 13 or b == 10:  # \r, \n
             raise Error("invalid request path: contains CR or LF")
+
+
+# ============================================================================
+# Query String / Params Encoding
+# ============================================================================
+
+
+def _is_unreserved(c: UInt8) -> Bool:
+    """RFC 3986: unreserved characters don't need percent-encoding."""
+    # A-Z, a-z, 0-9, -, _, ., ~
+    if c >= UInt8(65) and c <= UInt8(90):   # A-Z
+        return True
+    if c >= UInt8(97) and c <= UInt8(122):  # a-z
+        return True
+    if c >= UInt8(48) and c <= UInt8(57):   # 0-9
+        return True
+    if c == UInt8(45) or c == UInt8(95) or c == UInt8(46) or c == UInt8(126):
+        return True  # - _ . ~
+    return False
+
+
+alias _HEX_CHARS = "0123456789ABCDEF"
+
+
+def _percent_encode(s: String) -> String:
+    """Percent-encode a string per RFC 3986 (for query string values)."""
+    var bytes = s.as_bytes()
+    var result = List[UInt8](capacity=len(s) * 3)
+    var hex = _HEX_CHARS.as_bytes()
+    for i in range(len(bytes)):
+        var c = bytes[i]
+        if _is_unreserved(c):
+            result.append(c)
+        else:
+            result.append(UInt8(37))  # '%'
+            result.append(hex[(Int(c) >> 4) & 0xF])
+            result.append(hex[Int(c) & 0xF])
+    return String(unsafe_from_utf8=result^)
+
+
+def _encode_params(params: Dict[String, String]) raises -> String:
+    """Encode a Dict[String, String] as a URL query string (key=value&key2=value2)."""
+    var result = List[UInt8](capacity=128)
+    var first = True
+    for key in params.keys():
+        if not first:
+            result.append(UInt8(38))  # '&'
+        first = False
+        var encoded_key = _percent_encode(key)
+        try:
+            var encoded_val = _percent_encode(params[key])
+            _append_str(result, encoded_key)
+            result.append(UInt8(61))  # '='
+            _append_str(result, encoded_val)
+        except:
+            pass
+    return String(unsafe_from_utf8=result^)
+
+
+def _append_params_to_url(url: String, params: Dict[String, String]) raises -> String:
+    """Append encoded params to a URL, merging with existing query string."""
+    if len(params) == 0:
+        return url
+    var query = _encode_params(params)
+    if len(query) == 0:
+        return url
+    # Check if URL already has a query string (contains '?')
+    var url_bytes = url.as_bytes()
+    var has_query = False
+    for i in range(len(url_bytes)):
+        if url_bytes[i] == UInt8(63):  # '?'
+            has_query = True
+            break
+    if has_query:
+        return url + "&" + query
+    else:
+        return url + "?" + query
+
+
+def _encode_cookie_header(cookies: Dict[String, String]) raises -> String:
+    """Encode a Dict[String, String] as a Cookie header value (name=value; name2=value2)."""
+    var result = List[UInt8](capacity=64)
+    var first = True
+    for key in cookies.keys():
+        if not first:
+            result.append(UInt8(59))  # ';'
+            result.append(UInt8(32))  # ' '
+        first = False
+        _append_str(result, key)
+        result.append(UInt8(61))  # '='
+        try:
+            _append_str(result, cookies[key])
+        except:
+            pass
+    return String(unsafe_from_utf8=result^)
+
+
+def _resolve_url(base_url: String, location: String) raises -> String:
+    """Resolve a redirect Location against the base URL.
+
+    Handles:
+    - Absolute URLs (start with http:// or https://) — returned as-is
+    - Root-relative paths (start with /) — prepend scheme+host from base_url
+    - Relative paths — prepend scheme+host+directory from base_url
+    """
+    var loc_bytes = location.as_bytes()
+    if len(loc_bytes) == 0:
+        return base_url
+
+    # Absolute URL check: starts with "http://" or "https://"
+    var is_abs = False
+    if len(location) >= 7:
+        var h = loc_bytes
+        if (
+            h[0] == UInt8(ord("h"))
+            and h[1] == UInt8(ord("t"))
+            and h[2] == UInt8(ord("t"))
+            and h[3] == UInt8(ord("p"))
+        ):
+            if h[4] == UInt8(ord(":")) and h[5] == UInt8(ord("/")) and h[6] == UInt8(ord("/")):
+                is_abs = True
+            elif (
+                len(location) >= 8
+                and h[4] == UInt8(ord("s"))
+                and h[5] == UInt8(ord(":"))
+                and h[6] == UInt8(ord("/"))
+                and h[7] == UInt8(ord("/"))
+            ):
+                is_abs = True
+    if is_abs:
+        return location
+
+    # Extract origin (scheme://host[:port]) from base_url
+    # Find "://" then find next "/" after that
+    var base_bytes = base_url.as_bytes()
+    var origin_end = -1
+    var i = 0
+    while i < len(base_bytes) - 2:
+        if (
+            base_bytes[i] == UInt8(ord(":"))
+            and base_bytes[i + 1] == UInt8(ord("/"))
+            and base_bytes[i + 2] == UInt8(ord("/"))
+        ):
+            # Skip "://" then find next "/"
+            var j = i + 3
+            while j < len(base_bytes):
+                if base_bytes[j] == UInt8(ord("/")):
+                    origin_end = j
+                    break
+                j += 1
+            if origin_end < 0:
+                origin_end = len(base_bytes)
+            break
+        i += 1
+
+    if origin_end < 0:
+        return location
+
+    # Build origin string: base_url[0..origin_end)
+    var origin_buf = List[UInt8](capacity=origin_end)
+    for k in range(origin_end):
+        origin_buf.append(base_bytes[k])
+    var origin = String(unsafe_from_utf8=origin_buf^)
+
+    # Root-relative path (starts with /)
+    if loc_bytes[0] == UInt8(ord("/")):
+        return origin + location
+
+    # Relative path — strip last component from base_url path
+    var base_path_end = len(base_url)
+    var j = len(base_bytes) - 1
+    while j >= origin_end:
+        if base_bytes[j] == UInt8(ord("/")):
+            base_path_end = j + 1
+            break
+        j -= 1
+    var prefix_buf = List[UInt8](capacity=base_path_end)
+    for k in range(base_path_end):
+        prefix_buf.append(base_bytes[k])
+    return String(unsafe_from_utf8=prefix_buf^) + location
 
 
 # ============================================================================

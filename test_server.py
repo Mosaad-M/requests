@@ -61,6 +61,101 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._respond(200, "OK", {"query": query})
         elif self.path == "/method":
             self._respond(200, "OK", {"method": "GET"})
+        elif self.path == "/redirect/301":
+            self.send_response(301, "Moved Permanently")
+            self.send_header("Location", "/redirect/target")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/302":
+            self.send_response(302, "Found")
+            self.send_header("Location", "/redirect/target")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/303":
+            self.send_response(303, "See Other")
+            self.send_header("Location", "/redirect/target")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/307":
+            self.send_response(307, "Temporary Redirect")
+            self.send_header("Location", "/redirect/target")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/308":
+            self.send_response(308, "Permanent Redirect")
+            self.send_header("Location", "/redirect/target")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/target":
+            self._respond(200, "OK", {"message": "redirect target", "method": "GET"})
+        elif self.path == "/redirect/loop":
+            self.send_response(302, "Found")
+            self.send_header("Location", "/redirect/loop")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/auth-strip":
+            # Redirect to a different host (simulated as relative, check headers)
+            self.send_response(302, "Found")
+            self.send_header("Location", "/headers")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/gzip":
+            import gzip as _gzip
+            body = json.dumps({"encoding": "gzip", "message": "hello compressed"})
+            compressed = _gzip.compress(body.encode())
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.send_header("Connection", "close")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.end_headers()
+            self.wfile.write(compressed)
+        elif self.path == "/deflate":
+            import zlib as _zlib
+            body = json.dumps({"encoding": "deflate", "message": "hello compressed"})
+            compressed = _zlib.compress(body.encode())
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "deflate")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.send_header("Connection", "close")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.end_headers()
+            self.wfile.write(compressed)
+        elif self.path == "/identity":
+            body = json.dumps({"encoding": "identity", "message": "plain text"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "identity")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/accept-encoding":
+            ae = self.headers.get("Accept-Encoding", "")
+            self._respond(200, "OK", {"accept_encoding": ae})
+        elif self.path == "/set-cookie":
+            body = json.dumps({"message": "cookie set"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "session=abc123")
+            self.send_header("Connection", "close")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/check-cookie":
+            cookie = self.headers.get("Cookie", "")
+            self._respond(200, "OK", {"cookie": cookie})
         elif self.path == "/shutdown":
             self._respond(200, "OK", {"message": "shutting down"})
             # Schedule shutdown
@@ -90,8 +185,45 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_echo()
         elif self.path == "/method":
             self._handle_method()
+        elif self.path == "/redirect/307":
+            self.send_response(307, "Temporary Redirect")
+            self.send_header("Location", "/echo")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/redirect/308":
+            self.send_response(308, "Permanent Redirect")
+            self.send_header("Location", "/echo")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
         else:
             self._respond(404, "Not Found", {"error": "unknown path"})
+
+    def do_HEAD(self):
+        # HEAD returns same headers as GET but no body
+        if self.path == "/":
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/status/200":
+            self.send_response(200, "OK")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        else:
+            self.send_response(404, "Not Found")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200, "OK")
+        self.send_header("Allow", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.send_header("X-Test-Server", "mojo-test/1.0")
+        self.end_headers()
 
     def do_POST(self):
         self._route_non_get()
