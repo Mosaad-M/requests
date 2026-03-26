@@ -10,10 +10,10 @@
     },
     {
       "name": "tcp",
-      "version": "1.0.2",
-      "source_url": "https://github.com/Mosaad-M/tcp/archive/v1.0.2.tar.gz",
-      "sha256": "9b92186adf87684c06eae448bbf9ba7ca4478762688e490a3b2c7616b1bb19cf",
-      "install_path": "/home/mmosaad/.mojo/packages/tcp/1.0.2"
+      "version": "1.0.4",
+      "source_url": "https://github.com/Mosaad-M/tcp/archive/refs/tags/v1.0.4.tar.gz",
+      "sha256": "ca4e6ada8df3042365f854dd367a407f6edc4729878057f2caf7ee287a827c62",
+      "install_path": "/home/mmosaad/.mojo/packages/tcp/1.0.4"
     },
     {
       "name": "url",
