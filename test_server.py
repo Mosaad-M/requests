@@ -174,6 +174,27 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-path":
+            body = json.dumps({"message": "cookie with path set"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "pathcookie=yes; Path=/api")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/api/check-cookie":
+            cookie = self.headers.get("Cookie", "")
+            self._respond(200, "OK", {"cookie": cookie})
+        elif self.path == "/set-cookie-secure":
+            body = json.dumps({"message": "secure cookie set"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "securecookie=yes; Secure")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
         elif self.path == "/stream/medium":
             body = b"A" * (256 * 1024)
             self.send_response(200, "OK")

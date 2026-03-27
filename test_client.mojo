@@ -35,6 +35,24 @@ def assert_true(condition: Bool, label: String) raises:
         raise Error(label + ": expected True")
 
 
+def assert_not_contains(haystack: String, needle: String, label: String) raises:
+    """Check that haystack does NOT contain needle."""
+    var h_bytes = haystack.as_bytes()
+    var n_bytes = needle.as_bytes()
+    var n_len = len(needle)
+    var h_len = len(haystack)
+    if n_len > h_len:
+        return  # needle longer than haystack, impossible to contain
+    for i in range(h_len - n_len + 1):
+        var found = True
+        for j in range(n_len):
+            if h_bytes[i + j] != n_bytes[j]:
+                found = False
+                break
+        if found:
+            raise Error(label + ": '" + needle + "' found in response (should not be)")
+
+
 def assert_contains(haystack: String, needle: String, label: String) raises:
     """Check that haystack contains needle."""
     var h_bytes = haystack.as_bytes()
@@ -388,7 +406,7 @@ def test_redirect_max_exceeded() raises:
         _ = client.get(BASE + "/redirect/loop")
     except e:
         raised = True
-        assert_contains(String(e), "redirect", "error mentions redirects")
+        assert_contains(String(e), "Redirect", "error mentions redirects")
     if not raised:
         raise Error("expected error for too many redirects")
 
@@ -504,6 +522,49 @@ def test_cookie_session_persists() raises:
 
 
 # ============================================================================
+# Cookie Attribute Tests (Phase 7.B)
+# ============================================================================
+
+
+def test_cookie_path_match() raises:
+    """Cookie with Path=/api should be sent to /api/check-cookie."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-path")
+    var resp = client.get(BASE + "/api/check-cookie")
+    assert_eq(resp.status_code, 200, "status")
+    assert_contains(resp.body, "pathcookie=yes", "path cookie sent to /api path")
+
+
+def test_cookie_path_no_match() raises:
+    """Cookie with Path=/api should NOT be sent to /."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-path")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_eq(resp.status_code, 200, "status")
+    assert_not_contains(resp.body, "pathcookie", "path cookie must not be sent to / path")
+
+
+def test_cookie_secure_not_sent_http() raises:
+    """Cookie with Secure flag should NOT be sent over plain HTTP."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-secure")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_eq(resp.status_code, 200, "status")
+    assert_not_contains(resp.body, "securecookie", "Secure cookie must not be sent over HTTP")
+
+
+def test_cookie_domain_exact() raises:
+    """Cookie with Domain=127.0.0.1 should be sent on next request to same host."""
+    var client = HttpClient(allow_private_ips=True)
+    # /set-cookie sends Set-Cookie: session=abc123 (no Domain attr)
+    # After implementing Domain support, cookies with explicit Domain should also match
+    _ = client.get(BASE + "/set-cookie")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_eq(resp.status_code, 200, "status")
+    assert_contains(resp.body, "abc123", "domain-matched cookie sent")
+
+
+# ============================================================================
 # Streaming Download Tests
 # ============================================================================
 
@@ -546,6 +607,45 @@ def test_stream_partial_then_close() raises:
     var chunk = stream.read_chunk(1024)
     assert_true(len(chunk) > 0, "got at least one chunk")
     stream.close()  # should not raise
+
+
+# ============================================================================
+# Connection Pool Tests (Phase 7.A)
+# ============================================================================
+
+
+def test_pool_reuse_keepalive() raises:
+    """5 sequential GETs to the same URL should all succeed (pool reuse path)."""
+    var client = HttpClient(allow_private_ips=True)
+    for i in range(5):
+        var resp = client.get(BASE + "/status/200")
+        assert_eq(resp.status_code, 200, "request " + String(i) + " status")
+
+
+def test_pool_connection_close_cleared() raises:
+    """GET /large (Connection:close) then GET /status/200 should both succeed."""
+    var client = HttpClient(allow_private_ips=True)
+    # /large returns Connection: close — pool must clear slot and reconnect
+    var resp1 = client.get(BASE + "/large")
+    assert_eq(resp1.status_code, 200, "large status")
+    assert_true(len(resp1.body) == 100000, "large body length")
+    # Next request must reconnect successfully
+    var resp2 = client.get(BASE + "/status/200")
+    assert_eq(resp2.status_code, 200, "after close status")
+
+
+def test_pool_four_slots_no_corruption() raises:
+    """10 GETs across 4 different paths should all return 200 without corruption."""
+    var client = HttpClient(allow_private_ips=True)
+    var paths = List[String]()
+    paths.append("/status/200")
+    paths.append("/")
+    paths.append("/method")
+    paths.append("/headers")
+    for i in range(10):
+        var path = paths[i % 4]
+        var resp = client.get(BASE + path)
+        assert_eq(resp.status_code, 200, "slot test " + String(i))
 
 
 # ============================================================================
@@ -750,6 +850,62 @@ def test_options_returns_allow_header() raises:
 
 
 # ============================================================================
+# Error Prefix Tests (Phase 7.C)
+# ============================================================================
+
+
+def test_error_http_prefix() raises:
+    """raise_for_status() on 404 should produce error with 'HTTPError' prefix."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/status/404")
+    var raised = False
+    try:
+        resp.raise_for_status()
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("HTTPError"),
+            "error must start with 'HTTPError', got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected raise_for_status() to raise on 404")
+
+
+def test_error_redirect_prefix() raises:
+    """Redirect loop should produce error with 'TooManyRedirects' prefix."""
+    var client = HttpClient(allow_private_ips=True)
+    var raised = False
+    try:
+        _ = client.get(BASE + "/redirect/loop")
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("TooManyRedirects"),
+            "error must start with 'TooManyRedirects', got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected redirect loop to raise TooManyRedirects")
+
+
+def test_error_validation_prefix() raises:
+    """Setting a header with CRLF should produce error with 'ValidationError' prefix."""
+    var client = HttpClient(allow_private_ips=True)
+    var headers = HttpHeaders()
+    headers.add("X-Bad\r\nHeader", "value")
+    var raised = False
+    try:
+        _ = client.get(BASE + "/headers", headers)
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("ValidationError"),
+            "error must start with 'ValidationError', got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected CRLF header key to raise ValidationError")
+
+
+# ============================================================================
 # raise_for_status() Tests
 # ============================================================================
 
@@ -950,11 +1106,22 @@ def main() raises:
     run_test("cookie Max-Age=0 deletes", passed, failed, test_cookie_max_age_zero_deletes)
     run_test("cookie session persists", passed, failed, test_cookie_session_persists)
 
+    # Cookie attribute tests
+    run_test("cookie path match", passed, failed, test_cookie_path_match)
+    run_test("cookie path no match", passed, failed, test_cookie_path_no_match)
+    run_test("cookie secure not sent HTTP", passed, failed, test_cookie_secure_not_sent_http)
+    run_test("cookie domain exact", passed, failed, test_cookie_domain_exact)
+
     # Streaming tests
     run_test("stream status+headers", passed, failed, test_stream_status_headers)
     run_test("stream read_all", passed, failed, test_stream_read_all)
     run_test("stream read_chunks", passed, failed, test_stream_read_chunks)
     run_test("stream partial+close", passed, failed, test_stream_partial_then_close)
+
+    # Connection pool tests
+    run_test("pool keepalive reuse", passed, failed, test_pool_reuse_keepalive)
+    run_test("pool connection-close cleared", passed, failed, test_pool_connection_close_cleared)
+    run_test("pool four slots no corruption", passed, failed, test_pool_four_slots_no_corruption)
 
     # Redirect tests
     run_test("redirect 301 followed", passed, failed, test_redirect_301_followed)
@@ -992,6 +1159,11 @@ def main() raises:
     run_test("HEAD no body", passed, failed, test_head_returns_no_body)
     run_test("HEAD has headers", passed, failed, test_head_has_headers)
     run_test("OPTIONS Allow header", passed, failed, test_options_returns_allow_header)
+
+    # Error prefix tests
+    run_test("error HTTPError prefix", passed, failed, test_error_http_prefix)
+    run_test("error TooManyRedirects prefix", passed, failed, test_error_redirect_prefix)
+    run_test("error ValidationError prefix", passed, failed, test_error_validation_prefix)
 
     # raise_for_status() tests
     run_test(

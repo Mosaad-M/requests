@@ -12,7 +12,7 @@
 #     4. Send request, receive response
 #     5. Parse response (status line, headers, body)
 #
-# Uses Connection: keep-alive and a single-entry connection cache per scheme
+# Uses Connection: keep-alive and an LRU-4 connection pool per scheme
 # to reuse TCP+TLS connections across sequential requests to the same host.
 #
 # ============================================================================
@@ -43,6 +43,54 @@ fn _unix_time_secs() -> Int64:
     var t = ts.bitcast[Int64]()[]
     ts.free()
     return t
+
+
+# ============================================================================
+# Error Prefix Constants and Helpers
+# ============================================================================
+#
+# All raise sites use these helpers so callers can distinguish error categories
+# via String(e).startswith("HTTPError:") etc.
+#
+# Categories:
+#   HTTPError        — non-2xx status (raise_for_status)
+#   ConnectionError  — socket / DNS / TLS failure
+#   TooManyRedirects — redirect limit exceeded
+#   ValidationError  — bad input (header keys/values, method, port, host)
+#   ParseError       — malformed HTTP response
+#   ChunkedBodyError — chunked encoding protocol violation
+
+
+alias ERR_HTTP = "HTTPError"
+alias ERR_CONNECTION = "ConnectionError"
+alias ERR_REDIRECT = "TooManyRedirects"
+alias ERR_VALIDATION = "ValidationError"
+alias ERR_PARSE = "ParseError"
+alias ERR_CHUNKED = "ChunkedBodyError"
+
+
+def _err_http(status: Int, text: String) -> Error:
+    return Error(ERR_HTTP + ": " + String(status) + " " + text)
+
+
+def _err_connection(msg: String) -> Error:
+    return Error(ERR_CONNECTION + ": " + msg)
+
+
+def _err_redirect(max: Int) -> Error:
+    return Error(ERR_REDIRECT + ": max " + String(max))
+
+
+def _err_validation(msg: String) -> Error:
+    return Error(ERR_VALIDATION + ": " + msg)
+
+
+def _err_parse(msg: String) -> Error:
+    return Error(ERR_PARSE + ": " + msg)
+
+
+def _err_chunked(msg: String) -> Error:
+    return Error(ERR_CHUNKED + ": " + msg)
 
 
 # ============================================================================
@@ -147,9 +195,7 @@ struct HttpResponse(Copyable, Movable):
             Error with message "HTTP <code> <reason>" if status_code >= 400.
         """
         if self.status_code >= 400:
-            raise Error(
-                "HTTP " + String(self.status_code) + " " + self.status_text
-            )
+            raise _err_http(self.status_code, self.status_text)
 
     def json(self) raises -> JsonValue:
         """Parse response body as JSON.
@@ -231,8 +277,8 @@ struct BearerAuth(Copyable, Movable):
 struct HttpClient(Movable):
     """HTTP client for making HTTP requests (GET, POST, PUT, DELETE, PATCH).
 
-    Caches the CA bundle after the first HTTPS request and maintains a
-    single-entry connection pool per scheme to reuse keep-alive connections.
+    Caches the CA bundle after the first HTTPS request and maintains an
+    LRU-4 connection pool per scheme to reuse keep-alive connections.
 
     Usage:
         var client = HttpClient()
@@ -249,22 +295,34 @@ struct HttpClient(Movable):
     var _ca_bundle: List[X509Cert]
     var _ca_loaded: Bool
 
-    # HTTP connection pool (one entry)
-    var _http_key: String    # "host:port" or empty = no cache
-    var _http_sock: TcpSocket
-    var _http_valid: Bool    # True if _http_sock is usable
+    # HTTP connection pool — LRU-4
+    # Metadata in List[String]/List[Int64] (CollectionElement); sockets as flat fields
+    # _http_times[i] == 0 means slot unused; >0 == last-used Unix timestamp
+    var _http_keys: List[String]
+    var _http_times: List[Int64]
+    var _http_sock0: TcpSocket
+    var _http_sock1: TcpSocket
+    var _http_sock2: TcpSocket
+    var _http_sock3: TcpSocket
 
-    # HTTPS connection pool (one entry)
-    var _tls_key: String     # "host:port" or empty = no cache
-    var _tls_sock: TlsSocket
-    var _tls_valid: Bool     # True if _tls_sock is usable
+    # HTTPS connection pool — LRU-4 (same pattern)
+    var _tls_keys: List[String]
+    var _tls_times: List[Int64]
+    var _tls_sock0: TlsSocket
+    var _tls_sock1: TlsSocket
+    var _tls_sock2: TlsSocket
+    var _tls_sock3: TlsSocket
 
-    # Cookie jar: parallel lists of (domain, name, value, expiry_unix_secs)
+    # Cookie jar: parallel lists (RFC 6265 attributes per entry)
     # expiry == 0 means session cookie (no expiry); >0 means Unix timestamp
+    # path defaults to "/" if not set; secure=True → HTTPS only; host_only=True → exact host match
     var _jar_domains: List[String]
     var _jar_names: List[String]
     var _jar_values: List[String]
     var _jar_expiries: List[Int64]
+    var _jar_paths: List[String]
+    var _jar_secure: List[Bool]
+    var _jar_host_only: List[Bool]
 
     def __init__(
         out self,
@@ -272,24 +330,39 @@ struct HttpClient(Movable):
         timeout_secs: Int = 30,
     ) raises:
         if timeout_secs <= 0:
-            raise Error(
-                "HttpClient: timeout_secs must be > 0, got " + String(timeout_secs)
-            )
+            raise _err_validation("timeout_secs must be > 0, got " + String(timeout_secs))
         self.user_agent = String("MojoHTTP/0.1")
         self.allow_private_ips = allow_private_ips
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
-        self._http_key = String("")
-        self._http_sock = TcpSocket()
-        self._http_valid = False
-        self._tls_key = String("")
-        self._tls_sock = TlsSocket(0)
-        self._tls_valid = False
+        # HTTP pool — 4 slots, all unused
+        self._http_keys = List[String]()
+        self._http_times = List[Int64]()
+        for _ in range(4):
+            self._http_keys.append(String(""))
+            self._http_times.append(Int64(0))
+        self._http_sock0 = TcpSocket()
+        self._http_sock1 = TcpSocket()
+        self._http_sock2 = TcpSocket()
+        self._http_sock3 = TcpSocket()
+        # TLS pool — 4 slots, all unused
+        self._tls_keys = List[String]()
+        self._tls_times = List[Int64]()
+        for _ in range(4):
+            self._tls_keys.append(String(""))
+            self._tls_times.append(Int64(0))
+        self._tls_sock0 = TlsSocket(0)
+        self._tls_sock1 = TlsSocket(0)
+        self._tls_sock2 = TlsSocket(0)
+        self._tls_sock3 = TlsSocket(0)
         self._jar_domains = List[String]()
         self._jar_names = List[String]()
         self._jar_values = List[String]()
         self._jar_expiries = List[Int64]()
+        self._jar_paths = List[String]()
+        self._jar_secure = List[Bool]()
+        self._jar_host_only = List[Bool]()
 
     def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
@@ -297,16 +370,25 @@ struct HttpClient(Movable):
         self._timeout_secs = take._timeout_secs
         self._ca_bundle = take._ca_bundle^
         self._ca_loaded = take._ca_loaded
-        self._http_key = take._http_key^
-        self._http_sock = take._http_sock^
-        self._http_valid = take._http_valid
-        self._tls_key = take._tls_key^
-        self._tls_sock = take._tls_sock^
-        self._tls_valid = take._tls_valid
+        self._http_keys = take._http_keys^
+        self._http_times = take._http_times^
+        self._http_sock0 = take._http_sock0^
+        self._http_sock1 = take._http_sock1^
+        self._http_sock2 = take._http_sock2^
+        self._http_sock3 = take._http_sock3^
+        self._tls_keys = take._tls_keys^
+        self._tls_times = take._tls_times^
+        self._tls_sock0 = take._tls_sock0^
+        self._tls_sock1 = take._tls_sock1^
+        self._tls_sock2 = take._tls_sock2^
+        self._tls_sock3 = take._tls_sock3^
         self._jar_domains = take._jar_domains^
         self._jar_names = take._jar_names^
         self._jar_values = take._jar_values^
         self._jar_expiries = take._jar_expiries^
+        self._jar_paths = take._jar_paths^
+        self._jar_secure = take._jar_secure^
+        self._jar_host_only = take._jar_host_only^
 
     # === GET ===
 
@@ -398,7 +480,7 @@ struct HttpClient(Movable):
             while header_end < 0:
                 var chunk = tls_sock.recv(4096)
                 if len(chunk) == 0:
-                    raise Error("stream: connection closed before headers")
+                    raise _err_connection("stream: connection closed before headers")
                 _list_append(raw_buf, chunk)
                 header_end = _buf_find_crlf_crlf(raw_buf)
         else:
@@ -412,7 +494,7 @@ struct HttpClient(Movable):
             while header_end < 0:
                 var chunk = http_sock.recv_bytes(4096)
                 if len(chunk) == 0:
-                    raise Error("stream: connection closed before headers")
+                    raise _err_connection("stream: connection closed before headers")
                 _list_append(raw_buf, chunk)
                 header_end = _buf_find_crlf_crlf(raw_buf)
 
@@ -595,9 +677,7 @@ struct HttpClient(Movable):
             current_body = next_body
             current_headers = next_headers^
 
-        raise Error(
-            "Too many redirects (max " + String(max_redirects) + ")"
-        )
+        raise _err_redirect(max_redirects)
 
     def _do_request(
         mut self,
@@ -645,7 +725,7 @@ struct HttpClient(Movable):
                 _append_str(req_buf, "Content-Type: application/json\r\n")
 
         # Auto-send cookies from jar for this host
-        var jar_cookie = self._jar_cookie_for(url.host)
+        var jar_cookie = self._jar_cookie_for(url.host, url.request_path(), url.scheme == "https")
         if len(jar_cookie) > 0 and not extra_headers.has("Cookie"):
             _append_str(req_buf, "Cookie: ")
             _append_str(req_buf, jar_cookie)
@@ -670,28 +750,30 @@ struct HttpClient(Movable):
         # HEAD responses have no body — stop reading after headers
         var skip_body = (method == "HEAD")
 
+        var tls_hit = -1
+        var http_hit = -1
+
         if url.scheme == "https":
             # Lazy-load CA bundle (once per HttpClient lifetime)
             if not self._ca_loaded:
                 self._ca_bundle = load_system_ca_bundle()
                 self._ca_loaded = True
 
-            # Try reusing cached TLS connection
-            var reused = False
-            if self._tls_valid and self._tls_key == conn_key:
+            # Phase 1: try to reuse a cached TLS slot
+            for i in range(4):
+                if self._tls_keys[i] == conn_key and self._tls_times[i] > Int64(0):
+                    tls_hit = i
+                    break
+            if tls_hit >= 0:
                 try:
-                    _ = self._tls_sock.send(req_buf.copy())
-                    raw_bytes = _recv_tls_keepalive(self._tls_sock, skip_body)
-                    reused = True
+                    raw_bytes = self._tls_try_reuse(tls_hit, req_buf.copy(), skip_body)
+                    self._tls_times[tls_hit] = _unix_time_secs()
                 except:
-                    try:
-                        self._tls_sock.close()
-                    except:
-                        pass
-                    self._tls_valid = False
+                    self._tls_close_slot(tls_hit)
+                    tls_hit = -1
 
-            if not reused:
-                # New TCP+TLS connection
+            # Phase 2: new TLS connection if no reuse
+            if tls_hit < 0:
                 var tcp_sock = TcpSocket()
                 tcp_sock.connect(
                     url.host,
@@ -703,29 +785,39 @@ struct HttpClient(Movable):
                 new_tls.connect(url.host, self._ca_bundle.copy())
                 _ = new_tls.send(req_buf)
                 raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
-                # Evict old cached connection (different host)
-                if self._tls_valid:
-                    try:
-                        self._tls_sock.close()
-                    except:
-                        pass
-                self._tls_sock = new_tls^
-                self._tls_key = conn_key
-                self._tls_valid = True
+                var evict = self._tls_evict_slot()
+                if self._tls_times[evict] > Int64(0):
+                    self._tls_close_slot(evict)
+                # Store new socket into evicted slot
+                self._tls_keys[evict] = conn_key
+                self._tls_times[evict] = _unix_time_secs()
+                if evict == 0:
+                    self._tls_sock0 = new_tls^
+                elif evict == 1:
+                    self._tls_sock1 = new_tls^
+                elif evict == 2:
+                    self._tls_sock2 = new_tls^
+                else:
+                    self._tls_sock3 = new_tls^
+                tls_hit = evict
         else:
             # Plain HTTP
-            var reused = False
-            if self._http_valid and self._http_key == conn_key:
+            # Phase 1: try to reuse a cached HTTP slot
+            for i in range(4):
+                if self._http_keys[i] == conn_key and self._http_times[i] > Int64(0):
+                    http_hit = i
+                    break
+            if http_hit >= 0:
                 try:
                     var request = String(unsafe_from_utf8=req_buf.copy())
-                    _ = self._http_sock.send(request)
-                    raw_bytes = _recv_http_keepalive(self._http_sock, skip_body)
-                    reused = True
+                    raw_bytes = self._http_try_reuse(http_hit, request, skip_body)
+                    self._http_times[http_hit] = _unix_time_secs()
                 except:
-                    self._http_sock.close()
-                    self._http_valid = False
+                    self._http_close_slot(http_hit)
+                    http_hit = -1
 
-            if not reused:
+            # Phase 2: new HTTP connection if no reuse
+            if http_hit < 0:
                 var new_sock = TcpSocket()
                 new_sock.connect(
                     url.host,
@@ -736,15 +828,24 @@ struct HttpClient(Movable):
                 var request = String(unsafe_from_utf8=req_buf^)
                 _ = new_sock.send(request)
                 raw_bytes = _recv_http_keepalive(new_sock, skip_body)
-                # Evict old cached connection
-                if self._http_valid:
-                    self._http_sock.close()
-                self._http_sock = new_sock^
-                self._http_key = conn_key
-                self._http_valid = True
+                var evict = self._http_evict_slot()
+                if self._http_times[evict] > Int64(0):
+                    self._http_close_slot(evict)
+                # Store new socket into evicted slot
+                self._http_keys[evict] = conn_key
+                self._http_times[evict] = _unix_time_secs()
+                if evict == 0:
+                    self._http_sock0 = new_sock^
+                elif evict == 1:
+                    self._http_sock1 = new_sock^
+                elif evict == 2:
+                    self._http_sock2 = new_sock^
+                else:
+                    self._http_sock3 = new_sock^
+                http_hit = evict
 
         if len(raw_bytes) == 0:
-            raise Error("empty response from server")
+            raise _err_connection("empty response from server")
 
         # Convert to string and parse
         var raw_response = String(unsafe_from_utf8=raw_bytes^)
@@ -770,29 +871,127 @@ struct HttpClient(Movable):
         # Store Set-Cookie headers in the cookie jar
         var set_cookie = parsed.headers.get("Set-Cookie")
         if len(set_cookie) > 0:
-            self._jar_store(url.host, set_cookie)
+            self._jar_store(url.host, url.request_path(), url.scheme == "https", set_cookie)
 
-        # If server requested connection close, invalidate cache
+        # If server requested connection close, evict the slot we just used
         var conn_hdr = parsed.headers.get("Connection")
         if _eq_ignore_case(conn_hdr, "close"):
-            if url.scheme == "https" and self._tls_valid:
-                try:
-                    self._tls_sock.close()
-                except:
-                    pass
-                self._tls_valid = False
-            elif url.scheme != "https" and self._http_valid:
-                self._http_sock.close()
-                self._http_valid = False
+            if url.scheme == "https":
+                self._tls_close_slot(tls_hit)
+            else:
+                self._http_close_slot(http_hit)
 
         return parsed^
 
-    def _jar_store(mut self, domain: String, set_cookie: String):
-        """Parse Set-Cookie header value and store name=value in the jar.
+    # -------------------------------------------------------------------------
+    # LRU-4 Pool Helpers — HTTP
+    # -------------------------------------------------------------------------
 
-        Handles Max-Age attribute:
+    def _http_evict_slot(self) -> Int:
+        """Return index of best HTTP pool slot to evict: first unused, else LRU."""
+        for i in range(4):
+            if self._http_times[i] == Int64(0):
+                return i
+        var lru = 0
+        for i in range(1, 4):
+            if self._http_times[i] < self._http_times[lru]:
+                lru = i
+        return lru
+
+    def _http_close_slot(mut self, i: Int):
+        """Close socket in HTTP pool slot i and mark slot unused."""
+        try:
+            if i == 0:
+                self._http_sock0.close()
+            elif i == 1:
+                self._http_sock1.close()
+            elif i == 2:
+                self._http_sock2.close()
+            else:
+                self._http_sock3.close()
+        except:
+            pass
+        self._http_times[i] = Int64(0)
+        self._http_keys[i] = String("")
+
+    def _http_try_reuse(
+        mut self, i: Int, request: String, skip_body: Bool
+    ) raises -> List[UInt8]:
+        """Send request and recv response on HTTP pool slot i (raises on failure)."""
+        if i == 0:
+            _ = self._http_sock0.send(request)
+            return _recv_http_keepalive(self._http_sock0, skip_body)
+        elif i == 1:
+            _ = self._http_sock1.send(request)
+            return _recv_http_keepalive(self._http_sock1, skip_body)
+        elif i == 2:
+            _ = self._http_sock2.send(request)
+            return _recv_http_keepalive(self._http_sock2, skip_body)
+        else:
+            _ = self._http_sock3.send(request)
+            return _recv_http_keepalive(self._http_sock3, skip_body)
+
+    # -------------------------------------------------------------------------
+    # LRU-4 Pool Helpers — TLS
+    # -------------------------------------------------------------------------
+
+    def _tls_evict_slot(self) -> Int:
+        """Return index of best TLS pool slot to evict: first unused, else LRU."""
+        for i in range(4):
+            if self._tls_times[i] == Int64(0):
+                return i
+        var lru = 0
+        for i in range(1, 4):
+            if self._tls_times[i] < self._tls_times[lru]:
+                lru = i
+        return lru
+
+    def _tls_close_slot(mut self, i: Int):
+        """Close socket in TLS pool slot i and mark slot unused."""
+        try:
+            if i == 0:
+                self._tls_sock0.close()
+            elif i == 1:
+                self._tls_sock1.close()
+            elif i == 2:
+                self._tls_sock2.close()
+            else:
+                self._tls_sock3.close()
+        except:
+            pass
+        self._tls_times[i] = Int64(0)
+        self._tls_keys[i] = String("")
+
+    def _tls_try_reuse(
+        mut self, i: Int, req_buf: List[UInt8], skip_body: Bool
+    ) raises -> List[UInt8]:
+        """Send request and recv response on TLS pool slot i (raises on failure)."""
+        if i == 0:
+            _ = self._tls_sock0.send(req_buf)
+            return _recv_tls_keepalive(self._tls_sock0, skip_body)
+        elif i == 1:
+            _ = self._tls_sock1.send(req_buf)
+            return _recv_tls_keepalive(self._tls_sock1, skip_body)
+        elif i == 2:
+            _ = self._tls_sock2.send(req_buf)
+            return _recv_tls_keepalive(self._tls_sock2, skip_body)
+        else:
+            _ = self._tls_sock3.send(req_buf)
+            return _recv_tls_keepalive(self._tls_sock3, skip_body)
+
+    # -------------------------------------------------------------------------
+
+    def _jar_store(
+        mut self, host: String, req_path: String, is_https: Bool, set_cookie: String
+    ):
+        """Parse Set-Cookie header value and store name=value in the jar (RFC 6265).
+
+        Handles attributes:
           Max-Age=0  — delete existing cookie with same name (do not store)
           Max-Age=N  — store with expiry = now + N seconds
+          Path=/foo  — store path scope (default "/")
+          Secure     — only send over HTTPS
+          Domain=foo — allow subdomain matching; host_only=False
           absent     — store as session cookie (expiry = 0, never expires)
         """
         var bytes = set_cookie.as_bytes()
@@ -817,10 +1016,15 @@ struct HttpClient(Movable):
         var name = String(unsafe_from_utf8=name_buf^)
         var value = String(unsafe_from_utf8=val_buf^)
 
-        # Scan attributes for Max-Age=N (case-insensitive)
-        var expiry = Int64(0)  # 0 = session cookie
+        # Scan attributes
+        var expiry = Int64(0)   # 0 = session cookie
         var max_age_found = False
         var max_age_val = Int64(0)
+        var cookie_path = String("/")
+        var secure = False
+        var cookie_domain = host
+        var host_only = True
+
         var pos = semi + 1
         while pos < n:
             # skip whitespace
@@ -832,8 +1036,10 @@ struct HttpClient(Movable):
                 if bytes[j] == UInt8(59):  # ';'
                     attr_end = j
                     break
-            # check for "max-age" prefix (7 chars, case-insensitive)
-            if attr_end - pos >= 7:
+            var attr_len = attr_end - pos
+
+            # Max-Age (7 chars)
+            if attr_len >= 7:
                 if (
                     _lc(bytes[pos]) == 109       # m
                     and _lc(bytes[pos+1]) == 97  # a
@@ -843,7 +1049,6 @@ struct HttpClient(Movable):
                     and _lc(bytes[pos+5]) == 103 # g
                     and _lc(bytes[pos+6]) == 101 # e
                 ):
-                    # find '=' within attr
                     var eq2 = -1
                     for j in range(pos, attr_end):
                         if bytes[j] == UInt8(61):
@@ -868,23 +1073,82 @@ struct HttpClient(Movable):
                             age = -age
                         max_age_found = True
                         max_age_val = age
+
+            # Path= (5 chars: "path=")
+            if attr_len >= 5:
+                if (
+                    _lc(bytes[pos]) == 112       # p
+                    and _lc(bytes[pos+1]) == 97  # a
+                    and _lc(bytes[pos+2]) == 116 # t
+                    and _lc(bytes[pos+3]) == 104 # h
+                    and bytes[pos+4] == 61       # =
+                ):
+                    var path_start = pos + 5
+                    var path_buf = List[UInt8](capacity=attr_end - path_start)
+                    for j in range(path_start, attr_end):
+                        path_buf.append(bytes[j])
+                    if len(path_buf) > 0:
+                        cookie_path = String(unsafe_from_utf8=path_buf^)
+                    else:
+                        cookie_path = String("/")
+
+            # Domain= (7 chars: "domain=")
+            if attr_len >= 7:
+                if (
+                    _lc(bytes[pos]) == 100       # d
+                    and _lc(bytes[pos+1]) == 111 # o
+                    and _lc(bytes[pos+2]) == 109 # m
+                    and _lc(bytes[pos+3]) == 97  # a
+                    and _lc(bytes[pos+4]) == 105 # i
+                    and _lc(bytes[pos+5]) == 110 # n
+                    and bytes[pos+6] == 61       # =
+                ):
+                    var dom_start = pos + 7
+                    # skip leading dot
+                    if dom_start < attr_end and bytes[dom_start] == UInt8(46):
+                        dom_start += 1
+                    var dom_buf = List[UInt8](capacity=attr_end - dom_start)
+                    for j in range(dom_start, attr_end):
+                        dom_buf.append(bytes[j])
+                    if len(dom_buf) > 0:
+                        cookie_domain = String(unsafe_from_utf8=dom_buf^)
+                        host_only = False
+
+            # Secure (6 chars, boolean flag — no '=')
+            if attr_len == 6:
+                if (
+                    _lc(bytes[pos]) == 115       # s
+                    and _lc(bytes[pos+1]) == 101 # e
+                    and _lc(bytes[pos+2]) == 99  # c
+                    and _lc(bytes[pos+3]) == 117 # u
+                    and _lc(bytes[pos+4]) == 114 # r
+                    and _lc(bytes[pos+5]) == 101 # e
+                ):
+                    secure = True
+
             pos = attr_end + 1
 
         if max_age_found:
             if max_age_val <= 0:
                 # Max-Age=0 → delete existing cookie with same name/domain
                 for i in range(len(self._jar_names)):
-                    if self._jar_domains[i] == domain and self._jar_names[i] == name:
+                    if self._jar_domains[i] == cookie_domain and self._jar_names[i] == name:
                         var last = len(self._jar_names) - 1
                         if i != last:
                             self._jar_domains[i] = self._jar_domains[last]
                             self._jar_names[i] = self._jar_names[last]
                             self._jar_values[i] = self._jar_values[last]
                             self._jar_expiries[i] = self._jar_expiries[last]
+                            self._jar_paths[i] = self._jar_paths[last]
+                            self._jar_secure[i] = self._jar_secure[last]
+                            self._jar_host_only[i] = self._jar_host_only[last]
                         _ = self._jar_domains.pop()
                         _ = self._jar_names.pop()
                         _ = self._jar_values.pop()
                         _ = self._jar_expiries.pop()
+                        _ = self._jar_paths.pop()
+                        _ = self._jar_secure.pop()
+                        _ = self._jar_host_only.pop()
                         break
                 return  # don't store a new entry
             else:
@@ -892,36 +1156,50 @@ struct HttpClient(Movable):
 
         # Update if name already exists for this domain, else append
         for i in range(len(self._jar_names)):
-            if self._jar_domains[i] == domain and self._jar_names[i] == name:
+            if self._jar_domains[i] == cookie_domain and self._jar_names[i] == name:
                 self._jar_values[i] = value
                 self._jar_expiries[i] = expiry
+                self._jar_paths[i] = cookie_path
+                self._jar_secure[i] = secure
+                self._jar_host_only[i] = host_only
                 return
-        self._jar_domains.append(domain)
+        self._jar_domains.append(cookie_domain)
         self._jar_names.append(name)
         self._jar_values.append(value)
         self._jar_expiries.append(expiry)
+        self._jar_paths.append(cookie_path)
+        self._jar_secure.append(secure)
+        self._jar_host_only.append(host_only)
 
-    def _jar_cookie_for(self, domain: String) -> String:
-        """Build Cookie header value from jar entries matching domain.
+    def _jar_cookie_for(self, host: String, req_path: String, is_https: Bool) -> String:
+        """Build Cookie header value from jar entries matching host, path, and scheme.
 
-        Skips cookies whose expiry timestamp has passed (expiry > 0 and now > expiry).
-        Session cookies (expiry == 0) are always included.
+        Filters by:
+          - expiry: skips expired cookies (expiry > 0 and now > expiry)
+          - path: req_path must be under the cookie's Path
+          - secure: Secure cookies not sent over HTTP
+          - domain: exact match (host_only) or suffix match
         """
         var now = _unix_time_secs()
         var result = List[UInt8](capacity=64)
         var first = True
         for i in range(len(self._jar_names)):
-            if self._jar_domains[i] == domain:
-                var exp = self._jar_expiries[i]
-                if exp > 0 and now > exp:
-                    continue  # expired
-                if not first:
-                    result.append(UInt8(59))  # ';'
-                    result.append(UInt8(32))  # ' '
-                first = False
-                _append_str(result, self._jar_names[i])
-                result.append(UInt8(61))  # '='
-                _append_str(result, self._jar_values[i])
+            var exp = self._jar_expiries[i]
+            if exp > 0 and now > exp:
+                continue  # expired
+            if self._jar_secure[i] and not is_https:
+                continue  # Secure cookie not sent over HTTP
+            if not _path_matches(req_path, self._jar_paths[i]):
+                continue  # path doesn't match
+            if not _domain_matches(host, self._jar_domains[i], self._jar_host_only[i]):
+                continue  # domain doesn't match
+            if not first:
+                result.append(UInt8(59))  # ';'
+                result.append(UInt8(32))  # ' '
+            first = False
+            _append_str(result, self._jar_names[i])
+            result.append(UInt8(61))  # '='
+            _append_str(result, self._jar_values[i])
         if len(result) == 0:
             return String("")
         return String(unsafe_from_utf8=result^)
@@ -1332,7 +1610,7 @@ def _recv_tls_keepalive(
     while header_end < 0:
         var chunk = sock.recv(4096)
         if len(chunk) == 0:
-            raise Error("http: connection closed before response headers")
+            raise _err_connection("connection closed before response headers")
         _list_append(buf, chunk)
         header_end = _buf_find_crlf_crlf(buf)
 
@@ -1367,7 +1645,7 @@ def _recv_tls_keepalive(
                     es, "connection closed"
                 ):
                     break
-                raise Error(es)
+                raise _err_connection(es)
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes
@@ -1383,7 +1661,7 @@ def _recv_tls_keepalive(
                     es, "connection closed"
                 ):
                     break
-                raise Error(es)
+                raise _err_connection(es)
         return buf^
 
 
@@ -1404,7 +1682,7 @@ def _recv_http_keepalive(
     while header_end < 0:
         var chunk = sock.recv_bytes(4096)
         if len(chunk) == 0:
-            raise Error("http: connection closed before response headers")
+            raise _err_connection("connection closed before response headers")
         _list_append(buf, chunk)
         header_end = _buf_find_crlf_crlf(buf)
 
@@ -1451,12 +1729,12 @@ def _recv_http_keepalive(
 def _validate_method(method: String) raises:
     """Validate HTTP method contains only uppercase ASCII letters (A-Z)."""
     if len(method) == 0:
-        raise Error("HTTP method must not be empty")
+        raise _err_validation("HTTP method must not be empty")
     var bytes = method.as_bytes()
     for i in range(len(method)):
         var b = bytes[i]
         if b < UInt8(ord("A")) or b > UInt8(ord("Z")):
-            raise Error("invalid HTTP method: must be uppercase ASCII letters")
+            raise _err_validation("invalid HTTP method: must be uppercase ASCII letters")
 
 
 def _validate_header_key(key: String) raises:
@@ -1465,7 +1743,7 @@ def _validate_header_key(key: String) raises:
     for i in range(len(key)):
         var b = bytes[i]
         if b == 13 or b == 10 or b == 58:  # \r, \n, :
-            raise Error("invalid header key: contains CR, LF, or colon")
+            raise _err_validation("invalid header key: contains CR, LF, or colon")
 
 
 def _validate_header_value(value: String) raises:
@@ -1474,7 +1752,7 @@ def _validate_header_value(value: String) raises:
     for i in range(len(value)):
         var b = bytes[i]
         if b == 13 or b == 10:  # \r, \n
-            raise Error("invalid header value: contains CR or LF")
+            raise _err_validation("invalid header value: contains CR or LF")
 
 
 def _validate_path(path: String) raises:
@@ -1483,7 +1761,7 @@ def _validate_path(path: String) raises:
     for i in range(len(path)):
         var b = bytes[i]
         if b == 13 or b == 10:  # \r, \n
-            raise Error("invalid request path: contains CR or LF")
+            raise _err_validation("invalid request path: contains CR or LF")
 
 
 # ============================================================================
@@ -1702,6 +1980,60 @@ def _eq_ignore_case(a: String, b: String) -> Bool:
     return True
 
 
+def _path_matches(req_path: String, cookie_path: String) -> Bool:
+    """Return True if req_path is under cookie_path (RFC 6265 §5.1.4).
+
+    cookie_path must be a prefix of req_path AND one of:
+      - req_path == cookie_path (exact match)
+      - cookie_path ends with '/'
+      - next char in req_path is '/'
+    """
+    var cp_len = len(cookie_path)
+    var rp_len = len(req_path)
+    if cp_len == 0:
+        return True  # empty cookie path matches everything
+    var cp_bytes = cookie_path.as_bytes()
+    var rp_bytes = req_path.as_bytes()
+    if rp_len < cp_len:
+        return False
+    for i in range(cp_len):
+        if rp_bytes[i] != cp_bytes[i]:
+            return False
+    # req_path starts with cookie_path; check boundary
+    if rp_len == cp_len:
+        return True
+    if cp_bytes[cp_len - 1] == UInt8(47):  # cookie_path ends with '/'
+        return True
+    if rp_bytes[cp_len] == UInt8(47):  # next char is '/'
+        return True
+    return False
+
+
+def _domain_matches(host: String, cookie_domain: String, host_only: Bool) -> Bool:
+    """Return True if host matches cookie_domain (RFC 6265 §5.1.3).
+
+    host_only=True  → exact match only (no Domain attribute was set)
+    host_only=False → host == cookie_domain OR host ends with "." + cookie_domain
+    """
+    if host == cookie_domain:
+        return True
+    if host_only:
+        return False
+    # Subdomain match: host ends with "." + cookie_domain
+    var suffix = "." + cookie_domain
+    var h_len = len(host)
+    var s_len = len(suffix)
+    if h_len <= s_len:
+        return False
+    var h_bytes = host.as_bytes()
+    var s_bytes = suffix.as_bytes()
+    var offset = h_len - s_len
+    for i in range(s_len):
+        if h_bytes[offset + i] != s_bytes[i]:
+            return False
+    return True
+
+
 def _append_str(mut buf: List[UInt8], s: String):
     """Append all bytes of a string to a byte buffer."""
     var s_bytes = s.as_bytes()
@@ -1778,11 +2110,11 @@ def _hex_to_int(
     """
     var MAX_CHUNK = 268435456  # 256 MB
     if end - start > 16:
-        raise Error("chunk size hex string too long")
+        raise _err_chunked("chunk size hex string too long")
     var result = 0
     for i in range(start, end):
         if result > MAX_CHUNK:
-            raise Error("chunk size too large (exceeds 256 MB)")
+            raise _err_chunked("chunk size too large (exceeds 256 MB)")
         var c = (data_ptr + i)[]
         result = result * 16
         if c >= UInt8(ord("0")) and c <= UInt8(ord("9")):
@@ -1792,7 +2124,7 @@ def _hex_to_int(
         elif c >= UInt8(ord("A")) and c <= UInt8(ord("F")):
             result += Int(c - UInt8(ord("A"))) + 10
         else:
-            raise Error(
+            raise _err_chunked(
                 "invalid hex character in chunk size: "
                 + _ptr_to_string(data_ptr, start, end)
             )
@@ -1829,7 +2161,7 @@ def _decode_chunked(body: String) raises -> String:
         # Copy chunk data directly from pointer to result
         var data_start = crlf + 2  # skip \r\n after size
         if data_start + chunk_size > body_len:
-            raise Error(
+            raise _err_chunked(
                 "chunked body truncated: expected "
                 + String(chunk_size)
                 + " bytes, only "
@@ -1867,7 +2199,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
     # Find header/body separator (\r\n\r\n)
     var separator = _find_crlf_crlf(ptr, raw_len)
     if separator < 0:
-        raise Error("malformed HTTP response: no header/body separator found")
+        raise _err_parse("malformed HTTP response: no header/body separator found")
 
     # Extract body — single String materialization
     var body_start = separator + 4  # skip \r\n\r\n
@@ -1883,14 +2215,14 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
     )) or (ptr + 2)[] != UInt8(ord("T")) or (ptr + 3)[] != UInt8(ord("P")) or (
         ptr + 4
     )[] != UInt8(ord("/")):
-        raise Error(
+        raise _err_parse(
             "response is not HTTP: " + _ptr_to_string(ptr, 0, status_end)
         )
 
     # Parse "HTTP/1.1 200 OK" — find spaces within [0..status_end)
     var sp1 = _find_char(ptr, status_end, UInt8(ord(" ")), 0)
     if sp1 < 0:
-        raise Error(
+        raise _err_parse(
             "malformed status line: " + _ptr_to_string(ptr, 0, status_end)
         )
 
@@ -1954,12 +2286,12 @@ def _parse_status_code(
     Enforces max 3 digits (valid HTTP status codes are 100-599).
     """
     if end - start > 3:
-        raise Error("status code too long (max 3 digits)")
+        raise _err_parse("status code too long (max 3 digits)")
     var result: Int = 0
     for i in range(start, end):
         var c = (data_ptr + i)[]
         if c < UInt8(ord("0")) or c > UInt8(ord("9")):
-            raise Error(
+            raise _err_parse(
                 "invalid status code: " + _ptr_to_string(data_ptr, start, end)
             )
         result = result * 10 + Int(c - UInt8(ord("0")))

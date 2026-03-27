@@ -40,7 +40,7 @@ This project uses a **modular monorepo** layout. Core modules live as sibling re
 |------|---------|
 | `http_client.mojo` | HTTP/1.1 protocol + high-level `HttpClient` API (GET/POST/PUT/DELETE/PATCH) + `response.json()` |
 | `main.mojo` | Demo: fetch HTTP and HTTPS URLs |
-| `test_client.mojo` | HTTP + HTTPS integration tests (27 tests) |
+| `test_client.mojo` | HTTP + HTTPS integration tests (82 tests) |
 | `test_server.py` | Python HTTP test server for HTTP integration tests |
 | `bench_profile.mojo` | Comprehensive performance benchmarks |
 | `build_and_run.sh` | Build helper — `mojo build` with SSL linking, then run |
@@ -137,8 +137,16 @@ var safe_client = HttpClient()
 safe_client.allow_private_ips = False
 ```
 
-## Future Work
+## Exception Hierarchy
 
-- Redirect following
-- Cookie handling
-- Connection pooling
+All 24 raise sites use structured prefix helpers so callers can distinguish error categories:
+
+```mojo
+# Categories (check with String(e).startswith("HTTPError:") etc.)
+alias ERR_HTTP       = "HTTPError"        # non-2xx status (raise_for_status)
+alias ERR_CONNECTION = "ConnectionError"  # socket / DNS / TLS failure
+alias ERR_REDIRECT   = "TooManyRedirects" # redirect limit exceeded
+alias ERR_VALIDATION = "ValidationError"  # bad input (header, method, port, host)
+alias ERR_PARSE      = "ParseError"       # malformed HTTP response
+alias ERR_CHUNKED    = "ChunkedBodyError" # chunked encoding protocol violation
+```
