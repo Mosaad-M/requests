@@ -7,7 +7,7 @@
 #
 # ============================================================================
 
-from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth
+from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse
 from json import JsonValue
 
 
@@ -470,6 +470,85 @@ def test_cookies_param() raises:
 
 
 # ============================================================================
+# Cookie Expiry Tests
+# ============================================================================
+
+
+def test_cookie_max_age_positive() raises:
+    """Set-Cookie with Max-Age=3600 should be stored and sent on next request."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-max-age")
+    assert_eq(client.cookie_count(), 1, "one cookie stored")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "temp=xyz", "cookie sent with positive Max-Age")
+
+
+def test_cookie_max_age_zero_deletes() raises:
+    """Set-Cookie with Max-Age=0 should delete existing cookie from jar."""
+    var client = HttpClient(allow_private_ips=True)
+    # First store session=abc123
+    _ = client.get(BASE + "/set-cookie")
+    assert_eq(client.cookie_count(), 1, "cookie stored")
+    # Then send Max-Age=0 for same name — should delete it
+    _ = client.get(BASE + "/set-cookie-zero")
+    assert_eq(client.cookie_count(), 0, "cookie deleted by Max-Age=0")
+
+
+def test_cookie_session_persists() raises:
+    """Session cookie (no Max-Age) should persist across requests."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie")
+    assert_eq(client.cookie_count(), 1, "session cookie stored")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "abc123", "session cookie sent")
+
+
+# ============================================================================
+# Streaming Download Tests
+# ============================================================================
+
+
+def test_stream_status_headers() raises:
+    """get_stream() should return correct status code and Content-Type header."""
+    var client = HttpClient(allow_private_ips=True)
+    var stream = client.get_stream(BASE + "/stream/medium")
+    assert_eq(stream.status_code, 200, "stream status_code")
+    assert_true(stream.ok, "stream ok")
+    assert_true(len(stream.headers.get("Content-Type")) > 0, "Content-Type present")
+    stream.close()
+
+
+def test_stream_read_all() raises:
+    """read_all() should return the full body (256KB)."""
+    var client = HttpClient(allow_private_ips=True)
+    var stream = client.get_stream(BASE + "/stream/medium")
+    var body = stream.read_all()
+    assert_eq(len(body), 256 * 1024, "body length matches 256KB")
+
+
+def test_stream_read_chunks() raises:
+    """Repeated read_chunk() calls should return all bytes in total."""
+    var client = HttpClient(allow_private_ips=True)
+    var stream = client.get_stream(BASE + "/stream/medium")
+    var total = 0
+    while True:
+        var chunk = stream.read_chunk(8192)
+        if len(chunk) == 0:
+            break
+        total += len(chunk)
+    assert_eq(total, 256 * 1024, "total chunks == 256KB")
+
+
+def test_stream_partial_then_close() raises:
+    """Reading one chunk then closing should not raise."""
+    var client = HttpClient(allow_private_ips=True)
+    var stream = client.get_stream(BASE + "/stream/medium")
+    var chunk = stream.read_chunk(1024)
+    assert_true(len(chunk) > 0, "got at least one chunk")
+    stream.close()  # should not raise
+
+
+# ============================================================================
 # Auth Helper Tests
 # ============================================================================
 
@@ -867,6 +946,15 @@ def main() raises:
     run_test("Set-Cookie stored", passed, failed, test_set_cookie_stored)
     run_test("cookie sent on next request", passed, failed, test_cookie_sent_on_next_request)
     run_test("cookies param", passed, failed, test_cookies_param)
+    run_test("cookie Max-Age positive", passed, failed, test_cookie_max_age_positive)
+    run_test("cookie Max-Age=0 deletes", passed, failed, test_cookie_max_age_zero_deletes)
+    run_test("cookie session persists", passed, failed, test_cookie_session_persists)
+
+    # Streaming tests
+    run_test("stream status+headers", passed, failed, test_stream_status_headers)
+    run_test("stream read_all", passed, failed, test_stream_read_all)
+    run_test("stream read_chunks", passed, failed, test_stream_read_chunks)
+    run_test("stream partial+close", passed, failed, test_stream_partial_then_close)
 
     # Redirect tests
     run_test("redirect 301 followed", passed, failed, test_redirect_301_followed)

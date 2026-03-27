@@ -24,6 +24,25 @@ from crypto.base64 import base64_encode
 from url import Url, parse_url
 from json import JsonValue, parse_json
 from zlib_decompress import zlib_decompress
+from std.ffi import external_call
+from std.memory.unsafe_pointer import alloc
+
+
+# ============================================================================
+# Time Helper
+# ============================================================================
+
+
+fn _unix_time_secs() -> Int64:
+    """Return current Unix time in seconds via clock_gettime(CLOCK_REALTIME)."""
+    # struct timespec { int64_t tv_sec; int64_t tv_nsec; }  (16 bytes on 64-bit)
+    var ts = alloc[UInt8](16)
+    for i in range(16):
+        (ts + i)[] = UInt8(0)
+    _ = external_call["clock_gettime", Int32](Int32(0), Int(ts))
+    var t = ts.bitcast[Int64]()[]
+    ts.free()
+    return t
 
 
 # ============================================================================
@@ -240,10 +259,12 @@ struct HttpClient(Movable):
     var _tls_sock: TlsSocket
     var _tls_valid: Bool     # True if _tls_sock is usable
 
-    # Cookie jar: parallel lists of (domain, name, value)
+    # Cookie jar: parallel lists of (domain, name, value, expiry_unix_secs)
+    # expiry == 0 means session cookie (no expiry); >0 means Unix timestamp
     var _jar_domains: List[String]
     var _jar_names: List[String]
     var _jar_values: List[String]
+    var _jar_expiries: List[Int64]
 
     def __init__(
         out self,
@@ -268,6 +289,7 @@ struct HttpClient(Movable):
         self._jar_domains = List[String]()
         self._jar_names = List[String]()
         self._jar_values = List[String]()
+        self._jar_expiries = List[Int64]()
 
     def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
@@ -284,6 +306,7 @@ struct HttpClient(Movable):
         self._jar_domains = take._jar_domains^
         self._jar_names = take._jar_names^
         self._jar_values = take._jar_values^
+        self._jar_expiries = take._jar_expiries^
 
     # === GET ===
 
@@ -329,6 +352,90 @@ struct HttpClient(Movable):
     def cookie_count(self) -> Int:
         """Return the number of cookies stored in the cookie jar."""
         return len(self._jar_names)
+
+    # === STREAM ===
+
+    def get_stream(mut self, url_str: String) raises -> StreamResponse:
+        """Perform a GET and return a StreamResponse for incremental body reading.
+
+        Always opens a fresh connection (does not reuse the keep-alive pool).
+        The returned StreamResponse owns the socket. Consume with read_chunk()
+        or read_all(), then call close() when done.
+        """
+        _validate_method("GET")
+        var url = parse_url(url_str)
+        _validate_path(url.request_path())
+
+        # Build request — Connection: close so server signals EOF
+        var req_buf = List[UInt8](capacity=512)
+        _append_str(req_buf, "GET ")
+        _append_str(req_buf, url.request_path())
+        _append_str(req_buf, " HTTP/1.1\r\nHost: ")
+        _append_str(req_buf, url.host_header())
+        _append_str(req_buf, "\r\nUser-Agent: ")
+        _append_str(req_buf, self.user_agent)
+        _append_str(req_buf, "\r\nAccept: */*\r\nConnection: close\r\n\r\n")
+
+        var is_tls = (url.scheme == "https")
+        var http_sock = TcpSocket()
+        var tls_sock = TlsSocket(0)
+        var raw_buf = List[UInt8]()
+
+        var header_end = -1
+
+        if is_tls:
+            if not self._ca_loaded:
+                self._ca_bundle = load_system_ca_bundle()
+                self._ca_loaded = True
+            http_sock.connect(
+                url.host, url.port,
+                reject_private_ips=not self.allow_private_ips,
+                timeout_secs=self._timeout_secs,
+            )
+            tls_sock = TlsSocket(http_sock.fd)
+            tls_sock.connect(url.host, self._ca_bundle.copy())
+            _ = tls_sock.send(req_buf)
+            while header_end < 0:
+                var chunk = tls_sock.recv(4096)
+                if len(chunk) == 0:
+                    raise Error("stream: connection closed before headers")
+                _list_append(raw_buf, chunk)
+                header_end = _buf_find_crlf_crlf(raw_buf)
+        else:
+            http_sock.connect(
+                url.host, url.port,
+                reject_private_ips=not self.allow_private_ips,
+                timeout_secs=self._timeout_secs,
+            )
+            var request = String(unsafe_from_utf8=req_buf^)
+            _ = http_sock.send(request)
+            while header_end < 0:
+                var chunk = http_sock.recv_bytes(4096)
+                if len(chunk) == 0:
+                    raise Error("stream: connection closed before headers")
+                _list_append(raw_buf, chunk)
+                header_end = _buf_find_crlf_crlf(raw_buf)
+
+        var hdr_str = _buf_to_string(raw_buf, header_end + 4)
+        var parsed = _parse_response(hdr_str, url_str)
+        var cl = _buf_content_length(raw_buf, header_end)
+        var leftover = _buf_leftover(raw_buf, header_end + 4)
+
+        var stream = StreamResponse()
+        stream.status_code = parsed.status_code
+        stream.ok = parsed.ok
+        stream.status_text = parsed.status_text
+        stream.headers = parsed.headers.copy()
+        stream.url = url_str
+        stream._leftover = leftover^
+        stream._leftover_pos = 0
+        stream._content_length = cl
+        stream._body_read = 0
+        stream._is_tls = is_tls
+        stream._done = False
+        stream._http_sock = http_sock^
+        stream._tls_sock = tls_sock^
+        return stream^
 
     # === POST ===
 
@@ -681,12 +788,18 @@ struct HttpClient(Movable):
         return parsed^
 
     def _jar_store(mut self, domain: String, set_cookie: String):
-        """Parse Set-Cookie header value and store name=value in the jar."""
+        """Parse Set-Cookie header value and store name=value in the jar.
+
+        Handles Max-Age attribute:
+          Max-Age=0  — delete existing cookie with same name (do not store)
+          Max-Age=N  — store with expiry = now + N seconds
+          absent     — store as session cookie (expiry = 0, never expires)
+        """
         var bytes = set_cookie.as_bytes()
         var n = len(bytes)
-        # Find '=' (name/value separator)
+        # Find '=' (name/value separator) and first ';' (end of name=value pair)
         var eq = -1
-        var semi = n  # end of name=value before first ';'
+        var semi = n
         for i in range(n):
             if bytes[i] == UInt8(61) and eq < 0:  # '='
                 eq = i
@@ -703,21 +816,105 @@ struct HttpClient(Movable):
             val_buf.append(bytes[i])
         var name = String(unsafe_from_utf8=name_buf^)
         var value = String(unsafe_from_utf8=val_buf^)
+
+        # Scan attributes for Max-Age=N (case-insensitive)
+        var expiry = Int64(0)  # 0 = session cookie
+        var max_age_found = False
+        var max_age_val = Int64(0)
+        var pos = semi + 1
+        while pos < n:
+            # skip whitespace
+            while pos < n and bytes[pos] == UInt8(32):
+                pos += 1
+            # find end of this attribute
+            var attr_end = n
+            for j in range(pos, n):
+                if bytes[j] == UInt8(59):  # ';'
+                    attr_end = j
+                    break
+            # check for "max-age" prefix (7 chars, case-insensitive)
+            if attr_end - pos >= 7:
+                if (
+                    _lc(bytes[pos]) == 109       # m
+                    and _lc(bytes[pos+1]) == 97  # a
+                    and _lc(bytes[pos+2]) == 120 # x
+                    and bytes[pos+3] == 45       # -
+                    and _lc(bytes[pos+4]) == 97  # a
+                    and _lc(bytes[pos+5]) == 103 # g
+                    and _lc(bytes[pos+6]) == 101 # e
+                ):
+                    # find '=' within attr
+                    var eq2 = -1
+                    for j in range(pos, attr_end):
+                        if bytes[j] == UInt8(61):
+                            eq2 = j
+                            break
+                    if eq2 >= 0:
+                        var npos = eq2 + 1
+                        while npos < attr_end and bytes[npos] == UInt8(32):
+                            npos += 1
+                        var negative = False
+                        if npos < attr_end and bytes[npos] == UInt8(45):  # '-'
+                            negative = True
+                            npos += 1
+                        var age = Int64(0)
+                        while npos < attr_end:
+                            var c = bytes[npos]
+                            if c < 48 or c > 57:
+                                break
+                            age = age * 10 + Int64(c - 48)
+                            npos += 1
+                        if negative:
+                            age = -age
+                        max_age_found = True
+                        max_age_val = age
+            pos = attr_end + 1
+
+        if max_age_found:
+            if max_age_val <= 0:
+                # Max-Age=0 → delete existing cookie with same name/domain
+                for i in range(len(self._jar_names)):
+                    if self._jar_domains[i] == domain and self._jar_names[i] == name:
+                        var last = len(self._jar_names) - 1
+                        if i != last:
+                            self._jar_domains[i] = self._jar_domains[last]
+                            self._jar_names[i] = self._jar_names[last]
+                            self._jar_values[i] = self._jar_values[last]
+                            self._jar_expiries[i] = self._jar_expiries[last]
+                        _ = self._jar_domains.pop()
+                        _ = self._jar_names.pop()
+                        _ = self._jar_values.pop()
+                        _ = self._jar_expiries.pop()
+                        break
+                return  # don't store a new entry
+            else:
+                expiry = _unix_time_secs() + max_age_val
+
         # Update if name already exists for this domain, else append
         for i in range(len(self._jar_names)):
             if self._jar_domains[i] == domain and self._jar_names[i] == name:
                 self._jar_values[i] = value
+                self._jar_expiries[i] = expiry
                 return
         self._jar_domains.append(domain)
         self._jar_names.append(name)
         self._jar_values.append(value)
+        self._jar_expiries.append(expiry)
 
     def _jar_cookie_for(self, domain: String) -> String:
-        """Build Cookie header value from jar entries matching domain."""
+        """Build Cookie header value from jar entries matching domain.
+
+        Skips cookies whose expiry timestamp has passed (expiry > 0 and now > expiry).
+        Session cookies (expiry == 0) are always included.
+        """
+        var now = _unix_time_secs()
         var result = List[UInt8](capacity=64)
         var first = True
         for i in range(len(self._jar_names)):
             if self._jar_domains[i] == domain:
+                var exp = self._jar_expiries[i]
+                if exp > 0 and now > exp:
+                    continue  # expired
                 if not first:
                     result.append(UInt8(59))  # ';'
                     result.append(UInt8(32))  # ' '
@@ -728,6 +925,143 @@ struct HttpClient(Movable):
         if len(result) == 0:
             return String("")
         return String(unsafe_from_utf8=result^)
+
+
+# ============================================================================
+# StreamResponse — Incremental Body Reading
+# ============================================================================
+
+
+struct StreamResponse(Movable):
+    """HTTP response for streaming / incremental body reading.
+
+    Holds the socket after headers are parsed. Call read_chunk() repeatedly
+    until it returns an empty list, then close() to release the connection.
+
+    Unlike HttpResponse this struct is Movable only (socket ownership).
+    """
+
+    var status_code: Int
+    var status_text: String
+    var headers: HttpHeaders
+    var url: String
+    var ok: Bool
+    var _leftover: List[UInt8]  # body bytes already recv'd with the headers
+    var _leftover_pos: Int
+    var _content_length: Int  # -1 = unknown length, read until EOF
+    var _body_read: Int       # total body bytes returned via read_chunk so far
+    var _is_tls: Bool
+    var _done: Bool
+    var _http_sock: TcpSocket
+    var _tls_sock: TlsSocket
+
+    def __init__(out self):
+        self.status_code = 0
+        self.status_text = String("")
+        self.headers = HttpHeaders()
+        self.url = String("")
+        self.ok = False
+        self._leftover = List[UInt8]()
+        self._leftover_pos = 0
+        self._content_length = -1
+        self._body_read = 0
+        self._is_tls = False
+        self._done = True  # default to done until properly initialized
+        self._http_sock = TcpSocket()
+        self._tls_sock = TlsSocket(0)
+
+    def __moveinit__(out self, deinit take: Self):
+        self.status_code = take.status_code
+        self.status_text = take.status_text^
+        self.headers = take.headers^
+        self.url = take.url^
+        self.ok = take.ok
+        self._leftover = take._leftover^
+        self._leftover_pos = take._leftover_pos
+        self._content_length = take._content_length
+        self._body_read = take._body_read
+        self._is_tls = take._is_tls
+        self._done = take._done
+        self._http_sock = take._http_sock^
+        self._tls_sock = take._tls_sock^
+
+    def read_chunk(mut self, size: Int = 8192) raises -> List[UInt8]:
+        """Read up to size bytes of the response body.
+
+        Returns an empty list when the body is fully consumed.
+        """
+        if self._done:
+            return List[UInt8]()
+
+        var result = List[UInt8](capacity=size)
+
+        # Drain leftover bytes from initial header recv first
+        var leftover_avail = len(self._leftover) - self._leftover_pos
+        if leftover_avail > 0:
+            var take_n = min(size, leftover_avail)
+            for i in range(take_n):
+                result.append(self._leftover[self._leftover_pos + i])
+            self._leftover_pos += take_n
+
+        # Fetch more from the socket if we still need bytes
+        var got = len(result)
+        if got < size and not self._done:
+            var need = size - got
+            # Cap by remaining Content-Length
+            if self._content_length >= 0:
+                var remaining_cl = self._content_length - self._body_read - got
+                if remaining_cl <= 0:
+                    self._done = True
+                    need = 0
+                else:
+                    need = min(need, remaining_cl)
+            if need > 0:
+                var chunk: List[UInt8]
+                try:
+                    if self._is_tls:
+                        chunk = self._tls_sock.recv(need)
+                    else:
+                        chunk = self._http_sock.recv_bytes(need)
+                except:
+                    self._done = True
+                    chunk = List[UInt8]()
+                if len(chunk) == 0:
+                    self._done = True
+                else:
+                    for i in range(len(chunk)):
+                        result.append(chunk[i])
+
+        self._body_read += len(result)
+        if len(result) == 0:
+            self._done = True
+        elif self._content_length >= 0 and self._body_read >= self._content_length:
+            self._done = True
+        return result^
+
+    def read_all(mut self) raises -> String:
+        """Read and return the entire remaining response body as a String."""
+        var buf = List[UInt8]()
+        while True:
+            var chunk = self.read_chunk(65536)
+            if len(chunk) == 0:
+                break
+            for i in range(len(chunk)):
+                buf.append(chunk[i])
+        return String(unsafe_from_utf8=buf^)
+
+    def close(mut self) raises:
+        """Close the underlying socket and mark the stream as done."""
+        self._done = True
+        if self._is_tls:
+            try:
+                self._tls_sock.close()
+            except:
+                pass
+        else:
+            try:
+                self._http_sock.close()
+            except:
+                pass
 
 
 # ============================================================================
@@ -768,6 +1102,25 @@ def http_patch(url: String, body: String) raises -> HttpResponse:
 # ============================================================================
 # Keep-Alive Recv Helpers
 # ============================================================================
+
+
+def _buf_leftover(buf: List[UInt8], start: Int) -> List[UInt8]:
+    """Return a copy of buf[start..] (bytes after header end)."""
+    var n = len(buf)
+    if start >= n:
+        return List[UInt8]()
+    var result = List[UInt8](capacity=n - start)
+    for i in range(start, n):
+        result.append(buf[i])
+    return result^
+
+
+def _buf_to_string(buf: List[UInt8], header_end: Int) -> String:
+    """Build a String from buf[0..header_end] — used to pass headers-only to _parse_response."""
+    var copy_buf = List[UInt8](capacity=header_end)
+    for i in range(header_end):
+        copy_buf.append(buf[i])
+    return String(unsafe_from_utf8=copy_buf^)
 
 
 def _list_append(mut out: List[UInt8], src: List[UInt8]):

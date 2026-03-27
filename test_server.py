@@ -156,6 +156,33 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/check-cookie":
             cookie = self.headers.get("Cookie", "")
             self._respond(200, "OK", {"cookie": cookie})
+        elif self.path == "/set-cookie-max-age":
+            body = json.dumps({"message": "cookie with max-age set"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "temp=xyz; Max-Age=3600")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-zero":
+            body = json.dumps({"message": "delete cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "session=abc123; Max-Age=0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/stream/medium":
+            body = b"A" * (256 * 1024)
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         elif self.path == "/shutdown":
             self._respond(200, "OK", {"message": "shutting down"})
             # Schedule shutdown
