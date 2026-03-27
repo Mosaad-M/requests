@@ -1,1 +1,0 @@
--I "/home/mmosaad/.mojo/packages/tls/1.0.2" -I "/home/mmosaad/.mojo/packages/tcp/1.0.2" -I "/home/mmosaad/.mojo/packages/url/1.0.1" -I "/home/mmosaad/.mojo/packages/json/1.0.2" -Xlinker -L"/home/mmosaad/.mojo/packages/tcp/1.0.2" -Xlinker -lerrno_helper -Xlinker -rpath -Xlinker "/home/mmosaad/.mojo/packages/tcp/1.0.2"
