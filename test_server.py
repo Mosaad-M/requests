@@ -261,6 +261,36 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-psl-co-uk":
+            # Set-Cookie with a PSL public suffix domain — should be rejected
+            body = json.dumps({"message": "psl co.uk cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "psl=1; Domain=.co.uk")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-psl-github-io":
+            # Set-Cookie with a PSL hosting suffix — should be rejected
+            body = json.dumps({"message": "psl github.io cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "psl=1; Domain=.github.io")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-psl-example-co-uk":
+            # Set-Cookie with a valid registrable domain under a PSL suffix — accepted
+            body = json.dumps({"message": "psl example.co.uk cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "psl=1; Domain=.example.co.uk")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
         elif self.path == "/set-cookie-httponly":
             body = json.dumps({"message": "httponly cookie"})
             self.send_response(200, "OK")

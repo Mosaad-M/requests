@@ -1242,6 +1242,67 @@ def test_content_length_over_limit() raises:
 
 
 # ============================================================================
+# Phase 11 Tests — Security Parity
+# ============================================================================
+
+
+def test_cookie_psl_co_uk_rejected() raises:
+    """Domain=.co.uk is a PSL public suffix — cookie must not be stored."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-psl-co-uk")
+    var found = False
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == "psl":
+            found = True
+            break
+    if found:
+        raise Error("PSL suffix .co.uk cookie was stored, expected rejection")
+
+
+def test_cookie_psl_github_io_rejected() raises:
+    """Domain=.github.io is a PSL hosting suffix — cookie must not be stored."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-psl-github-io")
+    var found = False
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == "psl":
+            found = True
+            break
+    if found:
+        raise Error("PSL suffix .github.io cookie was stored, expected rejection")
+
+
+def test_cookie_psl_example_co_uk_accepted() raises:
+    """Domain=.example.co.uk is a valid registrable domain — cookie must be stored."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-psl-example-co-uk")
+    var found = False
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == "psl":
+            found = True
+            break
+    if not found:
+        raise Error("Valid domain .example.co.uk cookie was rejected, expected storage")
+
+
+def test_follow_redirects_disabled() raises:
+    """follow_redirects=False should return 301 without following."""
+    var client = HttpClient(allow_private_ips=True)
+    client.follow_redirects = False
+    var resp = client.get(BASE + "/redirect/301")
+    assert_eq(resp.status_code, 301, "must return 301 when follow_redirects=False")
+
+
+def test_redirect_same_host_only() raises:
+    """redirect_same_host_only=True should stop cross-host redirects."""
+    var client = HttpClient(allow_private_ips=True)
+    client.redirect_same_host_only = True
+    # /redirect/301 → /redirect/target (same host) — should be followed
+    var resp = client.get(BASE + "/redirect/301")
+    assert_eq(resp.status_code, 200, "same-host redirect must be followed")
+
+
+# ============================================================================
 # Test Runner
 # ============================================================================
 
@@ -1466,6 +1527,13 @@ def main() raises:
         failed,
         test_content_length_over_limit,
     )
+
+    # Phase 11 tests
+    run_test("cookie PSL co.uk rejected", passed, failed, test_cookie_psl_co_uk_rejected)
+    run_test("cookie PSL github.io rejected", passed, failed, test_cookie_psl_github_io_rejected)
+    run_test("cookie PSL example.co.uk accepted", passed, failed, test_cookie_psl_example_co_uk_accepted)
+    run_test("follow_redirects=False", passed, failed, test_follow_redirects_disabled)
+    run_test("redirect same host only", passed, failed, test_redirect_same_host_only)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

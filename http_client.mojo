@@ -25,6 +25,7 @@ from url import Url, parse_url
 from json import JsonValue, parse_json
 from zlib_decompress import zlib_decompress
 from brotli_decompress import brotli_decompress
+from psl import is_public_suffix
 from std.ffi import external_call
 from std.memory.unsafe_pointer import alloc
 
@@ -324,8 +325,11 @@ struct HttpClient(Movable):
 
     var user_agent: String
     var allow_private_ips: Bool
-    var max_redirects: Int    # maximum redirects to follow (default 10)
-    var _timeout_secs: Int    # socket send/recv timeout (seconds)
+    var max_redirects: Int              # maximum redirects to follow (default 10)
+    var follow_redirects: Bool          # if False, return first redirect response as-is
+    var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
+    var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
+    var _timeout_secs: Int              # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
     var _ca_bundle: List[X509Cert]
@@ -372,6 +376,9 @@ struct HttpClient(Movable):
         self.user_agent = String("MojoHTTP/0.1")
         self.allow_private_ips = allow_private_ips
         self.max_redirects = 10
+        self.follow_redirects = True
+        self.redirect_same_host_only = False
+        self.pool_idle_timeout_secs = 300
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
@@ -409,6 +416,9 @@ struct HttpClient(Movable):
         self.user_agent = take.user_agent^
         self.allow_private_ips = take.allow_private_ips
         self.max_redirects = take.max_redirects
+        self.follow_redirects = take.follow_redirects
+        self.redirect_same_host_only = take.redirect_same_host_only
+        self.pool_idle_timeout_secs = take.pool_idle_timeout_secs
         self._timeout_secs = take._timeout_secs
         self._ca_bundle = take._ca_bundle^
         self._ca_loaded = take._ca_loaded
@@ -715,6 +725,11 @@ struct HttpClient(Movable):
                 resp.history = history^
                 return resp^
 
+            # Phase 11B: if follow_redirects=False, return the redirect response as-is
+            if not self.follow_redirects:
+                resp.history = history^
+                return resp^
+
             var location = resp.headers.get("Location")
             if len(location) == 0:
                 # No Location header — return as-is
@@ -736,6 +751,10 @@ struct HttpClient(Movable):
             var base_parsed = parse_url(current_url)
             var next_parsed = parse_url(next_url)
             if base_parsed.host != next_parsed.host:
+                # Phase 11B: redirect_same_host_only — stop on cross-host redirects
+                if self.redirect_same_host_only:
+                    resp.history = history^
+                    return resp^
                 var stripped = HttpHeaders()
                 for i in range(len(next_headers)):
                     if not _eq_ignore_case(next_headers._keys[i], "Authorization"):
@@ -830,9 +849,14 @@ struct HttpClient(Movable):
                 self._ca_bundle = load_system_ca_bundle()
                 self._ca_loaded = True
 
-            # Phase 1: try to reuse a cached TLS slot
+            # Phase 1: try to reuse a cached TLS slot (skip idle-expired slots)
+            var now_tls = _unix_time_secs()
             for i in range(4):
                 if self._tls_keys[i] == conn_key and self._tls_times[i] > Int64(0):
+                    var idle_secs = Int(now_tls - self._tls_times[i])
+                    if idle_secs > self.pool_idle_timeout_secs:
+                        self._tls_close_slot(i)
+                        continue
                     tls_hit = i
                     break
             if tls_hit >= 0:
@@ -873,9 +897,14 @@ struct HttpClient(Movable):
                 tls_hit = evict
         else:
             # Plain HTTP
-            # Phase 1: try to reuse a cached HTTP slot
+            # Phase 1: try to reuse a cached HTTP slot (skip idle-expired slots)
+            var now_http = _unix_time_secs()
             for i in range(4):
                 if self._http_keys[i] == conn_key and self._http_times[i] > Int64(0):
+                    var idle_secs = Int(now_http - self._http_times[i])
+                    if idle_secs > self.pool_idle_timeout_secs:
+                        self._http_close_slot(i)
+                        continue
                     http_hit = i
                     break
             if http_hit >= 0:
@@ -966,9 +995,16 @@ struct HttpClient(Movable):
     # -------------------------------------------------------------------------
 
     def _http_evict_slot(self) -> Int:
-        """Return index of best HTTP pool slot to evict: first unused, else LRU."""
+        """Return index of best HTTP pool slot to evict.
+
+        Priority: (1) unused slot, (2) idle-expired slot, (3) LRU slot.
+        """
+        var now = _unix_time_secs()
         for i in range(4):
             if self._http_times[i] == Int64(0):
+                return i
+        for i in range(4):
+            if Int(now - self._http_times[i]) > self.pool_idle_timeout_secs:
                 return i
         var lru = 0
         for i in range(1, 4):
@@ -1014,9 +1050,16 @@ struct HttpClient(Movable):
     # -------------------------------------------------------------------------
 
     def _tls_evict_slot(self) -> Int:
-        """Return index of best TLS pool slot to evict: first unused, else LRU."""
+        """Return index of best TLS pool slot to evict.
+
+        Priority: (1) unused slot, (2) idle-expired slot, (3) LRU slot.
+        """
+        var now = _unix_time_secs()
         for i in range(4):
             if self._tls_times[i] == Int64(0):
+                return i
+        for i in range(4):
+            if Int(now - self._tls_times[i]) > self.pool_idle_timeout_secs:
                 return i
         var lru = 0
         for i in range(1, 4):
@@ -1203,6 +1246,11 @@ struct HttpClient(Movable):
                                 break
                         if not has_inner_dot:
                             return  # reject entire cookie — invalid Domain attr
+                        # Reject public suffixes (e.g. .co.uk, .github.io)
+                        # to prevent supercookies that match any registrant
+                        # under the suffix (Phase 11A — PSL validation).
+                        if is_public_suffix(d):
+                            return  # reject entire cookie — public suffix Domain
                         cookie_domain = d
                         host_only = False
 
