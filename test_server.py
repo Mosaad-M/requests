@@ -195,6 +195,38 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-samesite":
+            body = json.dumps({"message": "samesite strict cookie set"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "samesite_cookie=yes; SameSite=Strict")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-samesite-none":
+            body = json.dumps({"message": "samesite none cookie set"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "none_cookie=yes; SameSite=None; Secure")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/brotli":
+            try:
+                import brotli as _brotli
+                body = json.dumps({"encoding": "brotli", "message": "hello brotli"})
+                compressed = _brotli.compress(body.encode())
+                self.send_response(200, "OK")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Encoding", "br")
+                self.send_header("Content-Length", str(len(compressed)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(compressed)
+            except ImportError:
+                self._respond(503, "Service Unavailable", {"error": "brotli not installed"})
         elif self.path == "/stream/medium":
             body = b"A" * (256 * 1024)
             self.send_response(200, "OK")

@@ -15,7 +15,7 @@ jobs:
         uses: prefix-dev/setup-pixi@v0.8.1
 
       - name: Install zlib dev
-        run: sudo apt-get install -y zlib1g-dev
+        run: sudo apt-get install -y zlib1g-dev libbrotli-dev
 
       - name: Install mojo-pkg
         run: |

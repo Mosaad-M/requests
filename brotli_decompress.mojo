@@ -1,0 +1,76 @@
+# ============================================================================
+# brotli_decompress.mojo — Brotli decompression via libbrotlidec
+# ============================================================================
+#
+# Uses the one-shot BrotliDecoderDecompress API:
+#   BrotliDecoderResult BrotliDecoderDecompress(
+#     size_t encoded_size,
+#     const uint8_t* encoded_buffer,
+#     size_t* decoded_size,    /* in: capacity; out: bytes written */
+#     uint8_t* decoded_buffer);
+#
+# Return values:
+#   BROTLI_DECODER_RESULT_SUCCESS       = 1
+#   BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT = 3 (buffer too small → retry 2x)
+#   BROTLI_DECODER_RESULT_ERROR         = 0
+# ============================================================================
+
+from std.ffi import external_call
+from std.memory.unsafe_pointer import alloc
+
+
+def brotli_decompress(data: List[UInt8]) raises -> List[UInt8]:
+    """Decompress Brotli-encoded data using libbrotlidec (one-shot API).
+
+    Grows the output buffer on BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT (=3).
+    """
+    var in_size = len(data)
+    if in_size == 0:
+        return List[UInt8]()
+
+    # Copy input to heap buffer (data may be on stack or moved elsewhere)
+    var in_buf = alloc[UInt8](in_size)
+    for i in range(in_size):
+        (in_buf + i)[] = data[i]
+
+    # Initial output buffer: 8× input, at least 4 KB
+    var out_capacity = in_size * 8
+    if out_capacity < 4096:
+        out_capacity = 4096
+    var out_buf = alloc[UInt8](out_capacity)
+
+    # size_t* for decoded_size (in: capacity, out: bytes written)
+    var out_size_ptr = alloc[Int](1)
+
+    var result = Int32(3)  # start as NEEDS_MORE_OUTPUT to enter loop
+    while result == Int32(3):
+        out_size_ptr[] = out_capacity
+        result = external_call["BrotliDecoderDecompress", Int32](
+            Int(in_size),
+            Int(in_buf),
+            Int(out_size_ptr),
+            Int(out_buf),
+        )
+        if result == Int32(3):  # NEEDS_MORE_OUTPUT — double and retry
+            var new_cap = out_capacity * 2
+            var new_buf = alloc[UInt8](new_cap)
+            _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), 0)
+            out_buf.free()
+            out_buf = new_buf
+            out_capacity = new_cap
+
+    in_buf.free()
+
+    if result != Int32(1):  # not SUCCESS
+        out_size_ptr.free()
+        out_buf.free()
+        raise Error("BrotliDecodeError: result=" + String(Int(result)))
+
+    var written = out_size_ptr[]
+    out_size_ptr.free()
+
+    var out = List[UInt8](capacity=written)
+    for i in range(written):
+        out.append((out_buf + i)[])
+    out_buf.free()
+    return out^

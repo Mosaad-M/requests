@@ -7,7 +7,7 @@
 #
 # ============================================================================
 
-from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse
+from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
 
 
@@ -955,6 +955,114 @@ def test_raise_for_status_500_raises() raises:
 
 
 # ============================================================================
+# Session Tests
+# ============================================================================
+
+
+def test_session_default_headers() raises:
+    """Session default headers should be sent with every request."""
+    var s = Session(allow_private_ips=True)
+    s.set_header("X-Custom", "myval")
+    var resp = s.get(BASE + "/headers")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "X-Custom", "header key echoed")
+    assert_contains(resp.body, "myval", "header value echoed")
+
+
+def test_session_auth_basic() raises:
+    """Session BasicAuth should be applied to every request."""
+    var s = Session(allow_private_ips=True)
+    s.set_auth(BasicAuth("user", "pass"))
+    var resp = s.get(BASE + "/headers")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "Authorization", "auth header echoed")
+    assert_contains(resp.body, "Basic", "Basic auth present")
+
+
+def test_session_caller_override() raises:
+    """Caller headers should override session defaults."""
+    var s = Session(allow_private_ips=True)
+    s.set_header("X-Custom", "default")
+    var headers = HttpHeaders()
+    headers.add("X-Custom", "override")
+    var resp = s.get(BASE + "/headers", headers)
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "override", "caller value present")
+
+
+# ============================================================================
+# SameSite Cookie Tests
+# ============================================================================
+
+
+def test_cookie_samesite_stored() raises:
+    """SameSite=Strict cookie should be stored and sent to same host."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-samesite")
+    assert_true(client.cookie_count() == 1, "cookie stored")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "samesite_cookie", "samesite cookie sent")
+
+
+def test_cookie_samesite_none_http() raises:
+    """SameSite=None cookie (with Secure flag) should NOT be sent over HTTP."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-samesite-none")
+    assert_true(client.cookie_count() == 1, "cookie stored")
+    # The cookie has SameSite=None and Secure — must not be sent over HTTP
+    var resp = client.get(BASE + "/check-cookie")
+    assert_not_contains(resp.body, "none_cookie", "SameSite=None+Secure not sent over HTTP")
+
+
+# ============================================================================
+# Brotli Tests
+# ============================================================================
+
+
+def test_brotli_decompression() raises:
+    """Brotli-encoded response should be transparently decompressed."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/brotli")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "hello brotli", "brotli body decoded")
+
+
+def test_accept_encoding_br() raises:
+    """Accept-Encoding header should include 'br'."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/accept-encoding")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "br", "br in Accept-Encoding")
+
+
+# ============================================================================
+# Multipart Tests
+# ============================================================================
+
+
+def test_multipart_post() raises:
+    """post_multipart should encode fields and return echoed body."""
+    var client = HttpClient(allow_private_ips=True)
+    var fields = Dict[String, String]()
+    fields["name"] = "alice"
+    fields["age"] = "30"
+    var resp = client.post_multipart(BASE + "/echo", fields)
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "alice", "field value alice in body")
+    assert_contains(resp.body, "30", "field value 30 in body")
+
+
+def test_multipart_content_type() raises:
+    """post_multipart Content-Type should be multipart/form-data."""
+    var client = HttpClient(allow_private_ips=True)
+    var fields = Dict[String, String]()
+    fields["key"] = "value"
+    var resp = client.post_multipart(BASE + "/echo", fields)
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "multipart/form-data", "content-type echoed")
+
+
+# ============================================================================
 # HTTPS Tests — use jsonplaceholder.typicode.com (no local server needed)
 # ============================================================================
 
@@ -1164,6 +1272,23 @@ def main() raises:
     run_test("error HTTPError prefix", passed, failed, test_error_http_prefix)
     run_test("error TooManyRedirects prefix", passed, failed, test_error_redirect_prefix)
     run_test("error ValidationError prefix", passed, failed, test_error_validation_prefix)
+
+    # Session tests
+    run_test("session default headers", passed, failed, test_session_default_headers)
+    run_test("session BasicAuth", passed, failed, test_session_auth_basic)
+    run_test("session caller override", passed, failed, test_session_caller_override)
+
+    # SameSite cookie tests
+    run_test("cookie SameSite stored", passed, failed, test_cookie_samesite_stored)
+    run_test("cookie SameSite=None not sent HTTP", passed, failed, test_cookie_samesite_none_http)
+
+    # Brotli tests
+    run_test("brotli decompression", passed, failed, test_brotli_decompression)
+    run_test("Accept-Encoding includes br", passed, failed, test_accept_encoding_br)
+
+    # Multipart tests
+    run_test("multipart POST fields", passed, failed, test_multipart_post)
+    run_test("multipart Content-Type", passed, failed, test_multipart_content_type)
 
     # raise_for_status() tests
     run_test(

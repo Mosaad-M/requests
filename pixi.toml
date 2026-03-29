@@ -14,3 +14,7 @@ format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]
 mojo = ">=0.26.2"
+brotli = ">=1.0"
+
+[pypi-dependencies]
+brotli = ">=1.0"

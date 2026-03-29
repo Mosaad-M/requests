@@ -24,6 +24,7 @@ from crypto.base64 import base64_encode
 from url import Url, parse_url
 from json import JsonValue, parse_json
 from zlib_decompress import zlib_decompress
+from brotli_decompress import brotli_decompress
 from std.ffi import external_call
 from std.memory.unsafe_pointer import alloc
 
@@ -323,6 +324,7 @@ struct HttpClient(Movable):
     var _jar_paths: List[String]
     var _jar_secure: List[Bool]
     var _jar_host_only: List[Bool]
+    var _jar_samesite: List[String]
 
     def __init__(
         out self,
@@ -363,6 +365,7 @@ struct HttpClient(Movable):
         self._jar_paths = List[String]()
         self._jar_secure = List[Bool]()
         self._jar_host_only = List[Bool]()
+        self._jar_samesite = List[String]()
 
     def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
@@ -389,6 +392,7 @@ struct HttpClient(Movable):
         self._jar_paths = take._jar_paths^
         self._jar_secure = take._jar_secure^
         self._jar_host_only = take._jar_host_only^
+        self._jar_samesite = take._jar_samesite^
 
     # === GET ===
 
@@ -540,6 +544,33 @@ struct HttpClient(Movable):
         var headers = HttpHeaders()
         headers.add("Content-Type", "application/x-www-form-urlencoded")
         return self._do_request("POST", url, form_body, headers)
+
+    def post_multipart(
+        mut self, url: String, fields: Dict[String, String]
+    ) raises -> HttpResponse:
+        """POST multipart/form-data with string fields.
+
+        Each field in `fields` is encoded as a form-data part. The boundary is
+        generated from the current Unix timestamp to ensure uniqueness.
+        """
+        var boundary = "MojoHTTPBoundary" + String(_unix_time_secs())
+        var buf = List[UInt8](capacity=512)
+        for key in fields.keys():
+            var value = fields[key]
+            _append_str(buf, "--")
+            _append_str(buf, boundary)
+            _append_str(buf, "\r\nContent-Disposition: form-data; name=\"")
+            _append_str(buf, key)
+            _append_str(buf, "\"\r\n\r\n")
+            _append_str(buf, value)
+            _append_str(buf, "\r\n")
+        _append_str(buf, "--")
+        _append_str(buf, boundary)
+        _append_str(buf, "--\r\n")
+        var body = String(unsafe_from_utf8=buf^)
+        var headers = HttpHeaders()
+        headers.add("Content-Type", "multipart/form-data; boundary=" + boundary)
+        return self._do_request("POST", url, body, headers)
 
     # === PUT ===
 
@@ -713,7 +744,7 @@ struct HttpClient(Movable):
         if not extra_headers.has("Accept"):
             _append_str(req_buf, "Accept: */*\r\n")
         if not extra_headers.has("Accept-Encoding"):
-            _append_str(req_buf, "Accept-Encoding: gzip, deflate\r\n")
+            _append_str(req_buf, "Accept-Encoding: gzip, deflate, br\r\n")
         _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
@@ -866,6 +897,13 @@ struct HttpClient(Movable):
             for i in range(len(body_bytes)):
                 compressed.append(body_bytes[i])
             var decompressed = zlib_decompress(compressed^, False)
+            parsed.body = String(unsafe_from_utf8=decompressed^)
+        elif _eq_ignore_case(ce, "br"):
+            var body_bytes = parsed.body.as_bytes()
+            var compressed = List[UInt8](capacity=len(body_bytes))
+            for i in range(len(body_bytes)):
+                compressed.append(body_bytes[i])
+            var decompressed = brotli_decompress(compressed^)
             parsed.body = String(unsafe_from_utf8=decompressed^)
 
         # Store Set-Cookie headers in the cookie jar
@@ -1024,6 +1062,7 @@ struct HttpClient(Movable):
         var secure = False
         var cookie_domain = host
         var host_only = True
+        var samesite = String("")
 
         var pos = semi + 1
         while pos < n:
@@ -1126,6 +1165,25 @@ struct HttpClient(Movable):
                 ):
                     secure = True
 
+            # SameSite= (9 chars: "samesite=")
+            if attr_len >= 9:
+                if (
+                    _lc(bytes[pos]) == 115       # s
+                    and _lc(bytes[pos+1]) == 97  # a
+                    and _lc(bytes[pos+2]) == 109 # m
+                    and _lc(bytes[pos+3]) == 101 # e
+                    and _lc(bytes[pos+4]) == 115 # s
+                    and _lc(bytes[pos+5]) == 105 # i
+                    and _lc(bytes[pos+6]) == 116 # t
+                    and _lc(bytes[pos+7]) == 101 # e
+                    and bytes[pos+8] == 61       # =
+                ):
+                    var v_start = pos + 9
+                    var v_buf = List[UInt8](capacity=attr_end - v_start)
+                    for j in range(v_start, attr_end):
+                        v_buf.append(bytes[j])
+                    samesite = String(unsafe_from_utf8=v_buf^)
+
             pos = attr_end + 1
 
         if max_age_found:
@@ -1142,6 +1200,7 @@ struct HttpClient(Movable):
                             self._jar_paths[i] = self._jar_paths[last]
                             self._jar_secure[i] = self._jar_secure[last]
                             self._jar_host_only[i] = self._jar_host_only[last]
+                            self._jar_samesite[i] = self._jar_samesite[last]
                         _ = self._jar_domains.pop()
                         _ = self._jar_names.pop()
                         _ = self._jar_values.pop()
@@ -1149,6 +1208,7 @@ struct HttpClient(Movable):
                         _ = self._jar_paths.pop()
                         _ = self._jar_secure.pop()
                         _ = self._jar_host_only.pop()
+                        _ = self._jar_samesite.pop()
                         break
                 return  # don't store a new entry
             else:
@@ -1162,6 +1222,7 @@ struct HttpClient(Movable):
                 self._jar_paths[i] = cookie_path
                 self._jar_secure[i] = secure
                 self._jar_host_only[i] = host_only
+                self._jar_samesite[i] = samesite
                 return
         self._jar_domains.append(cookie_domain)
         self._jar_names.append(name)
@@ -1170,6 +1231,7 @@ struct HttpClient(Movable):
         self._jar_paths.append(cookie_path)
         self._jar_secure.append(secure)
         self._jar_host_only.append(host_only)
+        self._jar_samesite.append(samesite)
 
     def _jar_cookie_for(self, host: String, req_path: String, is_https: Bool) -> String:
         """Build Cookie header value from jar entries matching host, path, and scheme.
@@ -1193,6 +1255,8 @@ struct HttpClient(Movable):
                 continue  # path doesn't match
             if not _domain_matches(host, self._jar_domains[i], self._jar_host_only[i]):
                 continue  # domain doesn't match
+            if self._jar_samesite[i] == "None" and not is_https:
+                continue  # SameSite=None requires Secure (HTTPS)
             if not first:
                 result.append(UInt8(59))  # ';'
                 result.append(UInt8(32))  # ' '
@@ -2296,3 +2360,128 @@ def _parse_status_code(
             )
         result = result * 10 + Int(c - UInt8(ord("0")))
     return result
+
+
+# ============================================================================
+# Session — Persistent Default Headers and Auth
+# ============================================================================
+
+
+struct Session(Movable):
+    """HTTP session with persistent default headers and optional authentication.
+
+    Default headers and auth are merged into every request. Caller-supplied
+    headers override session defaults (last value wins on the server).
+
+    Usage:
+        var s = Session(allow_private_ips=True)
+        s.set_header("X-API-Key", "abc123")
+        s.set_auth(BasicAuth("user", "pass"))
+        var r = s.get("http://example.com/api")
+    """
+
+    var client: HttpClient
+    var default_headers: HttpHeaders
+    var _auth_basic: BasicAuth
+    var _auth_bearer: BearerAuth
+    var _auth_mode: Int  # 0=none, 1=basic, 2=bearer
+
+    def __init__(
+        out self,
+        allow_private_ips: Bool = False,
+        timeout_secs: Int = 30,
+    ) raises:
+        self.client = HttpClient(
+            allow_private_ips=allow_private_ips, timeout_secs=timeout_secs
+        )
+        self.default_headers = HttpHeaders()
+        self._auth_basic = BasicAuth(String(""), String(""))
+        self._auth_bearer = BearerAuth(String(""))
+        self._auth_mode = 0
+
+    def __moveinit__(out self, deinit take: Self):
+        self.client = take.client^
+        self.default_headers = take.default_headers^
+        self._auth_basic = take._auth_basic^
+        self._auth_bearer = take._auth_bearer^
+        self._auth_mode = take._auth_mode
+
+    def set_header(mut self, key: String, value: String):
+        """Add or update a default header sent with every request."""
+        for i in range(len(self.default_headers)):
+            if _eq_ignore_case(self.default_headers._keys[i], key):
+                self.default_headers._values[i] = value
+                return
+        self.default_headers.add(key, value)
+
+    def set_auth(mut self, auth: BasicAuth):
+        """Set Basic authentication applied to every request."""
+        self._auth_basic = auth.copy()
+        self._auth_mode = 1
+
+    def set_auth(mut self, auth: BearerAuth):
+        """Set Bearer token authentication applied to every request."""
+        self._auth_bearer = auth.copy()
+        self._auth_mode = 2
+
+    def _merged(self, caller_headers: HttpHeaders) -> HttpHeaders:
+        """Return merged headers: defaults + auth + caller (caller wins)."""
+        var merged = HttpHeaders()
+        for i in range(len(self.default_headers)):
+            merged.add(self.default_headers._keys[i], self.default_headers._values[i])
+        if self._auth_mode == 1 and not caller_headers.has("Authorization"):
+            merged.add("Authorization", self._auth_basic.header())
+        elif self._auth_mode == 2 and not caller_headers.has("Authorization"):
+            merged.add("Authorization", self._auth_bearer.header())
+        for i in range(len(caller_headers)):
+            merged.add(caller_headers._keys[i], caller_headers._values[i])
+        return merged^
+
+    def get(mut self, url: String) raises -> HttpResponse:
+        """Perform a GET request with session headers."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("GET", url, String(""), h)
+
+    def get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
+        """Perform a GET request merging caller headers with session defaults."""
+        var h = self._merged(headers)
+        return self.client._do_request("GET", url, String(""), h)
+
+    def post(mut self, url: String, body: String) raises -> HttpResponse:
+        """Perform a POST request with session headers."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("POST", url, body, h)
+
+    def post(
+        mut self, url: String, body: String, headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a POST request merging caller headers with session defaults."""
+        var h = self._merged(headers)
+        return self.client._do_request("POST", url, body, h)
+
+    def put(mut self, url: String, body: String) raises -> HttpResponse:
+        """Perform a PUT request with session headers."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("PUT", url, body, h)
+
+    def put(
+        mut self, url: String, body: String, headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a PUT request merging caller headers with session defaults."""
+        var h = self._merged(headers)
+        return self.client._do_request("PUT", url, body, h)
+
+    def delete(mut self, url: String) raises -> HttpResponse:
+        """Perform a DELETE request with session headers."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("DELETE", url, String(""), h)
+
+    def patch(mut self, url: String, body: String) raises -> HttpResponse:
+        """Perform a PATCH request with session headers."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("PATCH", url, body, h)
