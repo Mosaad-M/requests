@@ -115,7 +115,7 @@ def zlib_decompress(data: List[UInt8], is_gzip: Bool) raises -> List[UInt8]:
         if out_used >= out_cap:
             var new_cap = out_cap * 2
             var cap_limit = len(data) * _MAX_DECOMP_RATIO
-            if cap_limit < _MAX_DECOMP_BYTES:
+            if cap_limit > _MAX_DECOMP_BYTES:
                 cap_limit = _MAX_DECOMP_BYTES
             if new_cap > cap_limit:
                 _ = external_call["inflateEnd", Int32](Int(zs))

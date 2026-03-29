@@ -58,7 +58,7 @@ def brotli_decompress(data: List[UInt8]) raises -> List[UInt8]:
         if result == Int32(3):  # NEEDS_MORE_OUTPUT — double and retry
             var new_cap = out_capacity * 2
             var cap_limit = in_size * _MAX_DECOMP_RATIO
-            if cap_limit < _MAX_DECOMP_BYTES:
+            if cap_limit > _MAX_DECOMP_BYTES:
                 cap_limit = _MAX_DECOMP_BYTES
             if new_cap > cap_limit:
                 in_buf.free()
