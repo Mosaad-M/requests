@@ -236,6 +236,15 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        elif self.path == "/oversized-cl":
+            # Claim a Content-Length far larger than MAX_RESPONSE_BYTES to trigger limit
+            body = b"small"
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "999999999")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/shutdown":
             self._respond(200, "OK", {"message": "shutting down"})
             # Schedule shutdown

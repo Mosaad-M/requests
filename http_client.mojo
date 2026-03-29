@@ -69,6 +69,10 @@ alias ERR_VALIDATION = "ValidationError"
 alias ERR_PARSE = "ParseError"
 alias ERR_CHUNKED = "ChunkedBodyError"
 
+# Maximum bytes allowed in a single response (headers + body).
+# Prevents memory exhaustion from malicious or runaway servers.
+alias MAX_RESPONSE_BYTES = 100 * 1024 * 1024  # 100 MB
+
 
 def _err_http(status: Int, text: String) -> Error:
     return Error(ERR_HTTP + ": " + String(status) + " " + text)
@@ -1538,7 +1542,7 @@ def _lc(b: UInt8) -> UInt8:
     return b
 
 
-def _buf_content_length(buf: List[UInt8], header_end: Int) -> Int:
+def _buf_content_length(buf: List[UInt8], header_end: Int) raises -> Int:
     """Scan buf[0..header_end] case-insensitively for 'content-length: N'.
 
     Returns N or -1 if not found.
@@ -1572,7 +1576,10 @@ def _buf_content_length(buf: List[UInt8], header_end: Int) -> Int:
                 var c = buf[pos]
                 if c < 48 or c > 57:
                     break
-                result = result * 10 + Int(c - 48)
+                var digit = Int(c - 48)
+                if result > (MAX_RESPONSE_BYTES - digit) // 10:
+                    raise _err_parse("Content-Length value overflows response size limit")
+                result = result * 10 + digit
                 pos += 1
             return result
         i += 1
@@ -1676,6 +1683,8 @@ def _recv_tls_keepalive(
         if len(chunk) == 0:
             raise _err_connection("connection closed before response headers")
         _list_append(buf, chunk)
+        if len(buf) > MAX_RESPONSE_BYTES:
+            raise _err_connection("response headers exceed size limit")
         header_end = _buf_find_crlf_crlf(buf)
 
     # HEAD response: no body — return headers only
@@ -1688,6 +1697,8 @@ def _recv_tls_keepalive(
     # Phase 2: read body based on transfer mode
     var cl = _buf_content_length(buf, header_end)
     if cl >= 0:
+        if cl > MAX_RESPONSE_BYTES:
+            raise _err_connection("Content-Length exceeds response size limit")
         # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
         buf.reserve(header_end + 4 + cl)
         var body_start = header_end + 4
@@ -1748,6 +1759,8 @@ def _recv_http_keepalive(
         if len(chunk) == 0:
             raise _err_connection("connection closed before response headers")
         _list_append(buf, chunk)
+        if len(buf) > MAX_RESPONSE_BYTES:
+            raise _err_connection("response headers exceed size limit")
         header_end = _buf_find_crlf_crlf(buf)
 
     # HEAD response: no body — return headers only
@@ -1760,6 +1773,8 @@ def _recv_http_keepalive(
     # Phase 2: read body based on transfer mode
     var cl = _buf_content_length(buf, header_end)
     if cl >= 0:
+        if cl > MAX_RESPONSE_BYTES:
+            raise _err_connection("Content-Length exceeds response size limit")
         # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
         buf.reserve(header_end + 4 + cl)
         var body_start = header_end + 4
@@ -2177,7 +2192,7 @@ def _hex_to_int(
         raise _err_chunked("chunk size hex string too long")
     var result = 0
     for i in range(start, end):
-        if result > MAX_CHUNK:
+        if result > MAX_CHUNK // 16:
             raise _err_chunked("chunk size too large (exceeds 256 MB)")
         var c = (data_ptr + i)[]
         result = result * 16
@@ -2208,6 +2223,7 @@ def _decode_chunked(body: String) raises -> String:
     var ptr = body_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
     var body_len = len(body)
     var pos = 0
+    var total_decoded = 0
     while pos < body_len:
         # Find end of chunk size line
         var crlf = _find_crlf(ptr, body_len, pos)
@@ -2232,6 +2248,9 @@ def _decode_chunked(body: String) raises -> String:
                 + String(body_len - data_start)
                 + " available"
             )
+        total_decoded += chunk_size
+        if total_decoded > MAX_RESPONSE_BYTES:
+            raise _err_connection("chunked body exceeds response size limit")
         for i in range(chunk_size):
             result.append((ptr + data_start + i)[])
         pos = data_start + chunk_size + 2  # skip data + trailing \r\n

@@ -1109,6 +1109,32 @@ def test_https_json_parse() raises:
 
 
 # ============================================================================
+# Security Hardening Tests (Phase 9)
+# ============================================================================
+
+
+def test_content_length_over_limit() raises:
+    """Content-Length exceeding the 100 MB limit should raise before reading body.
+
+    Values near the limit overflow the parse guard first (ParseError) or are
+    rejected by the receive cap (ConnectionError) — either is correct.
+    """
+    var client = HttpClient(allow_private_ips=True)
+    var raised = False
+    try:
+        _ = client.get(BASE + "/oversized-cl")
+    except e:
+        raised = True
+        var msg = String(e)
+        assert_true(
+            msg.startswith("ParseError") or msg.startswith("ConnectionError"),
+            "must raise ParseError or ConnectionError, got: " + msg,
+        )
+    if not raised:
+        raise Error("expected error for oversized Content-Length")
+
+
+# ============================================================================
 # Test Runner
 # ============================================================================
 
@@ -1314,6 +1340,14 @@ def main() raises:
         passed,
         failed,
         test_raise_for_status_500_raises,
+    )
+
+    # Security hardening tests (Phase 9)
+    run_test(
+        "Content-Length over limit raises",
+        passed,
+        failed,
+        test_content_length_over_limit,
     )
 
     print()
