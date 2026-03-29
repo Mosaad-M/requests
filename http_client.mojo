@@ -486,7 +486,7 @@ struct HttpClient(Movable):
                 timeout_secs=self._timeout_secs,
             )
             tls_sock = TlsSocket(http_sock.fd)
-            tls_sock.connect(url.host, self._ca_bundle.copy())
+            tls_sock.connect(url.host, self._ca_bundle)
             _ = tls_sock.send(req_buf)
             while header_end < 0:
                 var chunk = tls_sock.recv(4096)
@@ -804,7 +804,7 @@ struct HttpClient(Movable):
                     break
             if tls_hit >= 0:
                 try:
-                    raw_bytes = self._tls_try_reuse(tls_hit, req_buf.copy(), skip_body)
+                    raw_bytes = self._tls_try_reuse(tls_hit, req_buf, skip_body)
                     self._tls_times[tls_hit] = _unix_time_secs()
                 except:
                     self._tls_close_slot(tls_hit)
@@ -820,7 +820,7 @@ struct HttpClient(Movable):
                     timeout_secs=self._timeout_secs,
                 )
                 var new_tls = TlsSocket(tcp_sock.fd)
-                new_tls.connect(url.host, self._ca_bundle.copy())
+                new_tls.connect(url.host, self._ca_bundle)
                 _ = new_tls.send(req_buf)
                 raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
                 var evict = self._tls_evict_slot()
