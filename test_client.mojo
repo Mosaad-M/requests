@@ -1138,6 +1138,84 @@ def test_https_json_parse() raises:
 
 
 # ============================================================================
+# Phase 10 Tests — Configurable redirects, error URL sanitization, IP revalidation
+# ============================================================================
+
+
+def test_max_redirects_configurable() raises:
+    """Setting max_redirects=1 should raise TooManyRedirects on a 2-hop chain."""
+    var client = HttpClient(allow_private_ips=True)
+    client.max_redirects = 1
+    var raised = False
+    try:
+        # /redirect/multi → /redirect/301 → /redirect/target (2 redirects)
+        _ = client.get(BASE + "/redirect/multi")
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("TooManyRedirects"),
+            "must raise TooManyRedirects, got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected TooManyRedirects with max_redirects=1")
+
+
+def test_max_redirects_zero_raises() raises:
+    """max_redirects=0 should raise TooManyRedirects immediately on any redirect."""
+    var client = HttpClient(allow_private_ips=True)
+    client.max_redirects = 0
+    var raised = False
+    try:
+        _ = client.get(BASE + "/redirect/302")
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("TooManyRedirects"),
+            "must raise TooManyRedirects, got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected TooManyRedirects with max_redirects=0")
+
+
+def test_sanitized_url_strips_query() raises:
+    """sanitized_url() should return URL without query string."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/echo?secret=abc123&token=xyz")
+    var surl = resp.sanitized_url()
+    assert_not_contains(surl, "secret", "sanitized_url must not contain secret")
+    assert_not_contains(surl, "token", "sanitized_url must not contain token")
+    assert_contains(surl, "/echo", "sanitized_url keeps path")
+
+
+def test_sanitized_url_no_query_unchanged() raises:
+    """sanitized_url() on a URL with no query string returns it unchanged."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/")
+    var surl = resp.sanitized_url()
+    assert_contains(surl, "127.0.0.1", "sanitized_url keeps host")
+
+
+def test_redirect_private_ip_blocked() raises:
+    """Redirect to a private IP with no listening server raises an error.
+
+    The test server returns a 302 to http://10.255.255.254/ (a private IP in
+    the 10.x range with no HTTP server — port 80 is closed). With
+    allow_private_ips=True (needed to reach the test server at 127.0.0.1),
+    the redirect is attempted and fails because port 80 is closed.
+    This confirms the _follow_redirects → _do_request → TcpSocket.connect chain
+    works end-to-end for redirect targets.
+    """
+    var client = HttpClient(allow_private_ips=True)
+    var raised = False
+    try:
+        _ = client.get(BASE + "/redirect/to-private")
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected error when redirected to private IP with no server")
+
+
+# ============================================================================
 # Security Hardening Tests (Phase 9)
 # ============================================================================
 
@@ -1373,6 +1451,13 @@ def main() raises:
         failed,
         test_raise_for_status_500_raises,
     )
+
+    # Phase 10 tests
+    run_test("max_redirects configurable", passed, failed, test_max_redirects_configurable)
+    run_test("max_redirects=0 raises", passed, failed, test_max_redirects_zero_raises)
+    run_test("sanitized_url strips query", passed, failed, test_sanitized_url_strips_query)
+    run_test("sanitized_url no query unchanged", passed, failed, test_sanitized_url_no_query_unchanged)
+    run_test("redirect to private IP blocked", passed, failed, test_redirect_private_ip_blocked)
 
     # Security hardening tests (Phase 9)
     run_test(

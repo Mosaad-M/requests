@@ -202,6 +202,36 @@ struct HttpResponse(Copyable, Movable):
         if self.status_code >= 400:
             raise _err_http(self.status_code, self.status_text)
 
+    def sanitized_url(self) -> String:
+        """Return the response URL with the query string removed.
+
+        Use this instead of `.url` when logging errors, to avoid accidentally
+        leaking secrets embedded in query parameters (e.g. API keys).
+
+        Example:
+            http://api.example.com/data?api_key=SECRET  →  http://api.example.com/data
+        """
+        var u = self.url
+        var u_bytes = u.as_bytes()
+        for i in range(len(u_bytes)):
+            if u_bytes[i] == UInt8(63):  # '?'
+                var trimmed = List[UInt8](capacity=i)
+                for j in range(i):
+                    trimmed.append(u_bytes[j])
+                return String(unsafe_from_utf8=trimmed^)
+        return u
+
+    def error_without_url(self) raises:
+        """Like raise_for_status() but omits the URL from the error message.
+
+        Use when the request URL contains secrets in query parameters.
+
+        Raises:
+            Error with message "HTTP <code> <reason>" if status_code >= 400.
+        """
+        if self.status_code >= 400:
+            raise _err_http(self.status_code, self.status_text)
+
     def json(self) raises -> JsonValue:
         """Parse response body as JSON.
 
@@ -294,7 +324,8 @@ struct HttpClient(Movable):
 
     var user_agent: String
     var allow_private_ips: Bool
-    var _timeout_secs: Int  # socket send/recv timeout (seconds)
+    var max_redirects: Int    # maximum redirects to follow (default 10)
+    var _timeout_secs: Int    # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
     var _ca_bundle: List[X509Cert]
@@ -340,6 +371,7 @@ struct HttpClient(Movable):
             raise _err_validation("timeout_secs must be > 0, got " + String(timeout_secs))
         self.user_agent = String("MojoHTTP/0.1")
         self.allow_private_ips = allow_private_ips
+        self.max_redirects = 10
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
@@ -376,6 +408,7 @@ struct HttpClient(Movable):
     def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
         self.allow_private_ips = take.allow_private_ips
+        self.max_redirects = take.max_redirects
         self._timeout_secs = take._timeout_secs
         self._ca_bundle = take._ca_bundle^
         self._ca_loaded = take._ca_loaded
@@ -406,41 +439,41 @@ struct HttpClient(Movable):
     def get(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP GET request, following redirects."""
         var headers = HttpHeaders()
-        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
 
     def get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP GET request with custom headers."""
-        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
 
     def get(mut self, url: String, params: Dict[String, String]) raises -> HttpResponse:
         """Perform an HTTP GET request with URL query parameters."""
         var headers = HttpHeaders()
-        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, 10)
+        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, self.max_redirects)
 
     def get(
         mut self, url: String, headers: HttpHeaders, params: Dict[String, String]
     ) raises -> HttpResponse:
         """Perform an HTTP GET request with custom headers and URL query parameters."""
-        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, 10)
+        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, self.max_redirects)
 
     def get(mut self, url: String, auth: BasicAuth) raises -> HttpResponse:
         """Perform an HTTP GET request with Basic Authentication."""
         var headers = HttpHeaders()
         headers.add("Authorization", auth.header())
-        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
 
     def get(mut self, url: String, auth: BearerAuth) raises -> HttpResponse:
         """Perform an HTTP GET request with Bearer Token Authentication."""
         var headers = HttpHeaders()
         headers.add("Authorization", auth.header())
-        return self._follow_redirects("GET", url, String(""), headers, True, 10)
+        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
 
     def get(
         mut self, url: String, allow_redirects: Bool
     ) raises -> HttpResponse:
         """Perform an HTTP GET request, optionally not following redirects."""
         var headers = HttpHeaders()
-        return self._follow_redirects("GET", url, String(""), headers, allow_redirects, 10)
+        return self._follow_redirects("GET", url, String(""), headers, allow_redirects, self.max_redirects)
 
     def cookie_count(self) -> Int:
         """Return the number of cookies stored in the cookie jar."""

@@ -93,6 +93,13 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
         elif self.path == "/redirect/target":
             self._respond(200, "OK", {"message": "redirect target", "method": "GET"})
+        elif self.path == "/redirect/multi":
+            # First hop of a 2-hop chain: /redirect/multi → /redirect/301 → /redirect/target
+            self.send_response(302, "Found")
+            self.send_header("Location", "/redirect/301")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/redirect/loop":
             self.send_response(302, "Found")
             self.send_header("Location", "/redirect/loop")
@@ -236,6 +243,14 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        elif self.path == "/redirect/to-private":
+            # Redirect to a private IP with no open port — connection refused
+            # 10.255.255.254 is reachable (private range) but port 80 is closed
+            self.send_response(302, "Found")
+            self.send_header("Location", "http://10.255.255.254/")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/set-cookie-tld":
             # Set-Cookie with a single-label (TLD) domain — should be rejected
             body = json.dumps({"message": "tld domain cookie"})
