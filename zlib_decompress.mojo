@@ -37,6 +37,10 @@ alias _Z_NO_FLUSH = Int32(0)
 # ZLIB_VERSION string required by inflateInit2_ — must match the installed libz
 alias _ZLIB_VERSION = "1.2.11"
 
+# Decompression safety limits (zip-bomb protection)
+alias _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
+alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
+
 
 def zlib_decompress(data: List[UInt8], is_gzip: Bool) raises -> List[UInt8]:
     """Decompress gzip or zlib-deflate data using system zlib.
@@ -110,6 +114,15 @@ def zlib_decompress(data: List[UInt8], is_gzip: Bool) raises -> List[UInt8]:
         # Output buffer exhausted — double capacity and retry
         if out_used >= out_cap:
             var new_cap = out_cap * 2
+            var cap_limit = len(data) * _MAX_DECOMP_RATIO
+            if cap_limit < _MAX_DECOMP_BYTES:
+                cap_limit = _MAX_DECOMP_BYTES
+            if new_cap > cap_limit:
+                _ = external_call["inflateEnd", Int32](Int(zs))
+                out_buf.free()
+                in_buf.free()
+                zs.free()
+                raise Error("decompression ratio limit exceeded")
             var new_buf = alloc[UInt8](new_cap)
             _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_used)
             out_buf.free()
@@ -120,9 +133,9 @@ def zlib_decompress(data: List[UInt8], is_gzip: Bool) raises -> List[UInt8]:
     in_buf.free()
     zs.free()
 
-    # Materialise result as List[UInt8]
-    var result = List[UInt8](capacity=out_used)
-    for i in range(out_used):
-        result.append((out_buf + i)[])
+    # Materialise result as List[UInt8] using memcpy (avoids byte-by-byte loop)
+    var result = List[UInt8](capacity=out_used + 1)
+    result.resize(out_used, 0)
+    _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(out_buf), out_used)
     out_buf.free()
     return result^

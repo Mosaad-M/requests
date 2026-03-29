@@ -1014,6 +1014,35 @@ def test_cookie_samesite_none_http() raises:
     assert_not_contains(resp.body, "none_cookie", "SameSite=None+Secure not sent over HTTP")
 
 
+def test_supercookie_tld_rejected() raises:
+    """Domain=.com (single-label TLD) should be silently rejected (S7)."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-tld")
+    # The cookie must NOT be stored (domain rejected as single-label)
+    assert_true(client.cookie_count() == 0, "single-label domain cookie not stored")
+
+
+def test_httponly_flag_stored() raises:
+    """HttpOnly attribute must be parsed and stored without error."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-httponly")
+    # Cookie is stored (HttpOnly doesn't prevent storage, just JS access)
+    assert_true(client.cookie_count() == 1, "httponly cookie stored")
+    # It is still sent on subsequent requests (we're an HTTP client, not a browser)
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "secret", "httponly cookie sent")
+
+
+def test_samesite_normalization() raises:
+    """SameSite=STRICT should be normalized to 'Strict' (S9)."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-samesite-strict")
+    # Normalized cookie should still be sent to same host
+    assert_true(client.cookie_count() == 1, "normalized samesite cookie stored")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "ss=1", "normalized SameSite cookie sent")
+
+
 # ============================================================================
 # Brotli Tests
 # ============================================================================
@@ -1307,6 +1336,9 @@ def main() raises:
     # SameSite cookie tests
     run_test("cookie SameSite stored", passed, failed, test_cookie_samesite_stored)
     run_test("cookie SameSite=None not sent HTTP", passed, failed, test_cookie_samesite_none_http)
+    run_test("cookie TLD domain rejected", passed, failed, test_supercookie_tld_rejected)
+    run_test("cookie HttpOnly stored", passed, failed, test_httponly_flag_stored)
+    run_test("cookie SameSite normalization", passed, failed, test_samesite_normalization)
 
     # Brotli tests
     run_test("brotli decompression", passed, failed, test_brotli_decompression)

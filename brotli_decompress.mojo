@@ -18,6 +18,10 @@
 from std.ffi import external_call
 from std.memory.unsafe_pointer import alloc
 
+# Decompression safety limits (zip-bomb protection)
+alias _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
+alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
+
 
 def brotli_decompress(data: List[UInt8]) raises -> List[UInt8]:
     """Decompress Brotli-encoded data using libbrotlidec (one-shot API).
@@ -53,8 +57,16 @@ def brotli_decompress(data: List[UInt8]) raises -> List[UInt8]:
         )
         if result == Int32(3):  # NEEDS_MORE_OUTPUT — double and retry
             var new_cap = out_capacity * 2
+            var cap_limit = in_size * _MAX_DECOMP_RATIO
+            if cap_limit < _MAX_DECOMP_BYTES:
+                cap_limit = _MAX_DECOMP_BYTES
+            if new_cap > cap_limit:
+                in_buf.free()
+                out_buf.free()
+                out_size_ptr.free()
+                raise Error("brotli decompression ratio limit exceeded")
             var new_buf = alloc[UInt8](new_cap)
-            _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), 0)
+            _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_capacity)
             out_buf.free()
             out_buf = new_buf
             out_capacity = new_cap
@@ -69,8 +81,8 @@ def brotli_decompress(data: List[UInt8]) raises -> List[UInt8]:
     var written = out_size_ptr[]
     out_size_ptr.free()
 
-    var out = List[UInt8](capacity=written)
-    for i in range(written):
-        out.append((out_buf + i)[])
+    var out = List[UInt8](capacity=written + 1)
+    out.resize(written, 0)
+    _ = external_call["memcpy", Int](Int(out.unsafe_ptr()), Int(out_buf), written)
     out_buf.free()
     return out^

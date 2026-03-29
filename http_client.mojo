@@ -329,6 +329,7 @@ struct HttpClient(Movable):
     var _jar_secure: List[Bool]
     var _jar_host_only: List[Bool]
     var _jar_samesite: List[String]
+    var _jar_httponly: List[Bool]
 
     def __init__(
         out self,
@@ -370,6 +371,7 @@ struct HttpClient(Movable):
         self._jar_secure = List[Bool]()
         self._jar_host_only = List[Bool]()
         self._jar_samesite = List[String]()
+        self._jar_httponly = List[Bool]()
 
     def __moveinit__(out self, deinit take: Self):
         self.user_agent = take.user_agent^
@@ -397,6 +399,7 @@ struct HttpClient(Movable):
         self._jar_secure = take._jar_secure^
         self._jar_host_only = take._jar_host_only^
         self._jar_samesite = take._jar_samesite^
+        self._jar_httponly = take._jar_httponly^
 
     # === GET ===
 
@@ -1064,9 +1067,10 @@ struct HttpClient(Movable):
         var max_age_val = Int64(0)
         var cookie_path = String("/")
         var secure = False
+        var httponly = False
         var cookie_domain = host
         var host_only = True
-        var samesite = String("")
+        var samesite = String("Lax")  # RFC 6265bis default
 
         var pos = semi + 1
         while pos < n:
@@ -1154,7 +1158,19 @@ struct HttpClient(Movable):
                     for j in range(dom_start, attr_end):
                         dom_buf.append(bytes[j])
                     if len(dom_buf) > 0:
-                        cookie_domain = String(unsafe_from_utf8=dom_buf^)
+                        var d = String(unsafe_from_utf8=dom_buf^)
+                        # Reject single-label domains (e.g. ".com") to prevent
+                        # supercookies that match any host under a TLD (S7).
+                        # A valid cookie domain must contain at least one embedded dot.
+                        var has_inner_dot = False
+                        var d_bytes = d.as_bytes()
+                        for j in range(len(d_bytes)):
+                            if d_bytes[j] == UInt8(46):  # '.'
+                                has_inner_dot = True
+                                break
+                        if not has_inner_dot:
+                            return  # reject entire cookie — invalid Domain attr
+                        cookie_domain = d
                         host_only = False
 
             # Secure (6 chars, boolean flag — no '=')
@@ -1169,7 +1185,22 @@ struct HttpClient(Movable):
                 ):
                     secure = True
 
+            # HttpOnly (8 chars, boolean flag — no '=')
+            if attr_len == 8:
+                if (
+                    _lc(bytes[pos]) == 104       # h
+                    and _lc(bytes[pos+1]) == 116 # t
+                    and _lc(bytes[pos+2]) == 116 # t
+                    and _lc(bytes[pos+3]) == 112 # p
+                    and _lc(bytes[pos+4]) == 111 # o
+                    and _lc(bytes[pos+5]) == 110 # n
+                    and _lc(bytes[pos+6]) == 108 # l
+                    and _lc(bytes[pos+7]) == 121 # y
+                ):
+                    httponly = True
+
             # SameSite= (9 chars: "samesite=")
+            # Normalize to "Strict" / "Lax" / "None"; default "Lax" for unknown values
             if attr_len >= 9:
                 if (
                     _lc(bytes[pos]) == 115       # s
@@ -1183,10 +1214,15 @@ struct HttpClient(Movable):
                     and bytes[pos+8] == 61       # =
                 ):
                     var v_start = pos + 9
-                    var v_buf = List[UInt8](capacity=attr_end - v_start)
-                    for j in range(v_start, attr_end):
-                        v_buf.append(bytes[j])
-                    samesite = String(unsafe_from_utf8=v_buf^)
+                    var v_len = attr_end - v_start
+                    # Normalize: "strict" → "Strict", "lax" → "Lax", "none" → "None"
+                    if v_len == 6 and _lc(bytes[v_start]) == 115 and _lc(bytes[v_start+1]) == 116:
+                        samesite = String("Strict")  # "strict"
+                    elif v_len == 3 and _lc(bytes[v_start]) == 108:
+                        samesite = String("Lax")     # "lax"
+                    elif v_len == 4 and _lc(bytes[v_start]) == 110:
+                        samesite = String("None")    # "none"
+                    # else: leave as default "Lax" for unknown values
 
             pos = attr_end + 1
 
@@ -1205,6 +1241,7 @@ struct HttpClient(Movable):
                             self._jar_secure[i] = self._jar_secure[last]
                             self._jar_host_only[i] = self._jar_host_only[last]
                             self._jar_samesite[i] = self._jar_samesite[last]
+                            self._jar_httponly[i] = self._jar_httponly[last]
                         _ = self._jar_domains.pop()
                         _ = self._jar_names.pop()
                         _ = self._jar_values.pop()
@@ -1213,10 +1250,41 @@ struct HttpClient(Movable):
                         _ = self._jar_secure.pop()
                         _ = self._jar_host_only.pop()
                         _ = self._jar_samesite.pop()
+                        _ = self._jar_httponly.pop()
                         break
                 return  # don't store a new entry
             else:
                 expiry = _unix_time_secs() + max_age_val
+
+        # Purge expired cookies before inserting (S11)
+        var now_purge = _unix_time_secs()
+        var pi = 0
+        while pi < len(self._jar_names):
+            var exp = self._jar_expiries[pi]
+            if exp > 0 and now_purge > exp:
+                var last = len(self._jar_names) - 1
+                if pi != last:
+                    self._jar_domains[pi] = self._jar_domains[last]
+                    self._jar_names[pi] = self._jar_names[last]
+                    self._jar_values[pi] = self._jar_values[last]
+                    self._jar_expiries[pi] = self._jar_expiries[last]
+                    self._jar_paths[pi] = self._jar_paths[last]
+                    self._jar_secure[pi] = self._jar_secure[last]
+                    self._jar_host_only[pi] = self._jar_host_only[last]
+                    self._jar_samesite[pi] = self._jar_samesite[last]
+                    self._jar_httponly[pi] = self._jar_httponly[last]
+                _ = self._jar_domains.pop()
+                _ = self._jar_names.pop()
+                _ = self._jar_values.pop()
+                _ = self._jar_expiries.pop()
+                _ = self._jar_paths.pop()
+                _ = self._jar_secure.pop()
+                _ = self._jar_host_only.pop()
+                _ = self._jar_samesite.pop()
+                _ = self._jar_httponly.pop()
+                # don't increment pi — the slot now holds what was the last element
+            else:
+                pi += 1
 
         # Update if name already exists for this domain, else append
         for i in range(len(self._jar_names)):
@@ -1227,6 +1295,7 @@ struct HttpClient(Movable):
                 self._jar_secure[i] = secure
                 self._jar_host_only[i] = host_only
                 self._jar_samesite[i] = samesite
+                self._jar_httponly[i] = httponly
                 return
         self._jar_domains.append(cookie_domain)
         self._jar_names.append(name)
@@ -1236,6 +1305,7 @@ struct HttpClient(Movable):
         self._jar_secure.append(secure)
         self._jar_host_only.append(host_only)
         self._jar_samesite.append(samesite)
+        self._jar_httponly.append(httponly)
 
     def _jar_cookie_for(self, host: String, req_path: String, is_https: Bool) -> String:
         """Build Cookie header value from jar entries matching host, path, and scheme.
@@ -2130,9 +2200,10 @@ def _ptr_to_string(
     """
     if start < 0 or start >= end:
         return String("")
-    var result = List[UInt8](capacity=end - start)
-    for i in range(start, end):
-        result.append((data_ptr + i)[])
+    var size = end - start
+    var result = List[UInt8](capacity=size + 1)
+    result.resize(size, 0)
+    _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(data_ptr + start), size)
     return String(unsafe_from_utf8=result^)
 
 
@@ -2251,8 +2322,11 @@ def _decode_chunked(body: String) raises -> String:
         total_decoded += chunk_size
         if total_decoded > MAX_RESPONSE_BYTES:
             raise _err_connection("chunked body exceeds response size limit")
-        for i in range(chunk_size):
-            result.append((ptr + data_start + i)[])
+        var current_len = len(result)
+        result.resize(current_len + chunk_size, 0)
+        _ = external_call["memcpy", Int](
+            Int(result.unsafe_ptr()) + current_len, Int(ptr + data_start), chunk_size
+        )
         pos = data_start + chunk_size + 2  # skip data + trailing \r\n
     return String(unsafe_from_utf8=result^)
 

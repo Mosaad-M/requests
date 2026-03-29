@@ -236,6 +236,34 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        elif self.path == "/set-cookie-tld":
+            # Set-Cookie with a single-label (TLD) domain — should be rejected
+            body = json.dumps({"message": "tld domain cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "bad=1; Domain=.com")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-httponly":
+            body = json.dumps({"message": "httponly cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "secret=abc; HttpOnly")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-samesite-strict":
+            body = json.dumps({"message": "samesite strict normalized"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "ss=1; SameSite=STRICT")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
         elif self.path == "/oversized-cl":
             # Claim a Content-Length far larger than MAX_RESPONSE_BYTES to trigger limit
             body = b"small"
