@@ -32,6 +32,68 @@ alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024
 alias _ZSTD_SIZE_SENTINEL: UInt64 = UInt64(18446744073709551614)  # >= this = sentinel
 
 
+def zstd_decompress_ptr(data_addr: Int, data_len: Int) raises -> List[UInt8]:
+    """Decompress Zstandard data from a raw address+length (no List copy)."""
+    if data_len == 0:
+        return List[UInt8]()
+
+    var frame_size = external_call["ZSTD_getFrameContentSize", UInt64](
+        data_addr, Int(data_len)
+    )
+
+    if frame_size < _ZSTD_SIZE_SENTINEL:
+        var cap_limit = data_len * _MAX_DECOMP_RATIO
+        if cap_limit > _MAX_DECOMP_BYTES:
+            cap_limit = _MAX_DECOMP_BYTES
+        var wanted = Int(frame_size)
+        if wanted > cap_limit:
+            raise Error("zstd decompression ratio limit exceeded")
+        var out_buf = alloc[UInt8](wanted)
+        var written = external_call["ZSTD_decompress", Int](
+            Int(out_buf), Int(wanted), data_addr, Int(data_len)
+        )
+        var is_err = external_call["ZSTD_isError", UInt32](Int(written))
+        if is_err != UInt32(0):
+            out_buf.free()
+            raise Error("ZSTD_decompress error (exact path), code=" + String(written))
+        var result = List[UInt8](capacity=written + 1)
+        result.resize(written, 0)
+        _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(out_buf), written)
+        out_buf.free()
+        return result^
+    else:
+        var out_capacity = data_len * 4
+        if out_capacity < 4096:
+            out_capacity = 4096
+        var out_buf = alloc[UInt8](out_capacity)
+        var written = -1
+        var is_err = UInt32(1)
+        while True:
+            written = external_call["ZSTD_decompress", Int](
+                Int(out_buf), Int(out_capacity), data_addr, Int(data_len)
+            )
+            is_err = external_call["ZSTD_isError", UInt32](Int(written))
+            if is_err == UInt32(0):
+                break
+            var new_cap = out_capacity * 2
+            var cap_limit = data_len * _MAX_DECOMP_RATIO
+            if cap_limit > _MAX_DECOMP_BYTES:
+                cap_limit = _MAX_DECOMP_BYTES
+            if new_cap > cap_limit:
+                out_buf.free()
+                raise Error("zstd decompression ratio limit exceeded")
+            var new_buf = alloc[UInt8](new_cap)
+            _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_capacity)
+            out_buf.free()
+            out_buf = new_buf
+            out_capacity = new_cap
+        var result = List[UInt8](capacity=written + 1)
+        result.resize(written, 0)
+        _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(out_buf), written)
+        out_buf.free()
+        return result^
+
+
 def zstd_decompress(data: List[UInt8]) raises -> List[UInt8]:
     """Decompress Zstandard-encoded data using libzstd.
 

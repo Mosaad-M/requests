@@ -125,6 +125,22 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("X-Test-Server", "mojo-test/1.0")
             self.end_headers()
             self.wfile.write(compressed)
+        elif self.path == "/gzip-large":
+            import gzip as _gzip
+            # 50 KB of semi-random printable ASCII — compresses to ~60-70%
+            # (ratio ~1.5–2:1, well under the 256× decompression cap)
+            import string as _string
+            chars = (_string.ascii_letters + _string.digits + " .,;:!?") * 800
+            large_body = chars[:50000]
+            compressed = _gzip.compress(large_body.encode())
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.send_header("Connection", "close")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.end_headers()
+            self.wfile.write(compressed)
         elif self.path == "/deflate":
             import zlib as _zlib
             body = json.dumps({"encoding": "deflate", "message": "hello compressed"})

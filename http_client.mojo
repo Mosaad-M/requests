@@ -23,9 +23,9 @@ from crypto.cert import X509Cert
 from crypto.base64 import base64_encode
 from url import Url, parse_url
 from json import JsonValue, parse_json
-from zlib_decompress import zlib_decompress
-from brotli_decompress import brotli_decompress
-from zstd_decompress import zstd_decompress
+from zlib_decompress import zlib_decompress, zlib_decompress_ptr
+from brotli_decompress import brotli_decompress, brotli_decompress_ptr
+from zstd_decompress import zstd_decompress, zstd_decompress_ptr
 from psl import is_public_suffix
 from std.ffi import external_call
 from std.memory.unsafe_pointer import alloc
@@ -1009,35 +1009,33 @@ struct HttpClient(Movable):
         var raw_response = String(unsafe_from_utf8=raw_bytes^)
         var parsed = _parse_response(raw_response, url_str)
 
-        # Decompress body if Content-Encoding: gzip or deflate
+        # Decompress body if Content-Encoding is set.
+        # Phase 14: use _ptr variants — decompress directly from the body's
+        # internal byte buffer without an intermediate List[UInt8] copy.
         var ce = parsed.headers.get("Content-Encoding")
         if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip"):
             var body_bytes = parsed.body.as_bytes()
-            var compressed = List[UInt8](capacity=len(body_bytes))
-            for i in range(len(body_bytes)):
-                compressed.append(body_bytes[i])
-            var decompressed = zlib_decompress(compressed^, True)
+            var decompressed = zlib_decompress_ptr(
+                Int(body_bytes.unsafe_ptr()), len(body_bytes), True
+            )
             parsed.body = String(unsafe_from_utf8=decompressed^)
         elif _eq_ignore_case(ce, "deflate"):
             var body_bytes = parsed.body.as_bytes()
-            var compressed = List[UInt8](capacity=len(body_bytes))
-            for i in range(len(body_bytes)):
-                compressed.append(body_bytes[i])
-            var decompressed = zlib_decompress(compressed^, False)
+            var decompressed = zlib_decompress_ptr(
+                Int(body_bytes.unsafe_ptr()), len(body_bytes), False
+            )
             parsed.body = String(unsafe_from_utf8=decompressed^)
         elif _eq_ignore_case(ce, "br"):
             var body_bytes = parsed.body.as_bytes()
-            var compressed = List[UInt8](capacity=len(body_bytes))
-            for i in range(len(body_bytes)):
-                compressed.append(body_bytes[i])
-            var decompressed = brotli_decompress(compressed^)
+            var decompressed = brotli_decompress_ptr(
+                Int(body_bytes.unsafe_ptr()), len(body_bytes)
+            )
             parsed.body = String(unsafe_from_utf8=decompressed^)
         elif _eq_ignore_case(ce, "zstd"):
             var body_bytes = parsed.body.as_bytes()
-            var compressed = List[UInt8](capacity=len(body_bytes))
-            for i in range(len(body_bytes)):
-                compressed.append(body_bytes[i])
-            var decompressed = zstd_decompress(compressed^)
+            var decompressed = zstd_decompress_ptr(
+                Int(body_bytes.unsafe_ptr()), len(body_bytes)
+            )
             parsed.body = String(unsafe_from_utf8=decompressed^)
 
         # Store Set-Cookie headers in the cookie jar

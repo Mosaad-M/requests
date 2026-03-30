@@ -1351,6 +1351,28 @@ def test_proxy_env_var() raises:
 
 
 # ============================================================================
+# Phase 14 Tests — Streaming Decompression
+# ============================================================================
+
+
+def test_streaming_gzip_large() raises:
+    """Large gzip response should decompress correctly (inline inflate path)."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/gzip-large")
+    assert_eq(resp.status_code, 200, "status_code")
+    # Body is 50,000 bytes of semi-random printable ASCII
+    assert_eq(len(resp.body), 50000, "decompressed body length")
+
+
+def test_streaming_gzip_existing() raises:
+    """Existing small gzip response still works after streaming refactor."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/gzip")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "gzip", "body still decoded correctly")
+
+
+# ============================================================================
 # Phase 12 Tests — zstd Decompression
 # ============================================================================
 
@@ -1608,6 +1630,10 @@ def main() raises:
     run_test("proxy HTTP POST", passed, failed, test_proxy_http_post)
     run_test("no proxy when unset", passed, failed, test_no_proxy_when_unset)
     run_test("proxy env var auto-detect", passed, failed, test_proxy_env_var)
+
+    # Phase 14 tests
+    run_test("streaming gzip large", passed, failed, test_streaming_gzip_large)
+    run_test("streaming gzip existing still works", passed, failed, test_streaming_gzip_existing)
 
     # Phase 12 tests
     run_test("zstd decompression", passed, failed, test_zstd_decompression)

@@ -42,6 +42,80 @@ alias _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
 alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
 
 
+def zlib_decompress_ptr(
+    data_addr: Int, data_len: Int, is_gzip: Bool
+) raises -> List[UInt8]:
+    """Decompress gzip or deflate data from a raw address+length (no List copy).
+
+    Accepts the data buffer as a raw Int address to avoid the intermediate
+    List[UInt8] copy — use Int(bytes.unsafe_ptr()) to obtain the address.
+    """
+    if data_len == 0:
+        return List[UInt8]()
+
+    # Allocate z_stream; zero-init
+    var zs = alloc[UInt8](_ZSTREAM_SIZE)
+    for i in range(_ZSTREAM_SIZE):
+        (zs + i)[] = UInt8(0)
+
+    var window_bits = Int32(47) if is_gzip else Int32(15)
+    var ver = String(_ZLIB_VERSION)
+    var ver_ptr = ver.as_c_string_slice().unsafe_ptr()
+
+    var init_ret = external_call["inflateInit2_", Int32](
+        Int(zs), window_bits, ver_ptr, Int32(_ZSTREAM_SIZE)
+    )
+    if init_ret != _Z_OK:
+        zs.free()
+        raise Error("inflateInit2_ returned " + String(init_ret))
+
+    (zs + _ZSTREAM_NEXT_IN).bitcast[Int]()[] = data_addr
+    (zs + _ZSTREAM_AVAIL_IN).bitcast[UInt32]()[] = UInt32(data_len)
+
+    var out_cap = data_len * 4
+    if out_cap < 4096:
+        out_cap = 4096
+    var out_buf = alloc[UInt8](out_cap)
+    var out_used = 0
+
+    while True:
+        (zs + _ZSTREAM_NEXT_OUT).bitcast[Int]()[] = Int(out_buf + out_used)
+        (zs + _ZSTREAM_AVAIL_OUT).bitcast[UInt32]()[] = UInt32(out_cap - out_used)
+        var ret = external_call["inflate", Int32](Int(zs), _Z_NO_FLUSH)
+        out_used = Int((zs + _ZSTREAM_TOTAL_OUT).bitcast[UInt64]()[])
+        if ret == _Z_STREAM_END:
+            break
+        if ret != _Z_OK:
+            _ = external_call["inflateEnd", Int32](Int(zs))
+            out_buf.free()
+            zs.free()
+            raise Error("inflate returned " + String(ret))
+        if out_used >= out_cap:
+            var new_cap = out_cap * 2
+            var cap_limit = data_len * _MAX_DECOMP_RATIO
+            if cap_limit > _MAX_DECOMP_BYTES:
+                cap_limit = _MAX_DECOMP_BYTES
+            if new_cap > cap_limit:
+                _ = external_call["inflateEnd", Int32](Int(zs))
+                out_buf.free()
+                zs.free()
+                raise Error("decompression ratio limit exceeded")
+            var new_buf = alloc[UInt8](new_cap)
+            _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_used)
+            out_buf.free()
+            out_buf = new_buf
+            out_cap = new_cap
+
+    _ = external_call["inflateEnd", Int32](Int(zs))
+    zs.free()
+
+    var result = List[UInt8](capacity=out_used + 1)
+    result.resize(out_used, 0)
+    _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(out_buf), out_used)
+    out_buf.free()
+    return result^
+
+
 def zlib_decompress(data: List[UInt8], is_gzip: Bool) raises -> List[UInt8]:
     """Decompress gzip or zlib-deflate data using system zlib.
 
