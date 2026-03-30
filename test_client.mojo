@@ -1336,6 +1336,20 @@ def test_no_proxy_when_unset() raises:
     assert_eq(resp.status_code, 200, "direct request still works")
 
 
+def test_proxy_env_var() raises:
+    """HTTP_PROXY env var should be picked up automatically (Phase 13B).
+
+    The pixi test task does not set HTTP_PROXY so this test verifies the env
+    auto-detection code path compiles and runs without errors when the env var
+    is absent (no proxy configured → direct connection succeeds).
+    """
+    # Env var is NOT set in the test environment — direct connection expected
+    var client = HttpClient(allow_private_ips=True)
+    # proxy_url is empty; HTTP_PROXY env var is not set → direct path taken
+    var resp = client.get(BASE + "/")
+    assert_eq(resp.status_code, 200, "env proxy detection: direct fallback works")
+
+
 # ============================================================================
 # Phase 12 Tests — zstd Decompression
 # ============================================================================
@@ -1593,6 +1607,7 @@ def main() raises:
     run_test("proxy HTTP GET", passed, failed, test_proxy_http_get)
     run_test("proxy HTTP POST", passed, failed, test_proxy_http_post)
     run_test("no proxy when unset", passed, failed, test_no_proxy_when_unset)
+    run_test("proxy env var auto-detect", passed, failed, test_proxy_env_var)
 
     # Phase 12 tests
     run_test("zstd decompression", passed, failed, test_zstd_decompression)

@@ -36,6 +36,72 @@ from std.memory.unsafe_pointer import alloc
 # ============================================================================
 
 
+fn _getenv(name: String) -> String:
+    """Read an environment variable by name. Returns empty string if not set."""
+    var nb = name.as_bytes()
+    var nlen = len(nb)
+    var name_buf = alloc[Int8](nlen + 1)
+    for i in range(nlen):
+        (name_buf + i)[] = Int8(nb[i])
+    (name_buf + nlen)[] = Int8(0)
+    var val_ptr = external_call["getenv", Int](Int(name_buf))
+    name_buf.free()
+    if val_ptr == 0:
+        return String("")
+    var length = external_call["strlen", Int](val_ptr)
+    if length == 0:
+        return String("")
+    var out_buf = alloc[UInt8](length)
+    _ = external_call["memcpy", Int](Int(out_buf), val_ptr, length)
+    var out = List[UInt8](capacity=length)
+    for i in range(length):
+        out.append((out_buf + i)[])
+    out_buf.free()
+    return String(unsafe_from_utf8=out^)
+
+
+fn _no_proxy_matches(host: String, no_proxy: String) -> Bool:
+    """Return True if host matches the NO_PROXY env var value.
+
+    Formats supported:
+      *              — bypass proxy for all hosts
+      hostname       — exact match
+      .suffix.com    — suffix match (matches api.suffix.com)
+      192.168.1.1    — exact IP match
+    Entries are comma-separated; leading/trailing whitespace is ignored.
+    """
+    if len(no_proxy) == 0:
+        return False
+    var np_bytes = no_proxy.as_bytes()
+    var start = 0
+    var n = len(np_bytes)
+    # Iterate comma-separated entries
+    for i in range(n + 1):
+        if i == n or np_bytes[i] == UInt8(44):  # ',' or end
+            if i > start:
+                # Trim whitespace
+                var lo = start
+                var hi = i
+                while lo < hi and np_bytes[lo] == UInt8(32):
+                    lo += 1
+                while hi > lo and np_bytes[hi - 1] == UInt8(32):
+                    hi -= 1
+                if lo < hi:
+                    var entry_bytes = List[UInt8](capacity=hi - lo)
+                    for j in range(lo, hi):
+                        entry_bytes.append(np_bytes[j])
+                    var entry = String(unsafe_from_utf8=entry_bytes^)
+                    if entry == "*":
+                        return True
+                    if entry == host:
+                        return True
+                    # Suffix match: ".suffix" matches "api.suffix"
+                    if entry.startswith(".") and host.endswith(entry):
+                        return True
+            start = i + 1
+    return False
+
+
 fn _unix_time_secs() -> Int64:
     """Return current Unix time in seconds via clock_gettime(CLOCK_REALTIME)."""
     # struct timespec { int64_t tv_sec; int64_t tv_nsec; }  (16 bytes on 64-bit)
@@ -873,7 +939,7 @@ struct HttpClient(Movable):
 
             # Phase 2: new TLS connection if no reuse
             if tls_hit < 0:
-                var tcp_sock = self._tcp_connect(url.host, url.port)
+                var tcp_sock = self._tcp_connect(url.host, url.port, "https")
                 var new_tls = TlsSocket(tcp_sock.fd)
                 new_tls.connect(url.host, self._ca_bundle)
                 _ = new_tls.send(req_buf)
@@ -1104,17 +1170,38 @@ struct HttpClient(Movable):
     # -------------------------------------------------------------------------
 
     def _tcp_connect(
-        self, target_host: String, target_port: Int
+        self, target_host: String, target_port: Int, scheme: String = "http"
     ) raises -> TcpSocket:
         """Return a TcpSocket connected to target_host:target_port.
 
-        If self.proxy_url is set, connects to the proxy and sends an HTTP
-        CONNECT request to establish a TCP tunnel to the target. After a 200
-        response the returned socket is transparently tunneled.
+        If self.proxy_url is set, or if HTTP_PROXY / HTTPS_PROXY env vars are
+        set (Phase 13B), connects through an HTTP CONNECT proxy tunnel.
+        NO_PROXY env var is respected (comma-separated hostnames / .suffixes).
 
-        If self.proxy_url is empty, connects directly (normal behaviour).
+        If no proxy is configured, connects directly (normal behaviour).
         """
-        if len(self.proxy_url) == 0:
+        # Determine effective proxy URL: field takes priority over env vars
+        var effective_proxy = self.proxy_url
+        if len(effective_proxy) == 0:
+            # Phase 13B: auto-detect from environment
+            if scheme == "https":
+                effective_proxy = _getenv("HTTPS_PROXY")
+                if len(effective_proxy) == 0:
+                    effective_proxy = _getenv("https_proxy")
+            if len(effective_proxy) == 0:
+                effective_proxy = _getenv("HTTP_PROXY")
+                if len(effective_proxy) == 0:
+                    effective_proxy = _getenv("http_proxy")
+
+        # Check NO_PROXY — bypass proxy for matching hosts
+        if len(effective_proxy) > 0:
+            var no_proxy = _getenv("NO_PROXY")
+            if len(no_proxy) == 0:
+                no_proxy = _getenv("no_proxy")
+            if _no_proxy_matches(target_host, no_proxy):
+                effective_proxy = String("")
+
+        if len(effective_proxy) == 0:
             # Direct connection — existing behaviour
             var sock = TcpSocket()
             sock.connect(
@@ -1125,8 +1212,8 @@ struct HttpClient(Movable):
             )
             return sock^
 
-        # Parse proxy_url → proxy host + port
-        var proxy_parsed = parse_url(self.proxy_url)
+        # Parse effective proxy URL → proxy host + port
+        var proxy_parsed = parse_url(effective_proxy)
         var proxy_host = proxy_parsed.host
         var proxy_port = proxy_parsed.port
 
