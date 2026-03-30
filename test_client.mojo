@@ -1303,6 +1303,26 @@ def test_redirect_same_host_only() raises:
 
 
 # ============================================================================
+# Phase 12 Tests — zstd Decompression
+# ============================================================================
+
+
+def test_zstd_decompression() raises:
+    """GET /zstd should return the decompressed JSON body."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/zstd")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "hello zstd", "zstd body decoded")
+
+
+def test_accept_encoding_zstd() raises:
+    """Accept-Encoding header must include 'zstd'."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/accept-encoding")
+    assert_contains(resp.body, "zstd", "Accept-Encoding must include zstd")
+
+
+# ============================================================================
 # Test Runner
 # ============================================================================
 
@@ -1534,6 +1554,10 @@ def main() raises:
     run_test("cookie PSL example.co.uk accepted", passed, failed, test_cookie_psl_example_co_uk_accepted)
     run_test("follow_redirects=False", passed, failed, test_follow_redirects_disabled)
     run_test("redirect same host only", passed, failed, test_redirect_same_host_only)
+
+    # Phase 12 tests
+    run_test("zstd decompression", passed, failed, test_zstd_decompression)
+    run_test("Accept-Encoding includes zstd", passed, failed, test_accept_encoding_zstd)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

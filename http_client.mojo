@@ -25,6 +25,7 @@ from url import Url, parse_url
 from json import JsonValue, parse_json
 from zlib_decompress import zlib_decompress
 from brotli_decompress import brotli_decompress
+from zstd_decompress import zstd_decompress
 from psl import is_public_suffix
 from std.ffi import external_call
 from std.memory.unsafe_pointer import alloc
@@ -803,7 +804,7 @@ struct HttpClient(Movable):
         if not extra_headers.has("Accept"):
             _append_str(req_buf, "Accept: */*\r\n")
         if not extra_headers.has("Accept-Encoding"):
-            _append_str(req_buf, "Accept-Encoding: gzip, deflate, br\r\n")
+            _append_str(req_buf, "Accept-Encoding: gzip, deflate, br, zstd\r\n")
         _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
@@ -973,6 +974,13 @@ struct HttpClient(Movable):
             for i in range(len(body_bytes)):
                 compressed.append(body_bytes[i])
             var decompressed = brotli_decompress(compressed^)
+            parsed.body = String(unsafe_from_utf8=decompressed^)
+        elif _eq_ignore_case(ce, "zstd"):
+            var body_bytes = parsed.body.as_bytes()
+            var compressed = List[UInt8](capacity=len(body_bytes))
+            for i in range(len(body_bytes)):
+                compressed.append(body_bytes[i])
+            var decompressed = zstd_decompress(compressed^)
             parsed.body = String(unsafe_from_utf8=decompressed^)
 
         # Store Set-Cookie headers in the cookie jar

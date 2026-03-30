@@ -234,6 +234,21 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(compressed)
             except ImportError:
                 self._respond(503, "Service Unavailable", {"error": "brotli not installed"})
+        elif self.path == "/zstd":
+            try:
+                import zstandard as _zstd
+                body = json.dumps({"encoding": "zstd", "message": "hello zstd"})
+                cctx = _zstd.ZstdCompressor()
+                compressed = cctx.compress(body.encode())
+                self.send_response(200, "OK")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Encoding", "zstd")
+                self.send_header("Content-Length", str(len(compressed)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(compressed)
+            except ImportError:
+                self._respond(503, "Service Unavailable", {"error": "zstandard not installed"})
         elif self.path == "/stream/medium":
             body = b"A" * (256 * 1024)
             self.send_response(200, "OK")
