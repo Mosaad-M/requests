@@ -330,6 +330,7 @@ struct HttpClient(Movable):
     var follow_redirects: Bool          # if False, return first redirect response as-is
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
+    var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
@@ -380,6 +381,7 @@ struct HttpClient(Movable):
         self.follow_redirects = True
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
+        self.proxy_url = String("")
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
@@ -420,6 +422,7 @@ struct HttpClient(Movable):
         self.follow_redirects = take.follow_redirects
         self.redirect_same_host_only = take.redirect_same_host_only
         self.pool_idle_timeout_secs = take.pool_idle_timeout_secs
+        self.proxy_url = take.proxy_url^
         self._timeout_secs = take._timeout_secs
         self._ca_bundle = take._ca_bundle^
         self._ca_loaded = take._ca_loaded
@@ -870,13 +873,7 @@ struct HttpClient(Movable):
 
             # Phase 2: new TLS connection if no reuse
             if tls_hit < 0:
-                var tcp_sock = TcpSocket()
-                tcp_sock.connect(
-                    url.host,
-                    url.port,
-                    reject_private_ips=not self.allow_private_ips,
-                    timeout_secs=self._timeout_secs,
-                )
+                var tcp_sock = self._tcp_connect(url.host, url.port)
                 var new_tls = TlsSocket(tcp_sock.fd)
                 new_tls.connect(url.host, self._ca_bundle)
                 _ = new_tls.send(req_buf)
@@ -919,13 +916,7 @@ struct HttpClient(Movable):
 
             # Phase 2: new HTTP connection if no reuse
             if http_hit < 0:
-                var new_sock = TcpSocket()
-                new_sock.connect(
-                    url.host,
-                    url.port,
-                    reject_private_ips=not self.allow_private_ips,
-                    timeout_secs=self._timeout_secs,
-                )
+                var new_sock = self._tcp_connect(url.host, url.port)
                 var request = String(unsafe_from_utf8=req_buf^)
                 _ = new_sock.send(request)
                 raw_bytes = _recv_http_keepalive(new_sock, skip_body)
@@ -1107,6 +1098,109 @@ struct HttpClient(Movable):
         else:
             _ = self._tls_sock3.send(req_buf)
             return _recv_tls_keepalive(self._tls_sock3, skip_body)
+
+    # -------------------------------------------------------------------------
+    # Proxy CONNECT helper
+    # -------------------------------------------------------------------------
+
+    def _tcp_connect(
+        self, target_host: String, target_port: Int
+    ) raises -> TcpSocket:
+        """Return a TcpSocket connected to target_host:target_port.
+
+        If self.proxy_url is set, connects to the proxy and sends an HTTP
+        CONNECT request to establish a TCP tunnel to the target. After a 200
+        response the returned socket is transparently tunneled.
+
+        If self.proxy_url is empty, connects directly (normal behaviour).
+        """
+        if len(self.proxy_url) == 0:
+            # Direct connection — existing behaviour
+            var sock = TcpSocket()
+            sock.connect(
+                target_host,
+                target_port,
+                reject_private_ips=not self.allow_private_ips,
+                timeout_secs=self._timeout_secs,
+            )
+            return sock^
+
+        # Parse proxy_url → proxy host + port
+        var proxy_parsed = parse_url(self.proxy_url)
+        var proxy_host = proxy_parsed.host
+        var proxy_port = proxy_parsed.port
+
+        # Connect TCP to the proxy (proxy itself is trusted — allow private IPs)
+        var sock = TcpSocket()
+        sock.connect(
+            proxy_host,
+            proxy_port,
+            reject_private_ips=False,
+            timeout_secs=self._timeout_secs,
+        )
+
+        # Send CONNECT request
+        var connect_req = (
+            "CONNECT "
+            + target_host
+            + ":"
+            + String(target_port)
+            + " HTTP/1.1\r\nHost: "
+            + target_host
+            + ":"
+            + String(target_port)
+            + "\r\n\r\n"
+        )
+        _ = sock.send(connect_req)
+
+        # Read proxy response until "\r\n\r\n"
+        var resp_buf = alloc[UInt8](4096)
+        var resp_len = 0
+        var found_end = False
+        while not found_end and resp_len < 4096:
+            var n = external_call["recv", Int](
+                sock.fd, Int(resp_buf + resp_len), 4096 - resp_len, Int32(0)
+            )
+            if n <= 0:
+                resp_buf.free()
+                raise _err_connection("proxy CONNECT: connection closed before response")
+            resp_len += n
+            # Check for end of headers: \r\n\r\n
+            if resp_len >= 4:
+                for i in range(resp_len - 3):
+                    if (
+                        (resp_buf + i)[] == UInt8(13)       # \r
+                        and (resp_buf + i + 1)[] == UInt8(10)  # \n
+                        and (resp_buf + i + 2)[] == UInt8(13)  # \r
+                        and (resp_buf + i + 3)[] == UInt8(10)  # \n
+                    ):
+                        found_end = True
+                        break
+
+        # Convert response to String and check for 200
+        var resp_bytes = List[UInt8](capacity=resp_len)
+        for i in range(resp_len):
+            resp_bytes.append((resp_buf + i)[])
+        resp_buf.free()
+        var resp_str = String(unsafe_from_utf8=resp_bytes^)
+
+        # Status line: "HTTP/1.x 200 ..."
+        var status_ok = False
+        if len(resp_str) >= 12:
+            var resp_b = resp_str.as_bytes()
+            # Check for "200" at position 9 (after "HTTP/1.x ")
+            if (
+                len(resp_b) >= 12
+                and resp_b[9] == UInt8(50)   # '2'
+                and resp_b[10] == UInt8(48)  # '0'
+                and resp_b[11] == UInt8(48)  # '0'
+            ):
+                status_ok = True
+        if not status_ok:
+            var preview = resp_str
+            raise _err_connection("proxy CONNECT failed: " + preview)
+
+        return sock^
 
     # -------------------------------------------------------------------------
 

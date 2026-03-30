@@ -9,7 +9,7 @@ env = { TLS_PURE = "../tls_pure" }
 
 [tasks]
 run = "bash build_and_run.sh main.mojo"
-test = "bash -c 'python test_server.py & sleep 1 && bash build_and_run.sh test_client.mojo; RET=$?; kill %1 2>/dev/null; exit $RET'"
+test = "bash -c 'python test_server.py & python test_proxy_server.py & sleep 1 && bash build_and_run.sh test_client.mojo; RET=$?; kill %1 %2 2>/dev/null; exit $RET'"
 format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]

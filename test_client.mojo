@@ -1303,6 +1303,40 @@ def test_redirect_same_host_only() raises:
 
 
 # ============================================================================
+# Phase 13 Tests — HTTP CONNECT Proxy
+# ============================================================================
+
+alias PROXY_URL = "http://127.0.0.1:18081"
+
+
+def test_proxy_http_get() raises:
+    """Client with proxy_url should tunnel HTTP requests through the proxy."""
+    var client = HttpClient(allow_private_ips=True)
+    client.proxy_url = PROXY_URL
+    var resp = client.get(BASE + "/")
+    assert_eq(resp.status_code, 200, "status_code via proxy")
+    assert_contains(resp.body, "hello from test server", "body via proxy")
+
+
+def test_proxy_http_post() raises:
+    """Client with proxy_url should tunnel HTTP POST through the proxy."""
+    var client = HttpClient(allow_private_ips=True)
+    client.proxy_url = PROXY_URL
+    var hdrs = HttpHeaders()
+    hdrs.add("Content-Type", "application/json")
+    var resp = client.post(BASE + "/echo", "{\"via\":\"proxy\"}", hdrs)
+    assert_eq(resp.status_code, 200, "status_code via proxy POST")
+    assert_contains(resp.body, "proxy", "body via proxy POST")
+
+
+def test_no_proxy_when_unset() raises:
+    """Without proxy_url, requests go directly (no regression)."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/")
+    assert_eq(resp.status_code, 200, "direct request still works")
+
+
+# ============================================================================
 # Phase 12 Tests — zstd Decompression
 # ============================================================================
 
@@ -1554,6 +1588,11 @@ def main() raises:
     run_test("cookie PSL example.co.uk accepted", passed, failed, test_cookie_psl_example_co_uk_accepted)
     run_test("follow_redirects=False", passed, failed, test_follow_redirects_disabled)
     run_test("redirect same host only", passed, failed, test_redirect_same_host_only)
+
+    # Phase 13 tests
+    run_test("proxy HTTP GET", passed, failed, test_proxy_http_get)
+    run_test("proxy HTTP POST", passed, failed, test_proxy_http_post)
+    run_test("no proxy when unset", passed, failed, test_no_proxy_when_unset)
 
     # Phase 12 tests
     run_test("zstd decompression", passed, failed, test_zstd_decompression)
