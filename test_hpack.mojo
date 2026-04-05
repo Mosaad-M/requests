@@ -11,6 +11,7 @@ from hpack import (
     huffman_encode, huffman_decode,
     hpack_encode_str,
     static_table_get, static_table_find,
+    HpackDynTable,
 )
 
 
@@ -910,6 +911,207 @@ def test_static_find_not_found_uppercase() raises:
         raise Error("expected no match for uppercase 'Content-Type'")
 
 
+# ── 15B-5: Dynamic Table ───────────────────────────────────────────────────
+
+def test_dyntable_default_init() raises:
+    """HpackDynTable() has max_size=4096, len=0, current_size=0."""
+    var t = HpackDynTable()
+    if t.len() != 0:
+        raise Error("expected len=0, got " + String(t.len()))
+    if t.current_size != 0:
+        raise Error("expected current_size=0, got " + String(t.current_size))
+    if t.max_size != 4096:
+        raise Error("expected max_size=4096, got " + String(t.max_size))
+
+
+def test_dyntable_insert_one() raises:
+    """Insert one entry: len=1, current_size = name_len + value_len + 32."""
+    var t = HpackDynTable()
+    t.insert("x-foo", "bar")
+    if t.len() != 1:
+        raise Error("expected len=1, got " + String(t.len()))
+    var expected_size = len("x-foo") + len("bar") + 32
+    if t.current_size != expected_size:
+        raise Error("expected current_size=" + String(expected_size) + ", got " + String(t.current_size))
+
+
+def test_dyntable_get_most_recent_first() raises:
+    """get(1) returns most recently inserted, get(2) returns second-most-recent."""
+    var t = HpackDynTable()
+    t.insert("name-a", "val-a")
+    t.insert("name-b", "val-b")
+    var r1 = t.get(1)
+    if r1[0] != "name-b" or r1[1] != "val-b":
+        raise Error("expected get(1)=(name-b,val-b), got (" + r1[0] + "," + r1[1] + ")")
+    var r2 = t.get(2)
+    if r2[0] != "name-a" or r2[1] != "val-a":
+        raise Error("expected get(2)=(name-a,val-a), got (" + r2[0] + "," + r2[1] + ")")
+
+
+def test_dyntable_get_oob() raises:
+    """get() with out-of-range index raises Error."""
+    var t = HpackDynTable()
+    t.insert("k", "v")
+    var raised = False
+    try:
+        _ = t.get(2)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected OOB error from get(2) on single-entry table")
+
+
+def test_dyntable_eviction_on_insert() raises:
+    """Inserting an entry that would exceed max_size evicts oldest entries."""
+    # max_size=100; entry size = 3+3+32 = 38
+    # After 3 inserts: insert #3 triggers eviction of oldest; 38+38=76 ≤ 100, 2 entries remain
+    var t = HpackDynTable(100)
+    t.insert("key", "val")   # size=38, total=38, len=1
+    t.insert("key", "val")   # size=38, total=76, len=2
+    t.insert("key", "val")   # 76+38=114>100 → evict oldest → total=38, then insert → 76, len=2
+    if t.len() != 2:
+        raise Error("expected 2 entries after eviction, got " + String(t.len()))
+    if t.current_size != 76:
+        raise Error("expected current_size=76, got " + String(t.current_size))
+
+
+def test_dyntable_eviction_large_entry() raises:
+    """Inserting an entry larger than max_size empties the table (RFC §4.4)."""
+    var t = HpackDynTable(50)
+    t.insert("k", "v")   # size=34, fits
+    if t.len() != 1:
+        raise Error("expected 1 entry before large insert")
+    # entry size = 10+10+32 = 52 > max_size=50 → table must be empty after
+    t.insert("0123456789", "0123456789")
+    if t.len() != 0:
+        raise Error("expected table empty after oversized insert, got len=" + String(t.len()))
+    if t.current_size != 0:
+        raise Error("expected current_size=0, got " + String(t.current_size))
+
+
+def test_dyntable_size_accounting() raises:
+    """current_size tracks sum of (name + value + 32) for all entries."""
+    var t = HpackDynTable()
+    t.insert("a", "b")       # 1+1+32 = 34
+    t.insert("ab", "cd")     # 2+2+32 = 36
+    var expected = 34 + 36
+    if t.current_size != expected:
+        raise Error("expected current_size=" + String(expected) + ", got " + String(t.current_size))
+
+
+def test_dyntable_combined_static() raises:
+    """combined_get(idx) for idx 1–61 returns static table entry."""
+    var t = HpackDynTable()
+    var r = t.combined_get(2)
+    if r[0] != ":method" or r[1] != "GET":
+        raise Error("expected (:method,GET), got (" + r[0] + "," + r[1] + ")")
+    var r2 = t.combined_get(61)
+    if r2[0] != "www-authenticate":
+        raise Error("expected www-authenticate, got " + r2[0])
+
+
+def test_dyntable_combined_dynamic() raises:
+    """combined_get(62) returns first dynamic entry (most recently inserted)."""
+    var t = HpackDynTable()
+    t.insert("x-foo", "bar")
+    var r = t.combined_get(62)
+    if r[0] != "x-foo" or r[1] != "bar":
+        raise Error("expected (x-foo,bar), got (" + r[0] + "," + r[1] + ")")
+
+
+def test_dyntable_combined_dynamic_ordering() raises:
+    """After two inserts: combined_get(62) → newest, combined_get(63) → older."""
+    var t = HpackDynTable()
+    t.insert("first", "one")
+    t.insert("second", "two")
+    var r62 = t.combined_get(62)
+    if r62[0] != "second" or r62[1] != "two":
+        raise Error("expected combined_get(62)=(second,two), got (" + r62[0] + "," + r62[1] + ")")
+    var r63 = t.combined_get(63)
+    if r63[0] != "first" or r63[1] != "one":
+        raise Error("expected combined_get(63)=(first,one), got (" + r63[0] + "," + r63[1] + ")")
+
+
+def test_dyntable_combined_oob() raises:
+    """combined_get with idx=0 or beyond dynamic table raises Error."""
+    var t = HpackDynTable()
+    var raised = False
+    try:
+        _ = t.combined_get(0)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected OOB error for combined_get(0)")
+    # dynamic table empty; combined_get(62) should raise
+    raised = False
+    try:
+        _ = t.combined_get(62)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected OOB error for combined_get(62) with empty dyn table")
+
+
+def test_dyntable_update_max_size_shrink() raises:
+    """update_max_size evicts entries until current_size <= new_max."""
+    var t = HpackDynTable()
+    t.insert("ab", "cd")   # 36
+    t.insert("ab", "cd")   # 36, total=72
+    t.insert("ab", "cd")   # 36, total=108
+    t.update_max_size(50)
+    # must evict until current_size <= 50
+    # after 2 evictions: 36 ≤ 50 ✓
+    if t.current_size > 50:
+        raise Error("expected current_size ≤ 50 after update_max_size(50), got " + String(t.current_size))
+    if t.max_size != 50:
+        raise Error("expected max_size=50, got " + String(t.max_size))
+
+
+def test_dyntable_update_max_size_zero() raises:
+    """update_max_size(0) empties the table entirely."""
+    var t = HpackDynTable()
+    t.insert("k", "v")
+    t.insert("k", "v")
+    t.update_max_size(0)
+    if t.len() != 0:
+        raise Error("expected len=0 after update_max_size(0), got " + String(t.len()))
+    if t.current_size != 0:
+        raise Error("expected current_size=0, got " + String(t.current_size))
+
+
+def test_dyntable_insert_after_size_zero() raises:
+    """After update_max_size(0) then update_max_size(200), inserts work again."""
+    var t = HpackDynTable()
+    t.insert("x", "y")
+    t.update_max_size(0)
+    t.update_max_size(200)
+    t.insert("a", "b")   # 1+1+32=34 ≤ 200
+    if t.len() != 1:
+        raise Error("expected len=1 after re-insert, got " + String(t.len()))
+
+
+def test_dyntable_rfc_example_c3() raises:
+    """RFC §C.3 dynamic table state after first request header block."""
+    # First request adds :path /my-example and custom-key:custom-header
+    # After: dyn table = [("custom-key","custom-header"), (":path","/my-example")]
+    #        sizes: (10+13+32)=55, (5+11+32)=48; total=103
+    var t = HpackDynTable()
+    t.insert(":path", "/my-example")
+    t.insert("custom-key", "custom-header")
+    if t.len() != 2:
+        raise Error("expected 2 entries, got " + String(t.len()))
+    var expected_size = (10 + 13 + 32) + (5 + 11 + 32)
+    if t.current_size != expected_size:
+        raise Error("expected current_size=" + String(expected_size) + ", got " + String(t.current_size))
+    # newest is custom-key (index 62), older is :path (index 63)
+    var r62 = t.combined_get(62)
+    if r62[0] != "custom-key" or r62[1] != "custom-header":
+        raise Error("expected combined_get(62)=(custom-key,custom-header)")
+    var r63 = t.combined_get(63)
+    if r63[0] != ":path" or r63[1] != "/my-example":
+        raise Error("expected combined_get(63)=(:path,/my-example)")
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -1016,6 +1218,24 @@ def main() raises:
     run_test("find 'x-custom-header' → not found (0, False)", passed, failed, test_static_find_not_found_custom)
     run_test("find '' → not found (0, False)", passed, failed, test_static_find_not_found_empty_name)
     run_test("find 'Content-Type' (uppercase) → not found", passed, failed, test_static_find_not_found_uppercase)
+
+    print()
+    print("── 15B-5: Dynamic Table ──")
+    run_test("HpackDynTable() default: max_size=4096, len=0", passed, failed, test_dyntable_default_init)
+    run_test("insert one entry: len=1, correct current_size", passed, failed, test_dyntable_insert_one)
+    run_test("get(1)=newest, get(2)=second-newest", passed, failed, test_dyntable_get_most_recent_first)
+    run_test("get() OOB raises Error", passed, failed, test_dyntable_get_oob)
+    run_test("eviction on insert when max_size exceeded", passed, failed, test_dyntable_eviction_on_insert)
+    run_test("oversized entry empties table (RFC §4.4)", passed, failed, test_dyntable_eviction_large_entry)
+    run_test("current_size tracks name + value + 32 per entry", passed, failed, test_dyntable_size_accounting)
+    run_test("combined_get(1–61) returns static table entry", passed, failed, test_dyntable_combined_static)
+    run_test("combined_get(62) returns first dynamic entry", passed, failed, test_dyntable_combined_dynamic)
+    run_test("combined_get ordering: 62=newest, 63=older", passed, failed, test_dyntable_combined_dynamic_ordering)
+    run_test("combined_get(0) and beyond dyn table raise Error", passed, failed, test_dyntable_combined_oob)
+    run_test("update_max_size evicts until current_size ≤ new_max", passed, failed, test_dyntable_update_max_size_shrink)
+    run_test("update_max_size(0) clears table entirely", passed, failed, test_dyntable_update_max_size_zero)
+    run_test("insert works after update_max_size(0) then re-expand", passed, failed, test_dyntable_insert_after_size_zero)
+    run_test("RFC §C.3 dynamic table state matches spec", passed, failed, test_dyntable_rfc_example_c3)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

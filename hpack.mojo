@@ -658,3 +658,131 @@ fn static_table_find(name: String, value: String) -> Tuple[Int, Bool]:
     if name_match != 0:
         return (name_match, False)
     return (0, False)
+
+
+# ── 15B-5: Dynamic Table (RFC 7541 §4) ─────────────────────────────────────
+
+struct HpackDynTable(Copyable, Movable):
+    """HPACK dynamic header table — FIFO with byte-count eviction (RFC 7541 §4).
+
+    Entries are stored newest-first (index 0 = most recently added), matching
+    RFC 7541 §2.3.2 where dynamic index 1 always refers to the newest entry.
+
+    Size accounting per RFC 7541 §4.1:
+        entry_size = name.byte_length() + value.byte_length() + 32
+    """
+
+    var _names:       List[String]   # _names[0]  = newest
+    var _values:      List[String]   # _values[0] = newest (parallel to _names)
+    var current_size: Int            # sum of (name_len + value_len + 32) for all entries
+    var max_size:     Int            # negotiated max via SETTINGS_HEADER_TABLE_SIZE
+
+    fn __init__(out self, max_size: Int = 4096):
+        self._names       = List[String]()
+        self._values      = List[String]()
+        self.current_size = 0
+        self.max_size     = max_size
+
+    fn __copyinit__(out self, copy: Self):
+        self._names       = copy._names.copy()
+        self._values      = copy._values.copy()
+        self.current_size = copy.current_size
+        self.max_size     = copy.max_size
+
+    fn __moveinit__(out self, deinit take: Self):
+        self._names       = take._names^
+        self._values      = take._values^
+        self.current_size = take.current_size
+        self.max_size     = take.max_size
+
+    fn len(self) -> Int:
+        """Return number of entries currently in the dynamic table."""
+        return len(self._names)
+
+    fn _evict_to_fit(mut self, needed: Int):
+        """Evict oldest entries until current_size + needed <= max_size."""
+        while len(self._names) > 0 and self.current_size + needed > self.max_size:
+            var last = len(self._names) - 1
+            var evict_size = len(self._names[last]) + len(self._values[last]) + 32
+            self.current_size -= evict_size
+            # Remove last element by rebuilding without it
+            var new_names  = List[String](capacity=last)
+            var new_values = List[String](capacity=last)
+            for i in range(last):
+                new_names.append(self._names[i])
+                new_values.append(self._values[i])
+            self._names  = new_names^
+            self._values = new_values^
+
+    fn insert(mut self, name: String, value: String):
+        """Insert a new entry at the front (newest position).
+
+        Evicts oldest entries first if needed. If the entry itself exceeds
+        max_size, the table is emptied (RFC 7541 §4.4).
+        """
+        var entry_size = len(name) + len(value) + 32
+        if entry_size > self.max_size:
+            # Entry too large — clear table entirely (RFC §4.4)
+            self._names       = List[String]()
+            self._values      = List[String]()
+            self.current_size = 0
+            return
+        self._evict_to_fit(entry_size)
+        # Prepend (newest first): build new list with entry at front
+        var n         = len(self._names)
+        var new_names  = List[String](capacity=n + 1)
+        var new_values = List[String](capacity=n + 1)
+        new_names.append(name)
+        new_values.append(value)
+        for i in range(n):
+            new_names.append(self._names[i])
+            new_values.append(self._values[i])
+        self._names        = new_names^
+        self._values       = new_values^
+        self.current_size += entry_size
+
+    fn get(self, dyn_idx: Int) raises -> Tuple[String, String]:
+        """Return the entry at 1-based dynamic-table index dyn_idx.
+
+        dyn_idx=1 is the most recently added entry.
+
+        Raises:
+            Error if dyn_idx is out of range [1, len()].
+        """
+        if dyn_idx < 1 or dyn_idx > len(self._names):
+            raise Error(
+                "HpackDynTable.get: index " + String(dyn_idx)
+                + " out of range [1, " + String(len(self._names)) + "]"
+            )
+        var i = dyn_idx - 1
+        return (self._names[i], self._values[i])
+
+    fn combined_get(self, idx: Int) raises -> Tuple[String, String]:
+        """Look up a header by its combined index (RFC 7541 §2.3.3).
+
+        idx 1–61:  static table entry.
+        idx 62+:   dynamic table entry (dyn_idx = idx - 61).
+
+        Raises:
+            Error if idx is out of range.
+        """
+        if idx < 1:
+            raise Error("HpackDynTable.combined_get: index must be >= 1, got " + String(idx))
+        if idx <= 61:
+            return static_table_get(idx)
+        return self.get(idx - 61)
+
+    fn update_max_size(mut self, new_max: Int):
+        """Update max_size and evict entries until current_size <= new_max (RFC §6.3)."""
+        self.max_size = new_max
+        while len(self._names) > 0 and self.current_size > self.max_size:
+            var last       = len(self._names) - 1
+            var evict_size = len(self._names[last]) + len(self._values[last]) + 32
+            self.current_size -= evict_size
+            var new_names  = List[String](capacity=last)
+            var new_values = List[String](capacity=last)
+            for i in range(last):
+                new_names.append(self._names[i])
+                new_values.append(self._values[i])
+            self._names  = new_names^
+            self._values = new_values^
