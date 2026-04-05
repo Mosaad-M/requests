@@ -12,6 +12,7 @@ from hpack import (
     hpack_encode_str,
     static_table_get, static_table_find,
     HpackDynTable,
+    HpackHeader, hpack_decode_block,
 )
 
 
@@ -1112,6 +1113,255 @@ def test_dyntable_rfc_example_c3() raises:
         raise Error("expected combined_get(63)=(:path,/my-example)")
 
 
+# ── 15B-6: Header Block Decode ─────────────────────────────────────────────
+
+fn _hex_digit(b: UInt8) -> UInt8:
+    if b >= 48 and b <= 57:   # '0'-'9'
+        return b - 48
+    if b >= 97 and b <= 102:  # 'a'-'f'
+        return b - 97 + 10
+    return b - 65 + 10        # 'A'-'F'
+
+
+fn _hex_bytes(s: String) -> List[UInt8]:
+    """Convert a lowercase hex string (no spaces) to List[UInt8]."""
+    var raw = s.as_bytes()
+    var out = List[UInt8](capacity=len(raw) // 2)
+    var i   = 0
+    while i + 1 < len(raw):
+        var hi = _hex_digit(raw[i])
+        var lo = _hex_digit(raw[i + 1])
+        out.append((hi << 4) | lo)
+        i += 2
+    return out^
+
+
+def test_decode_empty_block() raises:
+    """Empty data yields empty header list, dyn table unchanged."""
+    var dt      = HpackDynTable()
+    var data    = List[UInt8]()
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 0:
+        raise Error("expected 0 headers, got " + String(len(headers)))
+    if dt.len() != 0:
+        raise Error("expected dyn table empty, got len=" + String(dt.len()))
+
+
+def test_decode_single_indexed() raises:
+    """0x82 → indexed idx=2 → (:method, GET); dyn table unchanged."""
+    var dt      = HpackDynTable()
+    var data    = _hex_bytes("82")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 1:
+        raise Error("expected 1 header, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":method", "name")
+    assert_eq_str(headers[0].value, "GET", "value")
+    if dt.len() != 0:
+        raise Error("indexed must not add to dyn table")
+
+
+def test_decode_multiple_indexed() raises:
+    """0x82 0x86 0x84 → [(:method,GET), (:scheme,http), (:path,/)]."""
+    var dt      = HpackDynTable()
+    var data    = _hex_bytes("828684")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 3:
+        raise Error("expected 3 headers, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":method", "h0.name")
+    assert_eq_str(headers[0].value, "GET", "h0.value")
+    assert_eq_str(headers[1].name, ":scheme", "h1.name")
+    assert_eq_str(headers[1].value, "http", "h1.value")
+    assert_eq_str(headers[2].name, ":path", "h2.name")
+    assert_eq_str(headers[2].value, "/", "h2.value")
+
+
+def test_decode_literal_incr_indexed_name() raises:
+    """0x41 = literal+incr, name_idx=1 (:authority), value 'www.example.com'; added to dyn table."""
+    var dt   = HpackDynTable()
+    var data = _hex_bytes("410f7777772e6578616d706c652e636f6d")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 1:
+        raise Error("expected 1 header, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":authority", "name")
+    assert_eq_str(headers[0].value, "www.example.com", "value")
+    if dt.len() != 1:
+        raise Error("expected 1 dyn entry after incr indexing, got " + String(dt.len()))
+    var e = dt.get(1)
+    assert_eq_str(e[0], ":authority", "dyn.name")
+    assert_eq_str(e[1], "www.example.com", "dyn.value")
+
+
+def test_decode_literal_incr_new_name() raises:
+    """0x40 = literal+incr, new name 'custom-key', value 'custom-value'; added to dyn table."""
+    # 40 0a "custom-key" 0c "custom-value"
+    var data = _hex_bytes("400a637573746f6d2d6b65790c637573746f6d2d76616c7565")
+    var dt      = HpackDynTable()
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 1:
+        raise Error("expected 1 header, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, "custom-key", "name")
+    assert_eq_str(headers[0].value, "custom-value", "value")
+    if dt.len() != 1:
+        raise Error("expected 1 dyn entry after incr indexing")
+
+
+def test_decode_literal_no_index_indexed_name() raises:
+    """Without-indexing (0x04=:path) + value '/': header returned, dyn table unchanged."""
+    # 04 01 2f  (without-index, name_idx=4=:path, value length=1, '/')
+    var data    = _hex_bytes("04012f")
+    var dt      = HpackDynTable()
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 1:
+        raise Error("expected 1 header, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":path", "name")
+    assert_eq_str(headers[0].value, "/", "value")
+    if dt.len() != 0:
+        raise Error("without-indexing must NOT add to dyn table")
+
+
+def test_decode_literal_never_indexed() raises:
+    """Never-indexed (0x14=:path) + value '/': header returned, dyn table unchanged."""
+    # 14 01 2f  (never-index, name_idx=4=:path, value length=1, '/')
+    var data    = _hex_bytes("14012f")
+    var dt      = HpackDynTable()
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 1:
+        raise Error("expected 1 header, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":path", "name")
+    assert_eq_str(headers[0].value, "/", "value")
+    if dt.len() != 0:
+        raise Error("never-indexed must NOT add to dyn table")
+
+
+def test_decode_size_update_zero() raises:
+    """0x20 = size update new_max=0: empties pre-populated dyn table."""
+    var dt = HpackDynTable()
+    dt.insert("k", "v")
+    var data    = _hex_bytes("20")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 0:
+        raise Error("size update emits no headers, got " + String(len(headers)))
+    if dt.len() != 0:
+        raise Error("size update(0) must empty dyn table, got len=" + String(dt.len()))
+    if dt.max_size != 0:
+        raise Error("expected max_size=0, got " + String(dt.max_size))
+
+
+def test_decode_size_update_nonzero() raises:
+    """0x3e = size update new_max=30: max_size updated, existing entries evicted if needed."""
+    # 0x3e = 0b00111110 → 5-bit value = 0x1e = 30
+    var dt   = HpackDynTable(4096)
+    var data = _hex_bytes("3e")
+    _ = hpack_decode_block(data, dt)
+    if dt.max_size != 30:
+        raise Error("expected max_size=30, got " + String(dt.max_size))
+
+
+def test_decode_rfc_c3_req1() raises:
+    """RFC §C.3.1 — first request (no Huffman); dyn table gains :authority entry."""
+    # 82 86 84 41 0f 77 77 77 2e 65 78 61 6d 70 6c 65 2e 63 6f 6d
+    var data    = _hex_bytes("828684410f7777772e6578616d706c652e636f6d")
+    var dt      = HpackDynTable()
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 4:
+        raise Error("expected 4 headers, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":method",    "h0.name");  assert_eq_str(headers[0].value, "GET",             "h0.value")
+    assert_eq_str(headers[1].name, ":scheme",    "h1.name");  assert_eq_str(headers[1].value, "http",            "h1.value")
+    assert_eq_str(headers[2].name, ":path",      "h2.name");  assert_eq_str(headers[2].value, "/",               "h2.value")
+    assert_eq_str(headers[3].name, ":authority", "h3.name");  assert_eq_str(headers[3].value, "www.example.com", "h3.value")
+    if dt.len() != 1:
+        raise Error("expected 1 dyn entry, got " + String(dt.len()))
+    var e = dt.get(1)
+    assert_eq_str(e[0], ":authority", "dyn[1].name")
+    assert_eq_str(e[1], "www.example.com", "dyn[1].value")
+
+
+def test_decode_rfc_c3_req2() raises:
+    """RFC §C.3.2 — second request uses dyn idx 62 (:authority); adds cache-control."""
+    var dt = HpackDynTable()
+    # Simulate state after request 1
+    dt.insert(":authority", "www.example.com")
+    # 82 86 84 be 58 08 6e 6f 2d 63 61 63 68 65
+    var data    = _hex_bytes("828684be58086e6f2d6361636865")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 5:
+        raise Error("expected 5 headers, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":method",      "h0.name"); assert_eq_str(headers[0].value, "GET",             "h0.value")
+    assert_eq_str(headers[1].name, ":scheme",      "h1.name"); assert_eq_str(headers[1].value, "http",            "h1.value")
+    assert_eq_str(headers[2].name, ":path",        "h2.name"); assert_eq_str(headers[2].value, "/",               "h2.value")
+    assert_eq_str(headers[3].name, ":authority",   "h3.name"); assert_eq_str(headers[3].value, "www.example.com", "h3.value")
+    assert_eq_str(headers[4].name, "cache-control","h4.name"); assert_eq_str(headers[4].value, "no-cache",        "h4.value")
+    # Dyn table after: [(cache-control,no-cache), (:authority,www.example.com)]
+    if dt.len() != 2:
+        raise Error("expected 2 dyn entries, got " + String(dt.len()))
+    var e1 = dt.get(1); assert_eq_str(e1[0], "cache-control", "dyn[1].name")
+    var e2 = dt.get(2); assert_eq_str(e2[0], ":authority",    "dyn[2].name")
+
+
+def test_decode_rfc_c3_req3() raises:
+    """RFC §C.3.3 — third request uses dyn idx 63 (:authority); new 'custom-key' entry."""
+    var dt = HpackDynTable()
+    # Simulate state after request 2
+    dt.insert(":authority", "www.example.com")
+    dt.insert("cache-control", "no-cache")
+    # 82 87 85 bf 40 0a custom-key 0c custom-value
+    var data = _hex_bytes("828785bf400a637573746f6d2d6b65790c637573746f6d2d76616c7565")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 5:
+        raise Error("expected 5 headers, got " + String(len(headers)))
+    assert_eq_str(headers[0].name, ":method",     "h0.name"); assert_eq_str(headers[0].value, "GET",             "h0.value")
+    assert_eq_str(headers[1].name, ":scheme",     "h1.name"); assert_eq_str(headers[1].value, "https",           "h1.value")
+    assert_eq_str(headers[2].name, ":path",       "h2.name"); assert_eq_str(headers[2].value, "/index.html",     "h2.value")
+    assert_eq_str(headers[3].name, ":authority",  "h3.name"); assert_eq_str(headers[3].value, "www.example.com", "h3.value")
+    assert_eq_str(headers[4].name, "custom-key",  "h4.name"); assert_eq_str(headers[4].value, "custom-value",    "h4.value")
+    if dt.len() != 3:
+        raise Error("expected 3 dyn entries, got " + String(dt.len()))
+    assert_eq_str(dt.get(1)[0], "custom-key",   "dyn[1].name")
+    assert_eq_str(dt.get(2)[0], "cache-control","dyn[2].name")
+    assert_eq_str(dt.get(3)[0], ":authority",   "dyn[3].name")
+
+
+def test_decode_rfc_c4_req1() raises:
+    """RFC §C.4.1 — first request with Huffman strings."""
+    # 82 86 84 41 8c f1e3c2e5f23a6ba0ab90f4ff
+    var data    = _hex_bytes("828684418cf1e3c2e5f23a6ba0ab90f4ff")
+    var dt      = HpackDynTable()
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 4:
+        raise Error("expected 4 headers, got " + String(len(headers)))
+    assert_eq_str(headers[3].name, ":authority", "h3.name")
+    assert_eq_str(headers[3].value, "www.example.com", "h3.value")
+    if dt.len() != 1:
+        raise Error("expected 1 dyn entry, got " + String(dt.len()))
+
+
+def test_decode_rfc_c4_req2() raises:
+    """RFC §C.4.2 — second request with Huffman; uses dyn table from c4 req1."""
+    var dt = HpackDynTable()
+    dt.insert(":authority", "www.example.com")
+    # 82 86 84 be 58 86 a8eb10649cbf
+    var data    = _hex_bytes("828684be5886a8eb10649cbf")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 5:
+        raise Error("expected 5 headers, got " + String(len(headers)))
+    assert_eq_str(headers[4].name, "cache-control", "h4.name")
+    assert_eq_str(headers[4].value, "no-cache", "h4.value")
+
+
+def test_decode_rfc_c4_req3() raises:
+    """RFC §C.4.3 — third request with Huffman strings for custom-key/custom-value."""
+    var dt = HpackDynTable()
+    dt.insert(":authority", "www.example.com")
+    dt.insert("cache-control", "no-cache")
+    # 82 87 85 bf 40 88 25a849e95ba97d7f 89 25a849e95bb8e8b4bf
+    var data    = _hex_bytes("828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf")
+    var headers = hpack_decode_block(data, dt)
+    if len(headers) != 5:
+        raise Error("expected 5 headers, got " + String(len(headers)))
+    assert_eq_str(headers[4].name, "custom-key", "h4.name")
+    assert_eq_str(headers[4].value, "custom-value", "h4.value")
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -1236,6 +1486,24 @@ def main() raises:
     run_test("update_max_size(0) clears table entirely", passed, failed, test_dyntable_update_max_size_zero)
     run_test("insert works after update_max_size(0) then re-expand", passed, failed, test_dyntable_insert_after_size_zero)
     run_test("RFC §C.3 dynamic table state matches spec", passed, failed, test_dyntable_rfc_example_c3)
+
+    print()
+    print("── 15B-6: Header Block Decode ──")
+    run_test("empty block → 0 headers", passed, failed, test_decode_empty_block)
+    run_test("0x82 indexed → (:method,GET), no dyn change", passed, failed, test_decode_single_indexed)
+    run_test("0x82 0x86 0x84 → 3 indexed headers", passed, failed, test_decode_multiple_indexed)
+    run_test("literal+incr indexed-name → added to dyn table", passed, failed, test_decode_literal_incr_indexed_name)
+    run_test("literal+incr new-name → added to dyn table", passed, failed, test_decode_literal_incr_new_name)
+    run_test("literal-no-index → header returned, dyn unchanged", passed, failed, test_decode_literal_no_index_indexed_name)
+    run_test("literal-never-indexed → header returned, dyn unchanged", passed, failed, test_decode_literal_never_indexed)
+    run_test("size update 0x20 → empties dyn table", passed, failed, test_decode_size_update_zero)
+    run_test("size update 0x3e → max_size=30", passed, failed, test_decode_size_update_nonzero)
+    run_test("RFC §C.3.1 — request 1 (no Huffman)", passed, failed, test_decode_rfc_c3_req1)
+    run_test("RFC §C.3.2 — request 2 uses dyn idx 62", passed, failed, test_decode_rfc_c3_req2)
+    run_test("RFC §C.3.3 — request 3 uses dyn idx 63", passed, failed, test_decode_rfc_c3_req3)
+    run_test("RFC §C.4.1 — request 1 Huffman strings", passed, failed, test_decode_rfc_c4_req1)
+    run_test("RFC §C.4.2 — request 2 Huffman strings", passed, failed, test_decode_rfc_c4_req2)
+    run_test("RFC §C.4.3 — request 3 Huffman strings", passed, failed, test_decode_rfc_c4_req3)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
