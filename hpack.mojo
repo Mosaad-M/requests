@@ -786,3 +786,128 @@ struct HpackDynTable(Copyable, Movable):
                 new_values.append(self._values[i])
             self._names  = new_names^
             self._values = new_values^
+
+
+# ── 15B-6: Header Block Decode (RFC 7541 §6) ───────────────────────────────
+
+struct HpackHeader(Copyable, Movable):
+    """A single decoded HPACK header field (name + value pair)."""
+
+    var name:  String
+    var value: String
+
+    fn __init__(out self, name: String, value: String):
+        self.name  = name
+        self.value = value
+
+    fn __copyinit__(out self, copy: Self):
+        self.name  = copy.name
+        self.value = copy.value
+
+    fn __moveinit__(out self, deinit take: Self):
+        self.name  = take.name^
+        self.value = take.value^
+
+
+fn hpack_decode_block(
+    data: List[UInt8],
+    mut dyn_table: HpackDynTable,
+) raises -> List[HpackHeader]:
+    """Decode an HPACK header block (RFC 7541 §6).
+
+    Dispatch on the high bits of the first byte of each representation:
+      bit 7 set    (0x80–0xFF)  Indexed Header Field          (§6.1, 7-bit prefix)
+      bits 7-6=01  (0x40–0x7F)  Literal + Incremental Index   (§6.2.1, 6-bit prefix)
+      bits 7-5=001 (0x20–0x3F)  Dynamic Table Size Update     (§6.3, 5-bit prefix)
+      bits 7-4=0001(0x10–0x1F)  Literal Never Indexed         (§6.2.3, 4-bit prefix)
+                   (0x00–0x0F)  Literal Without Indexing      (§6.2.2, 4-bit prefix)
+
+    Args:
+        data:      Raw HPACK block bytes (from one HEADERS / PUSH_PROMISE frame).
+        dyn_table: Per-connection dynamic table — mutated for incremental
+                   indexing entries and size-update frames.
+
+    Returns:
+        List of HpackHeader pairs in wire order.
+
+    Raises:
+        Error on malformed input (bad index, invalid Huffman, etc.).
+    """
+    var headers = List[HpackHeader]()
+    var off     = 0
+    var n       = len(data)
+
+    while off < n:
+        var b = Int(data[off])
+
+        if b & 0x80 != 0:
+            # §6.1: Indexed Header Field — high bit set
+            var r    = hpack_decode_int(data, off, 7)
+            var idx  = r[0]
+            off      = r[1]
+            var pair = dyn_table.combined_get(idx)
+            headers.append(HpackHeader(pair[0], pair[1]))
+
+        elif b & 0xC0 == 0x40:
+            # §6.2.1: Literal + Incremental Indexing
+            var nr       = hpack_decode_int(data, off, 6)
+            var name_idx = nr[0]
+            off          = nr[1]
+            var name     = String("")
+            if name_idx > 0:
+                var p = dyn_table.combined_get(name_idx)
+                name  = p[0]
+            else:
+                var sr = hpack_decode_str(data, off)
+                name   = sr[0]
+                off    = sr[1]
+            var vr    = hpack_decode_str(data, off)
+            var value = vr[0]
+            off       = vr[1]
+            dyn_table.insert(name, value)
+            headers.append(HpackHeader(name, value))
+
+        elif b & 0xE0 == 0x20:
+            # §6.3: Dynamic Table Size Update
+            var r       = hpack_decode_int(data, off, 5)
+            var new_max = r[0]
+            off         = r[1]
+            dyn_table.update_max_size(new_max)
+
+        elif b & 0xF0 == 0x10:
+            # §6.2.3: Literal Never Indexed
+            var nr       = hpack_decode_int(data, off, 4)
+            var name_idx = nr[0]
+            off          = nr[1]
+            var name     = String("")
+            if name_idx > 0:
+                var p = dyn_table.combined_get(name_idx)
+                name  = p[0]
+            else:
+                var sr = hpack_decode_str(data, off)
+                name   = sr[0]
+                off    = sr[1]
+            var vr    = hpack_decode_str(data, off)
+            var value = vr[0]
+            off       = vr[1]
+            headers.append(HpackHeader(name, value))
+
+        else:
+            # §6.2.2: Literal Without Indexing (0x00–0x0F)
+            var nr       = hpack_decode_int(data, off, 4)
+            var name_idx = nr[0]
+            off          = nr[1]
+            var name     = String("")
+            if name_idx > 0:
+                var p = dyn_table.combined_get(name_idx)
+                name  = p[0]
+            else:
+                var sr = hpack_decode_str(data, off)
+                name   = sr[0]
+                off    = sr[1]
+            var vr    = hpack_decode_str(data, off)
+            var value = vr[0]
+            off       = vr[1]
+            headers.append(HpackHeader(name, value))
+
+    return headers^
