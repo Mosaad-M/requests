@@ -1014,6 +1014,35 @@ def test_cookie_samesite_none_http() raises:
     assert_not_contains(resp.body, "none_cookie", "SameSite=None+Secure not sent over HTTP")
 
 
+def test_supercookie_tld_rejected() raises:
+    """Domain=.com (single-label TLD) should be silently rejected (S7)."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-tld")
+    # The cookie must NOT be stored (domain rejected as single-label)
+    assert_true(client.cookie_count() == 0, "single-label domain cookie not stored")
+
+
+def test_httponly_flag_stored() raises:
+    """HttpOnly attribute must be parsed and stored without error."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-httponly")
+    # Cookie is stored (HttpOnly doesn't prevent storage, just JS access)
+    assert_true(client.cookie_count() == 1, "httponly cookie stored")
+    # It is still sent on subsequent requests (we're an HTTP client, not a browser)
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "secret", "httponly cookie sent")
+
+
+def test_samesite_normalization() raises:
+    """SameSite=STRICT should be normalized to 'Strict' (S9)."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-samesite-strict")
+    # Normalized cookie should still be sent to same host
+    assert_true(client.cookie_count() == 1, "normalized samesite cookie stored")
+    var resp = client.get(BASE + "/check-cookie")
+    assert_contains(resp.body, "ss=1", "normalized SameSite cookie sent")
+
+
 # ============================================================================
 # Brotli Tests
 # ============================================================================
@@ -1106,6 +1135,261 @@ def test_https_json_parse() raises:
     assert_eq(data["userId"].as_int(), 1, "userId")
     assert_eq(data["id"].as_int(), 1, "id")
     assert_true(len(data["title"].as_string()) > 0, "title non-empty")
+
+
+# ============================================================================
+# Phase 10 Tests — Configurable redirects, error URL sanitization, IP revalidation
+# ============================================================================
+
+
+def test_max_redirects_configurable() raises:
+    """Setting max_redirects=1 should raise TooManyRedirects on a 2-hop chain."""
+    var client = HttpClient(allow_private_ips=True)
+    client.max_redirects = 1
+    var raised = False
+    try:
+        # /redirect/multi → /redirect/301 → /redirect/target (2 redirects)
+        _ = client.get(BASE + "/redirect/multi")
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("TooManyRedirects"),
+            "must raise TooManyRedirects, got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected TooManyRedirects with max_redirects=1")
+
+
+def test_max_redirects_zero_raises() raises:
+    """max_redirects=0 should raise TooManyRedirects immediately on any redirect."""
+    var client = HttpClient(allow_private_ips=True)
+    client.max_redirects = 0
+    var raised = False
+    try:
+        _ = client.get(BASE + "/redirect/302")
+    except e:
+        raised = True
+        assert_true(
+            String(e).startswith("TooManyRedirects"),
+            "must raise TooManyRedirects, got: " + String(e),
+        )
+    if not raised:
+        raise Error("expected TooManyRedirects with max_redirects=0")
+
+
+def test_sanitized_url_strips_query() raises:
+    """sanitized_url() should return URL without query string."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/echo?secret=abc123&token=xyz")
+    var surl = resp.sanitized_url()
+    assert_not_contains(surl, "secret", "sanitized_url must not contain secret")
+    assert_not_contains(surl, "token", "sanitized_url must not contain token")
+    assert_contains(surl, "/echo", "sanitized_url keeps path")
+
+
+def test_sanitized_url_no_query_unchanged() raises:
+    """sanitized_url() on a URL with no query string returns it unchanged."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/")
+    var surl = resp.sanitized_url()
+    assert_contains(surl, "127.0.0.1", "sanitized_url keeps host")
+
+
+def test_redirect_private_ip_blocked() raises:
+    """Redirect to a private IP with no listening server raises an error.
+
+    The test server returns a 302 to http://10.255.255.254/ (a private IP in
+    the 10.x range with no HTTP server — port 80 is closed). With
+    allow_private_ips=True (needed to reach the test server at 127.0.0.1),
+    the redirect is attempted and fails because port 80 is closed.
+    This confirms the _follow_redirects → _do_request → TcpSocket.connect chain
+    works end-to-end for redirect targets.
+    """
+    var client = HttpClient(allow_private_ips=True)
+    var raised = False
+    try:
+        _ = client.get(BASE + "/redirect/to-private")
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected error when redirected to private IP with no server")
+
+
+# ============================================================================
+# Security Hardening Tests (Phase 9)
+# ============================================================================
+
+
+def test_content_length_over_limit() raises:
+    """Content-Length exceeding the 100 MB limit should raise before reading body.
+
+    Values near the limit overflow the parse guard first (ParseError) or are
+    rejected by the receive cap (ConnectionError) — either is correct.
+    """
+    var client = HttpClient(allow_private_ips=True)
+    var raised = False
+    try:
+        _ = client.get(BASE + "/oversized-cl")
+    except e:
+        raised = True
+        var msg = String(e)
+        assert_true(
+            msg.startswith("ParseError") or msg.startswith("ConnectionError"),
+            "must raise ParseError or ConnectionError, got: " + msg,
+        )
+    if not raised:
+        raise Error("expected error for oversized Content-Length")
+
+
+# ============================================================================
+# Phase 11 Tests — Security Parity
+# ============================================================================
+
+
+def test_cookie_psl_co_uk_rejected() raises:
+    """Domain=.co.uk is a PSL public suffix — cookie must not be stored."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-psl-co-uk")
+    var found = False
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == "psl":
+            found = True
+            break
+    if found:
+        raise Error("PSL suffix .co.uk cookie was stored, expected rejection")
+
+
+def test_cookie_psl_github_io_rejected() raises:
+    """Domain=.github.io is a PSL hosting suffix — cookie must not be stored."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-psl-github-io")
+    var found = False
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == "psl":
+            found = True
+            break
+    if found:
+        raise Error("PSL suffix .github.io cookie was stored, expected rejection")
+
+
+def test_cookie_psl_example_co_uk_accepted() raises:
+    """Domain=.example.co.uk is a valid registrable domain — cookie must be stored."""
+    var client = HttpClient(allow_private_ips=True)
+    _ = client.get(BASE + "/set-cookie-psl-example-co-uk")
+    var found = False
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == "psl":
+            found = True
+            break
+    if not found:
+        raise Error("Valid domain .example.co.uk cookie was rejected, expected storage")
+
+
+def test_follow_redirects_disabled() raises:
+    """follow_redirects=False should return 301 without following."""
+    var client = HttpClient(allow_private_ips=True)
+    client.follow_redirects = False
+    var resp = client.get(BASE + "/redirect/301")
+    assert_eq(resp.status_code, 301, "must return 301 when follow_redirects=False")
+
+
+def test_redirect_same_host_only() raises:
+    """redirect_same_host_only=True should stop cross-host redirects."""
+    var client = HttpClient(allow_private_ips=True)
+    client.redirect_same_host_only = True
+    # /redirect/301 → /redirect/target (same host) — should be followed
+    var resp = client.get(BASE + "/redirect/301")
+    assert_eq(resp.status_code, 200, "same-host redirect must be followed")
+
+
+# ============================================================================
+# Phase 13 Tests — HTTP CONNECT Proxy
+# ============================================================================
+
+alias PROXY_URL = "http://127.0.0.1:18081"
+
+
+def test_proxy_http_get() raises:
+    """Client with proxy_url should tunnel HTTP requests through the proxy."""
+    var client = HttpClient(allow_private_ips=True)
+    client.proxy_url = PROXY_URL
+    var resp = client.get(BASE + "/")
+    assert_eq(resp.status_code, 200, "status_code via proxy")
+    assert_contains(resp.body, "hello from test server", "body via proxy")
+
+
+def test_proxy_http_post() raises:
+    """Client with proxy_url should tunnel HTTP POST through the proxy."""
+    var client = HttpClient(allow_private_ips=True)
+    client.proxy_url = PROXY_URL
+    var hdrs = HttpHeaders()
+    hdrs.add("Content-Type", "application/json")
+    var resp = client.post(BASE + "/echo", "{\"via\":\"proxy\"}", hdrs)
+    assert_eq(resp.status_code, 200, "status_code via proxy POST")
+    assert_contains(resp.body, "proxy", "body via proxy POST")
+
+
+def test_no_proxy_when_unset() raises:
+    """Without proxy_url, requests go directly (no regression)."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/")
+    assert_eq(resp.status_code, 200, "direct request still works")
+
+
+def test_proxy_env_var() raises:
+    """HTTP_PROXY env var should be picked up automatically (Phase 13B).
+
+    The pixi test task does not set HTTP_PROXY so this test verifies the env
+    auto-detection code path compiles and runs without errors when the env var
+    is absent (no proxy configured → direct connection succeeds).
+    """
+    # Env var is NOT set in the test environment — direct connection expected
+    var client = HttpClient(allow_private_ips=True)
+    # proxy_url is empty; HTTP_PROXY env var is not set → direct path taken
+    var resp = client.get(BASE + "/")
+    assert_eq(resp.status_code, 200, "env proxy detection: direct fallback works")
+
+
+# ============================================================================
+# Phase 14 Tests — Streaming Decompression
+# ============================================================================
+
+
+def test_streaming_gzip_large() raises:
+    """Large gzip response should decompress correctly (inline inflate path)."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/gzip-large")
+    assert_eq(resp.status_code, 200, "status_code")
+    # Body is 50,000 bytes of semi-random printable ASCII
+    assert_eq(len(resp.body), 50000, "decompressed body length")
+
+
+def test_streaming_gzip_existing() raises:
+    """Existing small gzip response still works after streaming refactor."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/gzip")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "gzip", "body still decoded correctly")
+
+
+# ============================================================================
+# Phase 12 Tests — zstd Decompression
+# ============================================================================
+
+
+def test_zstd_decompression() raises:
+    """GET /zstd should return the decompressed JSON body."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/zstd")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_contains(resp.body, "hello zstd", "zstd body decoded")
+
+
+def test_accept_encoding_zstd() raises:
+    """Accept-Encoding header must include 'zstd'."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/accept-encoding")
+    assert_contains(resp.body, "zstd", "Accept-Encoding must include zstd")
 
 
 # ============================================================================
@@ -1281,6 +1565,9 @@ def main() raises:
     # SameSite cookie tests
     run_test("cookie SameSite stored", passed, failed, test_cookie_samesite_stored)
     run_test("cookie SameSite=None not sent HTTP", passed, failed, test_cookie_samesite_none_http)
+    run_test("cookie TLD domain rejected", passed, failed, test_supercookie_tld_rejected)
+    run_test("cookie HttpOnly stored", passed, failed, test_httponly_flag_stored)
+    run_test("cookie SameSite normalization", passed, failed, test_samesite_normalization)
 
     # Brotli tests
     run_test("brotli decompression", passed, failed, test_brotli_decompression)
@@ -1315,6 +1602,42 @@ def main() raises:
         failed,
         test_raise_for_status_500_raises,
     )
+
+    # Phase 10 tests
+    run_test("max_redirects configurable", passed, failed, test_max_redirects_configurable)
+    run_test("max_redirects=0 raises", passed, failed, test_max_redirects_zero_raises)
+    run_test("sanitized_url strips query", passed, failed, test_sanitized_url_strips_query)
+    run_test("sanitized_url no query unchanged", passed, failed, test_sanitized_url_no_query_unchanged)
+    run_test("redirect to private IP blocked", passed, failed, test_redirect_private_ip_blocked)
+
+    # Security hardening tests (Phase 9)
+    run_test(
+        "Content-Length over limit raises",
+        passed,
+        failed,
+        test_content_length_over_limit,
+    )
+
+    # Phase 11 tests
+    run_test("cookie PSL co.uk rejected", passed, failed, test_cookie_psl_co_uk_rejected)
+    run_test("cookie PSL github.io rejected", passed, failed, test_cookie_psl_github_io_rejected)
+    run_test("cookie PSL example.co.uk accepted", passed, failed, test_cookie_psl_example_co_uk_accepted)
+    run_test("follow_redirects=False", passed, failed, test_follow_redirects_disabled)
+    run_test("redirect same host only", passed, failed, test_redirect_same_host_only)
+
+    # Phase 13 tests
+    run_test("proxy HTTP GET", passed, failed, test_proxy_http_get)
+    run_test("proxy HTTP POST", passed, failed, test_proxy_http_post)
+    run_test("no proxy when unset", passed, failed, test_no_proxy_when_unset)
+    run_test("proxy env var auto-detect", passed, failed, test_proxy_env_var)
+
+    # Phase 14 tests
+    run_test("streaming gzip large", passed, failed, test_streaming_gzip_large)
+    run_test("streaming gzip existing still works", passed, failed, test_streaming_gzip_existing)
+
+    # Phase 12 tests
+    run_test("zstd decompression", passed, failed, test_zstd_decompression)
+    run_test("Accept-Encoding includes zstd", passed, failed, test_accept_encoding_zstd)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

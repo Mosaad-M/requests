@@ -93,6 +93,13 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
         elif self.path == "/redirect/target":
             self._respond(200, "OK", {"message": "redirect target", "method": "GET"})
+        elif self.path == "/redirect/multi":
+            # First hop of a 2-hop chain: /redirect/multi → /redirect/301 → /redirect/target
+            self.send_response(302, "Found")
+            self.send_header("Location", "/redirect/301")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/redirect/loop":
             self.send_response(302, "Found")
             self.send_header("Location", "/redirect/loop")
@@ -112,6 +119,22 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             compressed = _gzip.compress(body.encode())
             self.send_response(200, "OK")
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.send_header("Connection", "close")
+            self.send_header("X-Test-Server", "mojo-test/1.0")
+            self.end_headers()
+            self.wfile.write(compressed)
+        elif self.path == "/gzip-large":
+            import gzip as _gzip
+            # 50 KB of semi-random printable ASCII — compresses to ~60-70%
+            # (ratio ~1.5–2:1, well under the 256× decompression cap)
+            import string as _string
+            chars = (_string.ascii_letters + _string.digits + " .,;:!?") * 800
+            large_body = chars[:50000]
+            compressed = _gzip.compress(large_body.encode())
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(compressed)))
             self.send_header("Connection", "close")
@@ -227,6 +250,21 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(compressed)
             except ImportError:
                 self._respond(503, "Service Unavailable", {"error": "brotli not installed"})
+        elif self.path == "/zstd":
+            try:
+                import zstandard as _zstd
+                body = json.dumps({"encoding": "zstd", "message": "hello zstd"})
+                cctx = _zstd.ZstdCompressor()
+                compressed = cctx.compress(body.encode())
+                self.send_response(200, "OK")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Encoding", "zstd")
+                self.send_header("Content-Length", str(len(compressed)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(compressed)
+            except ImportError:
+                self._respond(503, "Service Unavailable", {"error": "zstandard not installed"})
         elif self.path == "/stream/medium":
             body = b"A" * (256 * 1024)
             self.send_response(200, "OK")
@@ -236,6 +274,81 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        elif self.path == "/redirect/to-private":
+            # Redirect to a private IP with no open port — connection refused
+            # 10.255.255.254 is reachable (private range) but port 80 is closed
+            self.send_response(302, "Found")
+            self.send_header("Location", "http://10.255.255.254/")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/set-cookie-tld":
+            # Set-Cookie with a single-label (TLD) domain — should be rejected
+            body = json.dumps({"message": "tld domain cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "bad=1; Domain=.com")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-psl-co-uk":
+            # Set-Cookie with a PSL public suffix domain — should be rejected
+            body = json.dumps({"message": "psl co.uk cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "psl=1; Domain=.co.uk")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-psl-github-io":
+            # Set-Cookie with a PSL hosting suffix — should be rejected
+            body = json.dumps({"message": "psl github.io cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "psl=1; Domain=.github.io")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-psl-example-co-uk":
+            # Set-Cookie with a valid registrable domain under a PSL suffix — accepted
+            body = json.dumps({"message": "psl example.co.uk cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "psl=1; Domain=.example.co.uk")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-httponly":
+            body = json.dumps({"message": "httponly cookie"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "secret=abc; HttpOnly")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/set-cookie-samesite-strict":
+            body = json.dumps({"message": "samesite strict normalized"})
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "ss=1; SameSite=STRICT")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body.encode())
+        elif self.path == "/oversized-cl":
+            # Claim a Content-Length far larger than MAX_RESPONSE_BYTES to trigger limit
+            body = b"small"
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "999999999")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/shutdown":
             self._respond(200, "OK", {"message": "shutting down"})
             # Schedule shutdown
