@@ -911,3 +911,93 @@ fn hpack_decode_block(
             headers.append(HpackHeader(name, value))
 
     return headers^
+
+
+# ── 15B-7: Header Block Encode (RFC 7541 §6) ───────────────────────────────
+
+fn hpack_encode_block(
+    headers: List[HpackHeader],
+    mut dyn_table: HpackDynTable,
+    use_huffman: Bool = False,
+) raises -> List[UInt8]:
+    """Encode a list of header fields into an HPACK header block (RFC 7541 §6).
+
+    Encoding strategy (in preference order):
+      1. Static or dynamic exact (name + value) match → Indexed (§6.1) — smallest
+      2. Static or dynamic name-only match → Literal + Incremental Indexing
+         with indexed name (§6.2.1)
+      3. No match → Literal + Incremental Indexing with new name (§6.2.1)
+
+    All literal headers are added to the dynamic table (incremental indexing),
+    which allows subsequent headers to reference them by index.
+
+    Args:
+        headers:     Ordered list of (name, value) pairs to encode.
+        dyn_table:   Per-connection dynamic table — mutated as entries are added.
+        use_huffman: If True, literal string values are Huffman-encoded (H=1 bit).
+
+    Returns:
+        Raw HPACK header block bytes ready for a HEADERS frame.
+    """
+    var out = List[UInt8]()
+
+    for i in range(len(headers)):
+        var name  = headers[i].name
+        var value = headers[i].value
+
+        # ── 1. Check static table ──────────────────────────────────────────
+        var sr          = static_table_find(name, value)
+        var static_idx  = sr[0]
+        var static_exact = sr[1]
+
+        if static_exact:
+            # Indexed Header Field (§6.1): 0x80 | index
+            var enc = hpack_encode_int(static_idx, 7)
+            enc[0]  = enc[0] | UInt8(0x80)
+            _append_bytes(out, enc)
+            continue  # indexed — no dyn table change
+
+        # ── 2. Check dynamic table ─────────────────────────────────────────
+        var dyn_exact_idx = 0   # combined index of exact match in dyn table
+        var dyn_name_idx  = 0   # combined index of first name match in dyn table
+        for j in range(dyn_table.len()):
+            var e        = dyn_table.get(j + 1)   # raises only if OOB; safe here
+            var comb_idx = 61 + (j + 1)
+            if e[0] == name:
+                if e[1] == value:
+                    dyn_exact_idx = comb_idx
+                    break
+                if dyn_name_idx == 0:
+                    dyn_name_idx = comb_idx
+
+        if dyn_exact_idx > 0:
+            # Indexed from dynamic table (§6.1): 0x80 | index
+            var enc = hpack_encode_int(dyn_exact_idx, 7)
+            enc[0]  = enc[0] | UInt8(0x80)
+            _append_bytes(out, enc)
+            continue  # indexed — no dyn table change
+
+        # ── 3. Literal + Incremental Indexing (§6.2.1) ────────────────────
+        var name_idx = 0
+        if dyn_name_idx > 0:
+            name_idx = dyn_name_idx
+        elif static_idx > 0:
+            name_idx = static_idx    # static name-only match
+
+        if name_idx > 0:
+            # Indexed name: 0x40 | name_idx (6-bit prefix)
+            var enc = hpack_encode_int(name_idx, 6)
+            enc[0]  = enc[0] | UInt8(0x40)
+            _append_bytes(out, enc)
+        else:
+            # New name: 0x40 opcode, then name string
+            out.append(UInt8(0x40))
+            _append_bytes(out, hpack_encode_str(name, use_huffman))
+
+        # Value string (literal for all cases here)
+        _append_bytes(out, hpack_encode_str(value, use_huffman))
+
+        # Add to dynamic table
+        dyn_table.insert(name, value)
+
+    return out^

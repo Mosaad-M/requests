@@ -13,6 +13,7 @@ from hpack import (
     static_table_get, static_table_find,
     HpackDynTable,
     HpackHeader, hpack_decode_block,
+    hpack_encode_block,
 )
 
 
@@ -1362,6 +1363,172 @@ def test_decode_rfc_c4_req3() raises:
     assert_eq_str(headers[4].value, "custom-value", "h4.value")
 
 
+# ── 15B-7: Header Block Encode ─────────────────────────────────────────────
+
+fn _assert_bytes_eq(got: List[UInt8], expected: List[UInt8], label: String) raises:
+    """Fail with a descriptive message if byte sequences differ."""
+    if len(got) != len(expected):
+        raise Error(
+            label + ": length mismatch — expected "
+            + String(len(expected)) + " bytes, got " + String(len(got))
+        )
+    for i in range(len(got)):
+        if got[i] != expected[i]:
+            raise Error(
+                label + ": byte[" + String(i) + "] expected 0x"
+                + String(Int(expected[i])) + " got 0x" + String(Int(got[i]))
+            )
+
+
+def test_encode_empty_headers() raises:
+    """Empty header list encodes to empty byte sequence."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    var out     = hpack_encode_block(headers, dt)
+    if len(out) != 0:
+        raise Error("expected 0 bytes, got " + String(len(out)))
+
+
+def test_encode_indexed_exact_static() raises:
+    """(:method,GET) has static exact match at idx=2 → single byte 0x82."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":method", "GET"))
+    var out = hpack_encode_block(headers, dt)
+    _assert_bytes_eq(out, _hex_bytes("82"), "encode(:method,GET)")
+    if dt.len() != 0:
+        raise Error("indexed must not add to dyn table")
+
+
+def test_encode_multiple_indexed_static() raises:
+    """(:method,GET) (:scheme,http) (:path,/) → [0x82, 0x86, 0x84]."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":method", "GET"))
+    headers.append(HpackHeader(":scheme", "http"))
+    headers.append(HpackHeader(":path", "/"))
+    var out = hpack_encode_block(headers, dt)
+    _assert_bytes_eq(out, _hex_bytes("828684"), "3 indexed headers")
+
+
+def test_encode_literal_incr_static_name_only() raises:
+    """(:authority,www.example.com): static idx=1 name-only → [0x41, 0x0f, ...15 bytes...]."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":authority", "www.example.com"))
+    var out = hpack_encode_block(headers, dt)
+    # 0x41 = literal+incr name_idx=1, 0x0f = length 15
+    _assert_bytes_eq(out, _hex_bytes("410f7777772e6578616d706c652e636f6d"), "authority")
+    if dt.len() != 1:
+        raise Error("literal+incr must add to dyn table")
+
+
+def test_encode_literal_incr_new_name() raises:
+    """(x-custom,foo): no static/dyn match → 0x40 + name_str + value_str."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader("x-custom", "foo"))
+    var out = hpack_encode_block(headers, dt)
+    # 40 08 "x-custom" 03 "foo"
+    # 40 08 78 2d 63 75 73 74 6f 6d 03 66 6f 6f
+    _assert_bytes_eq(out, _hex_bytes("4008782d637573746f6d03666f6f"), "new-name")
+
+
+def test_encode_dynamic_reuse() raises:
+    """After inserting (custom-key,custom-value) in req1, req2 encodes it as indexed (0xbe)."""
+    var dt = HpackDynTable()
+    # First request: encodes literal → adds to dyn table at idx 62
+    var h1 = List[HpackHeader]()
+    h1.append(HpackHeader("custom-key", "custom-value"))
+    _ = hpack_encode_block(h1, dt)
+    if dt.len() != 1:
+        raise Error("expected 1 dyn entry after req1")
+    # Second request: same header → should now be indexed at combined_idx=62 → 0xbe
+    var h2 = List[HpackHeader]()
+    h2.append(HpackHeader("custom-key", "custom-value"))
+    var out = hpack_encode_block(h2, dt)
+    _assert_bytes_eq(out, _hex_bytes("be"), "indexed dyn entry")
+
+
+def test_encode_huffman_flag() raises:
+    """use_huffman=True sets H bit in string length byte for literal strings."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":authority", "www.example.com"))
+    var out = hpack_encode_block(headers, dt, True)
+    # 0x41 = literal+incr name_idx=1, then 0x8c = H=1 len=12, then 12 Huffman bytes
+    _assert_bytes_eq(out, _hex_bytes("418cf1e3c2e5f23a6ba0ab90f4ff"), "huffman authority")
+
+
+def test_encode_decode_roundtrip() raises:
+    """Encode a 4-header block then decode it: output matches input."""
+    var dt_enc  = HpackDynTable()
+    var dt_dec  = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":method", "POST"))
+    headers.append(HpackHeader(":path", "/submit"))
+    headers.append(HpackHeader("content-type", "application/json"))
+    headers.append(HpackHeader("x-request-id", "abc123"))
+    var encoded = hpack_encode_block(headers, dt_enc)
+    var decoded = hpack_decode_block(encoded, dt_dec)
+    if len(decoded) != 4:
+        raise Error("expected 4 decoded headers, got " + String(len(decoded)))
+    assert_eq_str(decoded[0].name, ":method", "h0.name")
+    assert_eq_str(decoded[0].value, "POST", "h0.value")
+    assert_eq_str(decoded[1].name, ":path", "h1.name")
+    assert_eq_str(decoded[1].value, "/submit", "h1.value")
+    assert_eq_str(decoded[2].name, "content-type", "h2.name")
+    assert_eq_str(decoded[2].value, "application/json", "h2.value")
+    assert_eq_str(decoded[3].name, "x-request-id", "h3.name")
+    assert_eq_str(decoded[3].value, "abc123", "h3.value")
+
+
+def test_encode_rfc_c3_req1() raises:
+    """RFC §C.3.1 — encode first request; byte-for-byte match."""
+    var dt      = HpackDynTable()
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":method", "GET"))
+    headers.append(HpackHeader(":scheme", "http"))
+    headers.append(HpackHeader(":path", "/"))
+    headers.append(HpackHeader(":authority", "www.example.com"))
+    var out = hpack_encode_block(headers, dt)
+    _assert_bytes_eq(out, _hex_bytes("828684410f7777772e6578616d706c652e636f6d"), "RFC §C.3.1")
+
+
+def test_encode_rfc_c3_sequential() raises:
+    """RFC §C.3 — encode all three requests with shared dyn table; all match spec byte-for-byte."""
+    var dt = HpackDynTable()
+
+    var h1 = List[HpackHeader]()
+    h1.append(HpackHeader(":method",    "GET"));       h1.append(HpackHeader(":scheme", "http"))
+    h1.append(HpackHeader(":path",      "/"));         h1.append(HpackHeader(":authority", "www.example.com"))
+    _assert_bytes_eq(
+        hpack_encode_block(h1, dt),
+        _hex_bytes("828684410f7777772e6578616d706c652e636f6d"),
+        "RFC §C.3 req1",
+    )
+
+    var h2 = List[HpackHeader]()
+    h2.append(HpackHeader(":method",       "GET"));    h2.append(HpackHeader(":scheme", "http"))
+    h2.append(HpackHeader(":path",         "/"));      h2.append(HpackHeader(":authority", "www.example.com"))
+    h2.append(HpackHeader("cache-control", "no-cache"))
+    _assert_bytes_eq(
+        hpack_encode_block(h2, dt),
+        _hex_bytes("828684be58086e6f2d6361636865"),
+        "RFC §C.3 req2",
+    )
+
+    var h3 = List[HpackHeader]()
+    h3.append(HpackHeader(":method",   "GET"));        h3.append(HpackHeader(":scheme", "https"))
+    h3.append(HpackHeader(":path",     "/index.html")); h3.append(HpackHeader(":authority", "www.example.com"))
+    h3.append(HpackHeader("custom-key", "custom-value"))
+    _assert_bytes_eq(
+        hpack_encode_block(h3, dt),
+        _hex_bytes("828785bf400a637573746f6d2d6b65790c637573746f6d2d76616c7565"),
+        "RFC §C.3 req3",
+    )
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -1504,6 +1671,19 @@ def main() raises:
     run_test("RFC §C.4.1 — request 1 Huffman strings", passed, failed, test_decode_rfc_c4_req1)
     run_test("RFC §C.4.2 — request 2 Huffman strings", passed, failed, test_decode_rfc_c4_req2)
     run_test("RFC §C.4.3 — request 3 Huffman strings", passed, failed, test_decode_rfc_c4_req3)
+
+    print()
+    print("── 15B-7: Header Block Encode ──")
+    run_test("empty headers → []", passed, failed, test_encode_empty_headers)
+    run_test("(:method,GET) → [0x82] indexed static exact", passed, failed, test_encode_indexed_exact_static)
+    run_test(":method :scheme :path → [82 86 84]", passed, failed, test_encode_multiple_indexed_static)
+    run_test(":authority/www.example.com → literal+incr static name [41 0f ...]", passed, failed, test_encode_literal_incr_static_name_only)
+    run_test("(x-custom,foo) → literal+incr new name [40 08 ...]", passed, failed, test_encode_literal_incr_new_name)
+    run_test("second occurrence reuses dyn table index → [0xbe]", passed, failed, test_encode_dynamic_reuse)
+    run_test("use_huffman=True sets H bit in value length byte", passed, failed, test_encode_huffman_flag)
+    run_test("encode→decode roundtrip: 4-header block identical", passed, failed, test_encode_decode_roundtrip)
+    run_test("RFC §C.3.1 first request byte-for-byte", passed, failed, test_encode_rfc_c3_req1)
+    run_test("RFC §C.3 three requests sequential — byte-for-byte", passed, failed, test_encode_rfc_c3_sequential)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
