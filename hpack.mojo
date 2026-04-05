@@ -537,3 +537,124 @@ fn hpack_encode_str(s: String, huffman: Bool) -> List[UInt8]:
     out[0] = UInt8(first)
     _append_bytes(out, huff_bytes)
     return out^
+
+
+# ── 15B-4: Static Table (RFC 7541 Appendix A, 61 entries) ──────────────────
+
+fn _static_table() -> Tuple[List[String], List[String]]:
+    """Return (names, values) lists with 62 entries (index 0 unused; 1–61 per RFC)."""
+    var names  = List[String](capacity=62)
+    var values = List[String](capacity=62)
+    # Index 0 — unused sentinel
+    names.append("")
+    values.append("")
+    # 1–61 per RFC 7541 Appendix A
+    names.append(":authority");          values.append("")
+    names.append(":method");             values.append("GET")
+    names.append(":method");             values.append("POST")
+    names.append(":path");               values.append("/")
+    names.append(":path");               values.append("/index.html")
+    names.append(":scheme");             values.append("http")
+    names.append(":scheme");             values.append("https")
+    names.append(":status");             values.append("200")
+    names.append(":status");             values.append("204")
+    names.append(":status");             values.append("206")
+    names.append(":status");             values.append("304")
+    names.append(":status");             values.append("400")
+    names.append(":status");             values.append("404")
+    names.append(":status");             values.append("500")
+    names.append("accept-charset");      values.append("")
+    names.append("accept-encoding");     values.append("gzip, deflate")
+    names.append("accept-language");     values.append("")
+    names.append("accept-ranges");       values.append("")
+    names.append("accept");              values.append("")
+    names.append("access-control-allow-origin"); values.append("")
+    names.append("age");                 values.append("")
+    names.append("allow");               values.append("")
+    names.append("authorization");       values.append("")
+    names.append("cache-control");       values.append("")
+    names.append("content-disposition"); values.append("")
+    names.append("content-encoding");    values.append("")
+    names.append("content-language");    values.append("")
+    names.append("content-length");      values.append("")
+    names.append("content-location");    values.append("")
+    names.append("content-range");       values.append("")
+    names.append("content-type");        values.append("")
+    names.append("cookie");              values.append("")
+    names.append("date");                values.append("")
+    names.append("etag");                values.append("")
+    names.append("expect");              values.append("")
+    names.append("expires");             values.append("")
+    names.append("from");                values.append("")
+    names.append("host");                values.append("")
+    names.append("if-match");            values.append("")
+    names.append("if-modified-since");   values.append("")
+    names.append("if-none-match");       values.append("")
+    names.append("if-range");            values.append("")
+    names.append("if-unmodified-since"); values.append("")
+    names.append("last-modified");       values.append("")
+    names.append("link");                values.append("")
+    names.append("location");            values.append("")
+    names.append("max-forwards");        values.append("")
+    names.append("proxy-authenticate");  values.append("")
+    names.append("proxy-authorization"); values.append("")
+    names.append("range");               values.append("")
+    names.append("referer");             values.append("")
+    names.append("refresh");             values.append("")
+    names.append("retry-after");         values.append("")
+    names.append("server");              values.append("")
+    names.append("set-cookie");          values.append("")
+    names.append("strict-transport-security"); values.append("")
+    names.append("transfer-encoding");   values.append("")
+    names.append("user-agent");          values.append("")
+    names.append("vary");                values.append("")
+    names.append("via");                 values.append("")
+    names.append("www-authenticate");    values.append("")
+    return (names^, values^)
+
+
+fn static_table_get(idx: Int) raises -> Tuple[String, String]:
+    """Return the (name, value) pair at the given 1-based static table index.
+
+    Args:
+        idx: 1-based index (1–61 per RFC 7541 Appendix A).
+
+    Returns:
+        (name, value) tuple.
+
+    Raises:
+        Error if idx is out of range [1, 61].
+    """
+    if idx < 1 or idx > 61:
+        raise Error("static_table_get: index out of range: " + String(idx))
+    var tables = _static_table()
+    var names  = tables[0].copy()
+    var values = tables[1].copy()
+    return (names[idx], values[idx])
+
+
+fn static_table_find(name: String, value: String) -> Tuple[Int, Bool]:
+    """Search the static table for a header name/value pair.
+
+    Args:
+        name:  Header name (lowercase).
+        value: Header value.
+
+    Returns:
+        (idx, exact): idx is the 1-based index (0 if not found).
+                      exact=True if both name and value matched.
+                      exact=False if only name matched.
+    """
+    var tables      = _static_table()
+    var names       = tables[0].copy()
+    var values      = tables[1].copy()
+    var name_match  = 0   # first index where name matched (value did not)
+    for i in range(1, 62):
+        if names[i] == name:
+            if values[i] == value:
+                return (i, True)
+            if name_match == 0:
+                name_match = i
+    if name_match != 0:
+        return (name_match, False)
+    return (0, False)
