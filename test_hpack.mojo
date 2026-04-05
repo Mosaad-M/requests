@@ -10,6 +10,7 @@ from hpack import (
     hpack_encode_str_literal, hpack_decode_str,
     huffman_encode, huffman_decode,
     hpack_encode_str,
+    static_table_get, static_table_find,
 )
 
 
@@ -544,6 +545,371 @@ def test_huffman_encode_decode_exact_byte_boundary() raises:
         raise Error("expected '::', got '" + decoded + "'")
 
 
+# ── 15B-4: Static Table (RFC 7541 Appendix A) ──────────────────────────────
+
+def assert_eq_str(actual: String, expected: String, label: String) raises:
+    if actual != expected:
+        raise Error(label + ": expected '" + expected + "', got '" + actual + "'")
+
+
+# ── get: pseudo-headers ────────────────────────────────────────────────────
+
+def test_static_get_1() raises:
+    """Entry 1: :authority, empty value."""
+    var r = static_table_get(1)
+    assert_eq_str(r[0], String(":authority"), "idx 1 name")
+    assert_eq_str(r[1], String(""), "idx 1 value")
+
+
+def test_static_get_2_method_get() raises:
+    """Entry 2: :method GET."""
+    var r = static_table_get(2)
+    assert_eq_str(r[0], String(":method"), "idx 2 name")
+    assert_eq_str(r[1], String("GET"), "idx 2 value")
+
+
+def test_static_get_3_method_post() raises:
+    """Entry 3: :method POST."""
+    var r = static_table_get(3)
+    assert_eq_str(r[0], String(":method"), "idx 3 name")
+    assert_eq_str(r[1], String("POST"), "idx 3 value")
+
+
+def test_static_get_4_path_root() raises:
+    """Entry 4: :path /."""
+    var r = static_table_get(4)
+    assert_eq_str(r[0], String(":path"), "idx 4 name")
+    assert_eq_str(r[1], String("/"), "idx 4 value")
+
+
+def test_static_get_5_path_index() raises:
+    """Entry 5: :path /index.html."""
+    var r = static_table_get(5)
+    assert_eq_str(r[0], String(":path"), "idx 5 name")
+    assert_eq_str(r[1], String("/index.html"), "idx 5 value")
+
+
+def test_static_get_6_scheme_http() raises:
+    """Entry 6: :scheme http."""
+    var r = static_table_get(6)
+    assert_eq_str(r[0], String(":scheme"), "idx 6 name")
+    assert_eq_str(r[1], String("http"), "idx 6 value")
+
+
+def test_static_get_7_scheme_https() raises:
+    """Entry 7: :scheme https."""
+    var r = static_table_get(7)
+    assert_eq_str(r[0], String(":scheme"), "idx 7 name")
+    assert_eq_str(r[1], String("https"), "idx 7 value")
+
+
+# ── get: :status entries ───────────────────────────────────────────────────
+
+def test_static_get_8_status_200() raises:
+    """Entry 8: :status 200."""
+    var r = static_table_get(8)
+    assert_eq_str(r[0], String(":status"), "idx 8 name")
+    assert_eq_str(r[1], String("200"), "idx 8 value")
+
+
+def test_static_get_9_status_204() raises:
+    """Entry 9: :status 204."""
+    var r = static_table_get(9)
+    assert_eq_str(r[1], String("204"), "idx 9 value")
+
+
+def test_static_get_11_status_304() raises:
+    """Entry 11: :status 304."""
+    var r = static_table_get(11)
+    assert_eq_str(r[1], String("304"), "idx 11 value")
+
+
+def test_static_get_12_status_400() raises:
+    """Entry 12: :status 400."""
+    var r = static_table_get(12)
+    assert_eq_str(r[1], String("400"), "idx 12 value")
+
+
+def test_static_get_13_status_404() raises:
+    """Entry 13: :status 404."""
+    var r = static_table_get(13)
+    assert_eq_str(r[1], String("404"), "idx 13 value")
+
+
+def test_static_get_14_status_500() raises:
+    """Entry 14: :status 500."""
+    var r = static_table_get(14)
+    assert_eq_str(r[0], String(":status"), "idx 14 name")
+    assert_eq_str(r[1], String("500"), "idx 14 value")
+
+
+# ── get: mid-table header names ────────────────────────────────────────────
+
+def test_static_get_16_accept_encoding() raises:
+    """Entry 16: accept-encoding gzip, deflate (non-empty value)."""
+    var r = static_table_get(16)
+    assert_eq_str(r[0], String("accept-encoding"), "idx 16 name")
+    assert_eq_str(r[1], String("gzip, deflate"), "idx 16 value")
+
+
+def test_static_get_24_cache_control() raises:
+    """Entry 24: cache-control, empty value."""
+    var r = static_table_get(24)
+    assert_eq_str(r[0], String("cache-control"), "idx 24 name")
+    assert_eq_str(r[1], String(""), "idx 24 value")
+
+
+def test_static_get_28_content_length() raises:
+    """Entry 28: content-length, empty value."""
+    var r = static_table_get(28)
+    assert_eq_str(r[0], String("content-length"), "idx 28 name")
+    assert_eq_str(r[1], String(""), "idx 28 value")
+
+
+def test_static_get_31_content_type() raises:
+    """Entry 31: content-type, empty value."""
+    var r = static_table_get(31)
+    assert_eq_str(r[0], String("content-type"), "idx 31 name")
+    assert_eq_str(r[1], String(""), "idx 31 value")
+
+
+def test_static_get_32_cookie() raises:
+    """Entry 32: cookie, empty value."""
+    var r = static_table_get(32)
+    assert_eq_str(r[0], String("cookie"), "idx 32 name")
+
+
+def test_static_get_38_host() raises:
+    """Entry 38: host, empty value."""
+    var r = static_table_get(38)
+    assert_eq_str(r[0], String("host"), "idx 38 name")
+
+
+# ── get: boundary entries ──────────────────────────────────────────────────
+
+def test_static_get_61_www_authenticate() raises:
+    """Entry 61 (last): www-authenticate, empty value."""
+    var r = static_table_get(61)
+    assert_eq_str(r[0], String("www-authenticate"), "idx 61 name")
+    assert_eq_str(r[1], String(""), "idx 61 value")
+
+
+def test_static_get_oob_zero() raises:
+    """Index 0 is out of range → Error."""
+    var raised = False
+    try:
+        _ = static_table_get(0)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for index 0")
+
+
+def test_static_get_oob_62() raises:
+    """Index 62 is out of range → Error."""
+    var raised = False
+    try:
+        _ = static_table_get(62)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for index 62")
+
+
+def test_static_get_oob_negative() raises:
+    """Negative index is out of range → Error."""
+    var raised = False
+    try:
+        _ = static_table_get(-1)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for index -1")
+
+
+def test_static_get_all_names_non_empty() raises:
+    """All 61 entries have non-empty header names."""
+    for i in range(1, 62):
+        var r = static_table_get(i)
+        if len(r[0]) == 0:
+            raise Error("entry " + String(i) + " has empty name")
+
+
+def test_static_get_pseudo_headers_at_front() raises:
+    """Entries 1-14 are pseudo-headers (:authority, :method, :path, :scheme, :status)."""
+    for i in range(1, 15):
+        var r = static_table_get(i)
+        var name = r[0]
+        if not name.startswith(":"):
+            raise Error("expected pseudo-header at idx " + String(i) + ", got '" + name + "'")
+
+
+# ── find: exact matches ────────────────────────────────────────────────────
+
+def test_static_find_exact_authority() raises:
+    """':authority' with empty value → exact match at index 1."""
+    var r = static_table_find(String(":authority"), String(""))
+    assert_eq_int(r[0], 1, "find ':authority' index")
+    if not r[1]:
+        raise Error("expected exact match for ':authority'")
+
+
+def test_static_find_exact_method_get() raises:
+    """':method GET' → exact match at index 2."""
+    var r = static_table_find(String(":method"), String("GET"))
+    assert_eq_int(r[0], 2, "find ':method GET' index")
+    if not r[1]:
+        raise Error("expected exact match for ':method GET'")
+
+
+def test_static_find_exact_method_post() raises:
+    """':method POST' → exact match at index 3."""
+    var r = static_table_find(String(":method"), String("POST"))
+    assert_eq_int(r[0], 3, "find ':method POST' index")
+    if not r[1]:
+        raise Error("expected exact match for ':method POST'")
+
+
+def test_static_find_exact_path_root() raises:
+    """':path /' → exact match at index 4."""
+    var r = static_table_find(String(":path"), String("/"))
+    assert_eq_int(r[0], 4, "find ':path /' index")
+    if not r[1]:
+        raise Error("expected exact match for ':path /'")
+
+
+def test_static_find_exact_path_index() raises:
+    """':path /index.html' → exact match at index 5."""
+    var r = static_table_find(String(":path"), String("/index.html"))
+    assert_eq_int(r[0], 5, "find ':path /index.html' index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_scheme_http() raises:
+    """':scheme http' → exact match at index 6."""
+    var r = static_table_find(String(":scheme"), String("http"))
+    assert_eq_int(r[0], 6, "find ':scheme http' index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_scheme_https() raises:
+    """':scheme https' → exact match at index 7."""
+    var r = static_table_find(String(":scheme"), String("https"))
+    assert_eq_int(r[0], 7, "find ':scheme https' index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_status_200() raises:
+    """':status 200' → exact match at index 8."""
+    var r = static_table_find(String(":status"), String("200"))
+    assert_eq_int(r[0], 8, "find ':status 200' index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_status_404() raises:
+    """':status 404' → exact match at index 13."""
+    var r = static_table_find(String(":status"), String("404"))
+    assert_eq_int(r[0], 13, "find ':status 404' index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_status_500() raises:
+    """':status 500' → exact match at index 14."""
+    var r = static_table_find(String(":status"), String("500"))
+    assert_eq_int(r[0], 14, "find ':status 500' index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_accept_encoding() raises:
+    """'accept-encoding gzip, deflate' → exact match at index 16."""
+    var r = static_table_find(String("accept-encoding"), String("gzip, deflate"))
+    assert_eq_int(r[0], 16, "find accept-encoding index")
+    if not r[1]:
+        raise Error("expected exact match")
+
+
+def test_static_find_exact_content_type_empty() raises:
+    """'content-type' with empty value → exact match at index 31."""
+    var r = static_table_find(String("content-type"), String(""))
+    assert_eq_int(r[0], 31, "find 'content-type' index")
+    if not r[1]:
+        raise Error("expected exact match for 'content-type' empty value")
+
+
+# ── find: name-only matches (value differs) ────────────────────────────────
+
+def test_static_find_name_only_method() raises:
+    """':method DELETE' → name match at 2, no exact match."""
+    var r = static_table_find(String(":method"), String("DELETE"))
+    assert_eq_int(r[0], 2, "name-only ':method' → first match is idx 2")
+    if r[1]:
+        raise Error("expected no exact match")
+
+
+def test_static_find_name_only_status() raises:
+    """':status 201' → name match at 8 (first :status entry), no exact."""
+    var r = static_table_find(String(":status"), String("201"))
+    assert_eq_int(r[0], 8, "name-only ':status' → first match is idx 8")
+    if r[1]:
+        raise Error("expected no exact match")
+
+
+def test_static_find_name_only_cache_control() raises:
+    """'cache-control no-cache' → name match at 24, no exact."""
+    var r = static_table_find(String("cache-control"), String("no-cache"))
+    assert_eq_int(r[0], 24, "name-only 'cache-control' index")
+    if r[1]:
+        raise Error("expected no exact match")
+
+
+def test_static_find_name_only_content_type() raises:
+    """'content-type application/json' → name match at 31, no exact."""
+    var r = static_table_find(String("content-type"), String("application/json"))
+    assert_eq_int(r[0], 31, "name-only 'content-type' index")
+    if r[1]:
+        raise Error("expected no exact match")
+
+
+def test_static_find_name_only_path() raises:
+    """':path /api/v1' → name match at 4 (first :path entry), no exact."""
+    var r = static_table_find(String(":path"), String("/api/v1"))
+    assert_eq_int(r[0], 4, "name-only ':path' → first match is idx 4")
+    if r[1]:
+        raise Error("expected no exact match")
+
+
+# ── find: not found ────────────────────────────────────────────────────────
+
+def test_static_find_not_found_custom() raises:
+    """'x-custom-header' is not in the static table → (0, False)."""
+    var r = static_table_find(String("x-custom-header"), String("val"))
+    assert_eq_int(r[0], 0, "not-found index should be 0")
+    if r[1]:
+        raise Error("expected no match")
+
+
+def test_static_find_not_found_empty_name() raises:
+    """Empty name is not in the static table → (0, False)."""
+    var r = static_table_find(String(""), String(""))
+    assert_eq_int(r[0], 0, "empty name not found")
+    if r[1]:
+        raise Error("expected no match")
+
+
+def test_static_find_not_found_uppercase() raises:
+    """Header names are lowercase — 'Content-Type' is not in table → (0, False)."""
+    var r = static_table_find(String("Content-Type"), String(""))
+    assert_eq_int(r[0], 0, "uppercase name not found")
+    if r[1]:
+        raise Error("expected no match for uppercase 'Content-Type'")
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -602,6 +968,54 @@ def main() raises:
     run_test("zero-padded byte raises decode error", passed, failed, test_huffman_decode_zero_padding_error)
     run_test("padding > 7 bits raises decode error", passed, failed, test_huffman_decode_padding_too_long_error)
     run_test("encode/decode '::'  at exact byte boundary", passed, failed, test_huffman_encode_decode_exact_byte_boundary)
+
+    print()
+    print("── 15B-4: Static Table ──")
+    run_test("static_table_get(1) → :authority/''", passed, failed, test_static_get_1)
+    run_test("static_table_get(2) → :method/GET", passed, failed, test_static_get_2_method_get)
+    run_test("static_table_get(3) → :method/POST", passed, failed, test_static_get_3_method_post)
+    run_test("static_table_get(4) → :path/'/", passed, failed, test_static_get_4_path_root)
+    run_test("static_table_get(5) → :path//index.html", passed, failed, test_static_get_5_path_index)
+    run_test("static_table_get(6) → :scheme/http", passed, failed, test_static_get_6_scheme_http)
+    run_test("static_table_get(7) → :scheme/https", passed, failed, test_static_get_7_scheme_https)
+    run_test("static_table_get(8) → :status/200", passed, failed, test_static_get_8_status_200)
+    run_test("static_table_get(9) → :status/204", passed, failed, test_static_get_9_status_204)
+    run_test("static_table_get(11) → :status/304", passed, failed, test_static_get_11_status_304)
+    run_test("static_table_get(12) → :status/400", passed, failed, test_static_get_12_status_400)
+    run_test("static_table_get(13) → :status/404", passed, failed, test_static_get_13_status_404)
+    run_test("static_table_get(14) → :status/500", passed, failed, test_static_get_14_status_500)
+    run_test("static_table_get(16) → accept-encoding/gzip, deflate", passed, failed, test_static_get_16_accept_encoding)
+    run_test("static_table_get(24) → cache-control/''", passed, failed, test_static_get_24_cache_control)
+    run_test("static_table_get(28) → content-length/''", passed, failed, test_static_get_28_content_length)
+    run_test("static_table_get(31) → content-type/''", passed, failed, test_static_get_31_content_type)
+    run_test("static_table_get(32) → cookie/''", passed, failed, test_static_get_32_cookie)
+    run_test("static_table_get(38) → host/''", passed, failed, test_static_get_38_host)
+    run_test("static_table_get(61) → www-authenticate/''", passed, failed, test_static_get_61_www_authenticate)
+    run_test("static_table_get(0) raises OOB", passed, failed, test_static_get_oob_zero)
+    run_test("static_table_get(62) raises OOB", passed, failed, test_static_get_oob_62)
+    run_test("static_table_get(-1) raises OOB", passed, failed, test_static_get_oob_negative)
+    run_test("all 61 entries have non-empty names", passed, failed, test_static_get_all_names_non_empty)
+    run_test("entries 1–14 are pseudo-headers", passed, failed, test_static_get_pseudo_headers_at_front)
+    run_test("find ':authority'/'' → exact idx=1", passed, failed, test_static_find_exact_authority)
+    run_test("find ':method'/GET → exact idx=2", passed, failed, test_static_find_exact_method_get)
+    run_test("find ':method'/POST → exact idx=3", passed, failed, test_static_find_exact_method_post)
+    run_test("find ':path'/'/' → exact idx=4", passed, failed, test_static_find_exact_path_root)
+    run_test("find ':path'//index.html → exact idx=5", passed, failed, test_static_find_exact_path_index)
+    run_test("find ':scheme'/http → exact idx=6", passed, failed, test_static_find_exact_scheme_http)
+    run_test("find ':scheme'/https → exact idx=7", passed, failed, test_static_find_exact_scheme_https)
+    run_test("find ':status'/200 → exact idx=8", passed, failed, test_static_find_exact_status_200)
+    run_test("find ':status'/404 → exact idx=13", passed, failed, test_static_find_exact_status_404)
+    run_test("find ':status'/500 → exact idx=14", passed, failed, test_static_find_exact_status_500)
+    run_test("find 'accept-encoding'/'gzip, deflate' → exact idx=16", passed, failed, test_static_find_exact_accept_encoding)
+    run_test("find 'content-type'/'' → exact idx=31", passed, failed, test_static_find_exact_content_type_empty)
+    run_test("find ':method'/DELETE → name-only idx=2", passed, failed, test_static_find_name_only_method)
+    run_test("find ':status'/201 → name-only idx=8", passed, failed, test_static_find_name_only_status)
+    run_test("find 'cache-control'/no-cache → name-only idx=24", passed, failed, test_static_find_name_only_cache_control)
+    run_test("find 'content-type'/application/json → name-only idx=31", passed, failed, test_static_find_name_only_content_type)
+    run_test("find ':path'/custom → name-only idx=4", passed, failed, test_static_find_name_only_path)
+    run_test("find 'x-custom-header' → not found (0, False)", passed, failed, test_static_find_not_found_custom)
+    run_test("find '' → not found (0, False)", passed, failed, test_static_find_not_found_empty_name)
+    run_test("find 'Content-Type' (uppercase) → not found", passed, failed, test_static_find_not_found_uppercase)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
