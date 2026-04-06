@@ -19,6 +19,13 @@ else
     FLAGS="-I $TLS_PURE"
 fi
 
+# When tls_pure is available locally, prepend it so it takes precedence over
+# any installed tls package — required for ALPN support (tls_pure >=1.3.0).
+TLS_PURE_ABS="${TLS_PURE:-$(cd "$SCRIPT_DIR/../tls_pure" 2>/dev/null && pwd || echo "")}"
+if [ -d "$TLS_PURE_ABS" ]; then
+    FLAGS="-I $TLS_PURE_ABS $FLAGS"
+fi
+
 # Add pixi env lib to linker search path and rpath so brotli/zstd are found in
 # both local conda env (dev) and system install (CI).
 PIXI_LIB="$SCRIPT_DIR/.pixi/envs/default/lib"
