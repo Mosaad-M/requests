@@ -18,7 +18,11 @@ from h2 import (
     H2_SETTING_MAX_FRAME_SIZE, H2_SETTING_MAX_HEADER_LIST_SIZE,
     # Error codes
     H2_ERR_NO_ERROR, H2_ERR_PROTOCOL_ERROR, H2_ERR_INTERNAL_ERROR,
-    H2_ERR_FLOW_CONTROL_ERROR, H2_ERR_COMPRESSION_ERROR,
+    H2_ERR_FLOW_CONTROL_ERROR, H2_ERR_SETTINGS_TIMEOUT,
+    H2_ERR_STREAM_CLOSED, H2_ERR_FRAME_SIZE_ERROR,
+    H2_ERR_REFUSED_STREAM, H2_ERR_CANCEL,
+    H2_ERR_COMPRESSION_ERROR, H2_ERR_CONNECT_ERROR,
+    H2_ERR_ENHANCE_YOUR_CALM, H2_ERR_INADEQUATE_SECURITY,
     H2_ERR_HTTP_1_1_REQUIRED,
     # Frame struct + encode/decode
     Http2Frame, h2_frame_encode, h2_frame_decode,
@@ -30,6 +34,11 @@ from h2 import (
     h2_make_headers_frame, h2_make_continuation_frame, h2_make_data_frame,
     h2_get_hpack_block,
     h2_encode_request_headers, h2_encode_response_headers,
+    # RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY
+    h2_make_rst_stream, h2_parse_rst_stream,
+    h2_make_window_update, h2_parse_window_update,
+    h2_make_goaway, h2_parse_goaway,
+    h2_make_priority_frame, h2_parse_priority_frame,
 )
 from hpack import HpackHeader, HpackDynTable, hpack_decode_block
 
@@ -687,6 +696,143 @@ def test_data_roundtrip() raises:
     assert_eq_u8(dec.payload[10], 0x64, "p[10] 'd'")
 
 
+# ── 15C-4: RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY Tests ─────────────────
+
+def test_rst_stream_encode() raises:
+    """RST_STREAM with NO_ERROR → 4-byte big-endian error code."""
+    var f = h2_make_rst_stream(1, H2_ERR_NO_ERROR)
+    assert_eq_u8(f.frame_type, H2_RST_STREAM, "type")
+    assert_eq_int(f.stream_id, 1, "stream_id")
+    assert_eq_int(len(f.payload), 4, "payload len")
+    assert_eq_u8(f.payload[0], 0x00, "ec[0]")
+    assert_eq_u8(f.payload[1], 0x00, "ec[1]")
+    assert_eq_u8(f.payload[2], 0x00, "ec[2]")
+    assert_eq_u8(f.payload[3], 0x00, "ec[3]")
+
+
+def test_rst_stream_decode() raises:
+    """Parse RST_STREAM payload: CANCEL (0x8)."""
+    var f = h2_make_rst_stream(3, H2_ERR_CANCEL)
+    var ec = h2_parse_rst_stream(f)
+    assert_eq_int(ec, H2_ERR_CANCEL, "error_code")
+
+
+def test_rst_stream_roundtrip() raises:
+    """Encode then parse RST_STREAM: PROTOCOL_ERROR."""
+    var f  = h2_make_rst_stream(5, H2_ERR_PROTOCOL_ERROR)
+    var ec = h2_parse_rst_stream(f)
+    assert_eq_int(ec, H2_ERR_PROTOCOL_ERROR, "error_code")
+
+
+def test_window_update_encode_stream() raises:
+    """WINDOW_UPDATE for stream 1, increment=65535."""
+    var f = h2_make_window_update(1, 65535)
+    assert_eq_u8(f.frame_type, H2_WINDOW_UPDATE, "type")
+    assert_eq_int(f.stream_id, 1, "stream_id")
+    assert_eq_int(len(f.payload), 4, "payload len")
+    # 65535 = 0x0000FFFF
+    assert_eq_u8(f.payload[0], 0x00, "inc[0]")
+    assert_eq_u8(f.payload[1], 0x00, "inc[1]")
+    assert_eq_u8(f.payload[2], 0xFF, "inc[2]")
+    assert_eq_u8(f.payload[3], 0xFF, "inc[3]")
+
+
+def test_window_update_encode_connection() raises:
+    """WINDOW_UPDATE for the connection (stream_id=0)."""
+    var f = h2_make_window_update(0, 1048576)
+    assert_eq_int(f.stream_id, 0, "stream_id=0")
+
+
+def test_window_update_decode() raises:
+    """Parse WINDOW_UPDATE increment correctly."""
+    var f   = h2_make_window_update(1, 32768)
+    var inc = h2_parse_window_update(f)
+    assert_eq_int(inc, 32768, "increment")
+
+
+def test_window_update_zero_increment() raises:
+    """Increment=0 must raise (RFC §6.9.1)."""
+    var raised = False
+    try:
+        _ = h2_make_window_update(1, 0)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for zero increment")
+
+
+def test_window_update_overflow() raises:
+    """Increment > 2^31-1 must raise."""
+    var raised = False
+    try:
+        _ = h2_make_window_update(1, 0x80000000)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for overflow increment")
+
+
+def test_goaway_no_debug() raises:
+    """GOAWAY with empty debug_data."""
+    var f = h2_make_goaway(3, H2_ERR_NO_ERROR, List[UInt8]())
+    assert_eq_u8(f.frame_type, H2_GOAWAY, "type")
+    assert_eq_int(f.stream_id, 0, "stream_id=0")
+    assert_eq_int(len(f.payload), 8, "payload len (4 last_sid + 4 ec)")
+    # last_stream_id = 3: 0x00 0x00 0x00 0x03
+    assert_eq_u8(f.payload[3], 0x03, "last_sid")
+    # error_code = 0: all zeros
+    assert_eq_u8(f.payload[4], 0x00, "ec[0]")
+    assert_eq_u8(f.payload[7], 0x00, "ec[3]")
+
+
+def test_goaway_with_debug() raises:
+    """GOAWAY with debug_data appended."""
+    var debug = _hex_bytes("deadbeef")
+    var f = h2_make_goaway(5, H2_ERR_PROTOCOL_ERROR, debug)
+    assert_eq_int(len(f.payload), 12, "payload len (8 + 4 debug)")
+    assert_eq_u8(f.payload[8],  0xDE, "debug[0]")
+    assert_eq_u8(f.payload[11], 0xEF, "debug[3]")
+
+
+def test_goaway_roundtrip() raises:
+    """Encode then parse GOAWAY: last_stream_id, error_code, debug."""
+    var debug = _hex_bytes("cafebabe")
+    var f     = h2_make_goaway(7, H2_ERR_INTERNAL_ERROR, debug)
+    var r     = h2_parse_goaway(f)
+    assert_eq_int(r[0], 7, "last_stream_id")
+    assert_eq_int(r[1], H2_ERR_INTERNAL_ERROR, "error_code")
+    assert_eq_int(len(r[2]), 4, "debug len")
+    assert_eq_u8(r[2][0], 0xCA, "debug[0]")
+
+
+def test_priority_frame_exclusive() raises:
+    """PRIORITY frame with exclusive bit set."""
+    var f = h2_make_priority_frame(3, 1, True, 16)
+    assert_eq_u8(f.frame_type, H2_PRIORITY, "type")
+    assert_eq_int(f.stream_id, 3, "stream_id")
+    assert_eq_int(len(f.payload), 5, "payload len")
+    # exclusive bit = high bit of dep_stream_id word
+    if Int(f.payload[0]) & 0x80 == 0:
+        raise Error("exclusive bit must be set")
+
+
+def test_priority_frame_non_exclusive() raises:
+    """PRIORITY frame without exclusive bit."""
+    var f = h2_make_priority_frame(5, 3, False, 32)
+    if Int(f.payload[0]) & 0x80 != 0:
+        raise Error("exclusive bit must be clear")
+
+
+def test_priority_roundtrip() raises:
+    """Encode then parse PRIORITY: dep_stream_id, exclusive, weight."""
+    var f = h2_make_priority_frame(3, 1, True, 32)
+    var r = h2_parse_priority_frame(f)
+    assert_eq_int(r[0], 1, "dep_stream_id")
+    if not r[1]:
+        raise Error("exclusive must be True")
+    assert_eq_int(r[2], 32, "weight")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -745,6 +891,23 @@ def main() raises:
     run_test("encode_response_headers: :status=404", passed, failed, test_encode_response_headers_404)
     run_test("request headers roundtrip via HPACK decode", passed, failed, test_headers_roundtrip)
     run_test("data frame roundtrip: encode → decode → payload matches", passed, failed, test_data_roundtrip)
+
+    print()
+    print("── 15C-4: RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY ──")
+    run_test("rst_stream encode: 4-byte error code", passed, failed, test_rst_stream_encode)
+    run_test("rst_stream decode: error code correct", passed, failed, test_rst_stream_decode)
+    run_test("rst_stream roundtrip: encode then parse", passed, failed, test_rst_stream_roundtrip)
+    run_test("window_update encode: stream-level increment", passed, failed, test_window_update_encode_stream)
+    run_test("window_update encode: connection-level (stream_id=0)", passed, failed, test_window_update_encode_connection)
+    run_test("window_update decode: increment correct", passed, failed, test_window_update_decode)
+    run_test("window_update: increment=0 → raises", passed, failed, test_window_update_zero_increment)
+    run_test("window_update: increment > 2^31-1 → raises", passed, failed, test_window_update_overflow)
+    run_test("goaway: no debug data", passed, failed, test_goaway_no_debug)
+    run_test("goaway: with debug data", passed, failed, test_goaway_with_debug)
+    run_test("goaway roundtrip: encode then parse", passed, failed, test_goaway_roundtrip)
+    run_test("priority frame: exclusive bit set", passed, failed, test_priority_frame_exclusive)
+    run_test("priority frame: exclusive bit clear", passed, failed, test_priority_frame_non_exclusive)
+    run_test("priority roundtrip: encode then parse", passed, failed, test_priority_roundtrip)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

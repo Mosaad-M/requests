@@ -459,3 +459,218 @@ fn h2_encode_response_headers(
     for i in range(len(extra)):
         headers.append(HpackHeader(extra[i].name, extra[i].value))
     return hpack_encode_block(headers, dyn_table, use_huffman)
+
+
+# ── 15C-4: RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY ──────────────────────
+
+fn h2_make_rst_stream(stream_id: Int, error_code: Int) -> Http2Frame:
+    """Build a RST_STREAM frame (4-byte big-endian error code).
+
+    Args:
+        stream_id:  Stream to reset (must be > 0).
+        error_code: H2_ERR_* constant.
+
+    Returns:
+        Http2Frame ready to encode.
+    """
+    var payload = List[UInt8](capacity=4)
+    payload.append(UInt8((error_code >> 24) & 0xFF))
+    payload.append(UInt8((error_code >> 16) & 0xFF))
+    payload.append(UInt8((error_code >> 8)  & 0xFF))
+    payload.append(UInt8( error_code        & 0xFF))
+    return Http2Frame(H2_RST_STREAM, UInt8(0), stream_id, payload^)
+
+
+fn h2_parse_rst_stream(frame: Http2Frame) raises -> Int:
+    """Parse a RST_STREAM frame and return the error code.
+
+    Args:
+        frame: A RST_STREAM frame (payload must be 4 bytes).
+
+    Returns:
+        32-bit error code.
+
+    Raises:
+        Error if payload is not 4 bytes.
+    """
+    if len(frame.payload) != 4:
+        raise Error(
+            "h2_parse_rst_stream: expected 4-byte payload, got "
+            + String(len(frame.payload))
+        )
+    return (Int(frame.payload[0]) << 24) \
+         | (Int(frame.payload[1]) << 16) \
+         | (Int(frame.payload[2]) << 8)  \
+         |  Int(frame.payload[3])
+
+
+fn h2_make_window_update(stream_id: Int, increment: Int) raises -> Http2Frame:
+    """Build a WINDOW_UPDATE frame.
+
+    Args:
+        stream_id: Stream ID (0 for connection-level).
+        increment: Window increment (1 to 2^31-1 inclusive).
+
+    Returns:
+        Http2Frame ready to encode.
+
+    Raises:
+        Error if increment == 0 or > 2^31-1 (RFC §6.9.1).
+    """
+    if increment == 0:
+        raise Error("h2_make_window_update: increment must be > 0 (RFC §6.9.1)")
+    if increment > 0x7FFFFFFF:
+        raise Error(
+            "h2_make_window_update: increment must be ≤ 2^31-1, got "
+            + String(increment)
+        )
+    var payload = List[UInt8](capacity=4)
+    # R bit = 0, 31-bit increment
+    payload.append(UInt8((increment >> 24) & 0x7F))
+    payload.append(UInt8((increment >> 16) & 0xFF))
+    payload.append(UInt8((increment >> 8)  & 0xFF))
+    payload.append(UInt8( increment        & 0xFF))
+    return Http2Frame(H2_WINDOW_UPDATE, UInt8(0), stream_id, payload^)
+
+
+fn h2_parse_window_update(frame: Http2Frame) raises -> Int:
+    """Parse a WINDOW_UPDATE frame and return the increment.
+
+    Args:
+        frame: A WINDOW_UPDATE frame (payload must be 4 bytes).
+
+    Returns:
+        31-bit window increment.
+
+    Raises:
+        Error if payload is not 4 bytes.
+    """
+    if len(frame.payload) != 4:
+        raise Error(
+            "h2_parse_window_update: expected 4-byte payload, got "
+            + String(len(frame.payload))
+        )
+    return (Int(frame.payload[0] & 0x7F) << 24) \
+         | (Int(frame.payload[1])        << 16) \
+         | (Int(frame.payload[2])        << 8)  \
+         |  Int(frame.payload[3])
+
+
+fn h2_make_goaway(
+    last_stream_id: Int,
+    error_code:     Int,
+    debug_data:     List[UInt8],
+) -> Http2Frame:
+    """Build a GOAWAY frame.
+
+    Args:
+        last_stream_id: Highest stream ID processed before shutdown.
+        error_code:     H2_ERR_* constant.
+        debug_data:     Optional opaque debug bytes (may be empty).
+
+    Returns:
+        Http2Frame with stream_id=0 ready to encode.
+    """
+    var n       = 8 + len(debug_data)
+    var payload = List[UInt8](capacity=n)
+    # last_stream_id: 31-bit (R bit = 0)
+    payload.append(UInt8((last_stream_id >> 24) & 0x7F))
+    payload.append(UInt8((last_stream_id >> 16) & 0xFF))
+    payload.append(UInt8((last_stream_id >> 8)  & 0xFF))
+    payload.append(UInt8( last_stream_id        & 0xFF))
+    # error_code: 32-bit
+    payload.append(UInt8((error_code >> 24) & 0xFF))
+    payload.append(UInt8((error_code >> 16) & 0xFF))
+    payload.append(UInt8((error_code >> 8)  & 0xFF))
+    payload.append(UInt8( error_code        & 0xFF))
+    for i in range(len(debug_data)):
+        payload.append(debug_data[i])
+    return Http2Frame(H2_GOAWAY, UInt8(0), 0, payload^)
+
+
+fn h2_parse_goaway(frame: Http2Frame) raises -> Tuple[Int, Int, List[UInt8]]:
+    """Parse a GOAWAY frame.
+
+    Args:
+        frame: A GOAWAY frame (payload must be at least 8 bytes).
+
+    Returns:
+        (last_stream_id, error_code, debug_data).
+
+    Raises:
+        Error if payload is shorter than 8 bytes.
+    """
+    if len(frame.payload) < 8:
+        raise Error(
+            "h2_parse_goaway: expected ≥8-byte payload, got "
+            + String(len(frame.payload))
+        )
+    var last_sid = (Int(frame.payload[0] & 0x7F) << 24) \
+                 | (Int(frame.payload[1])        << 16) \
+                 | (Int(frame.payload[2])        << 8)  \
+                 |  Int(frame.payload[3])
+    var ec = (Int(frame.payload[4]) << 24) \
+           | (Int(frame.payload[5]) << 16) \
+           | (Int(frame.payload[6]) << 8)  \
+           |  Int(frame.payload[7])
+    var dbg_len = len(frame.payload) - 8
+    var dbg     = List[UInt8](capacity=dbg_len)
+    for i in range(dbg_len):
+        dbg.append(frame.payload[8 + i])
+    return (last_sid, ec, dbg^)
+
+
+fn h2_make_priority_frame(
+    stream_id:     Int,
+    dep_stream_id: Int,
+    exclusive:     Bool,
+    weight:        Int,   # 1-256 (wire: weight-1)
+) -> Http2Frame:
+    """Build a PRIORITY frame.
+
+    Args:
+        stream_id:     Stream to set priority on.
+        dep_stream_id: Stream dependency (31-bit).
+        exclusive:     True to set the exclusive (E) bit.
+        weight:        Priority weight 1-256 (wire format stores weight-1).
+
+    Returns:
+        Http2Frame with 5-byte payload ready to encode.
+    """
+    var payload = List[UInt8](capacity=5)
+    # E bit | dep_stream_id (31-bit)
+    var hi = UInt8((dep_stream_id >> 24) & 0x7F)
+    if exclusive:
+        hi = hi | UInt8(0x80)
+    payload.append(hi)
+    payload.append(UInt8((dep_stream_id >> 16) & 0xFF))
+    payload.append(UInt8((dep_stream_id >> 8)  & 0xFF))
+    payload.append(UInt8( dep_stream_id        & 0xFF))
+    payload.append(UInt8((weight - 1) & 0xFF))
+    return Http2Frame(H2_PRIORITY, UInt8(0), stream_id, payload^)
+
+
+fn h2_parse_priority_frame(frame: Http2Frame) raises -> Tuple[Int, Bool, Int]:
+    """Parse a PRIORITY frame.
+
+    Args:
+        frame: A PRIORITY frame (payload must be 5 bytes).
+
+    Returns:
+        (dep_stream_id, exclusive, weight) where weight is 1-256.
+
+    Raises:
+        Error if payload is not 5 bytes.
+    """
+    if len(frame.payload) != 5:
+        raise Error(
+            "h2_parse_priority_frame: expected 5-byte payload, got "
+            + String(len(frame.payload))
+        )
+    var exclusive = (Int(frame.payload[0]) & 0x80) != 0
+    var dep_sid   = (Int(frame.payload[0] & 0x7F) << 24) \
+                  | (Int(frame.payload[1])        << 16) \
+                  | (Int(frame.payload[2])        << 8)  \
+                  |  Int(frame.payload[3])
+    var weight = Int(frame.payload[4]) + 1
+    return (dep_sid, exclusive, weight)
