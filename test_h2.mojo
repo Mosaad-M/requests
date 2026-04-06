@@ -26,7 +26,12 @@ from h2 import (
     h2_settings_encode, h2_settings_decode,
     h2_make_settings_frame, h2_make_settings_ack,
     h2_make_ping_frame, h2_parse_ping_payload,
+    # HEADERS, CONTINUATION, DATA
+    h2_make_headers_frame, h2_make_continuation_frame, h2_make_data_frame,
+    h2_get_hpack_block,
+    h2_encode_request_headers, h2_encode_response_headers,
 )
+from hpack import HpackHeader, HpackDynTable, hpack_decode_block
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -468,6 +473,220 @@ def test_parse_ping_payload() raises:
         assert_eq_u8(p[i], UInt8(0x10 + i), "p[" + String(i) + "]")
 
 
+# ── 15C-3: HEADERS, CONTINUATION, DATA Tests ─────────────────────────────────
+
+def test_make_headers_frame_end_headers() raises:
+    """HEADERS frame with END_HEADERS set, stream_id=1."""
+    var block = _hex_bytes("828684410f7777772e6578616d706c652e636f6d")
+    var f = h2_make_headers_frame(1, block, False, True)
+    assert_eq_u8(f.frame_type, H2_HEADERS, "type")
+    assert_eq_int(f.stream_id, 1, "stream_id")
+    if Int(f.flags) & Int(H2_FLAG_END_HEADERS) == 0:
+        raise Error("END_HEADERS flag must be set")
+    if Int(f.flags) & Int(H2_FLAG_END_STREAM) != 0:
+        raise Error("END_STREAM must be clear")
+    assert_eq_int(len(f.payload), len(block), "payload len")
+
+
+def test_make_headers_frame_end_stream() raises:
+    """HEADERS frame with both END_STREAM and END_HEADERS."""
+    var block = List[UInt8]()
+    block.append(0x82)  # :method: GET
+    var f = h2_make_headers_frame(3, block, True, True)
+    if Int(f.flags) & Int(H2_FLAG_END_STREAM) == 0:
+        raise Error("END_STREAM must be set")
+    if Int(f.flags) & Int(H2_FLAG_END_HEADERS) == 0:
+        raise Error("END_HEADERS must be set")
+
+
+def test_make_continuation_frame() raises:
+    """CONTINUATION frame: END_HEADERS flag matches argument."""
+    var block = List[UInt8](); block.append(0x84)
+    var f_end = h2_make_continuation_frame(5, block, True)
+    assert_eq_u8(f_end.frame_type, H2_CONTINUATION, "type end")
+    if Int(f_end.flags) & Int(H2_FLAG_END_HEADERS) == 0:
+        raise Error("END_HEADERS must be set")
+    var f_cont = h2_make_continuation_frame(5, block, False)
+    if Int(f_cont.flags) & Int(H2_FLAG_END_HEADERS) != 0:
+        raise Error("END_HEADERS must be clear")
+
+
+def test_make_data_frame_no_end() raises:
+    """DATA frame without END_STREAM."""
+    var data = _hex_bytes("48656c6c6f")  # "Hello"
+    var f = h2_make_data_frame(1, data, False)
+    assert_eq_u8(f.frame_type, H2_DATA, "type")
+    assert_eq_int(f.stream_id, 1, "stream_id")
+    if Int(f.flags) & Int(H2_FLAG_END_STREAM) != 0:
+        raise Error("END_STREAM must be clear")
+    assert_eq_int(len(f.payload), 5, "payload len")
+
+
+def test_make_data_frame_end_stream() raises:
+    """DATA frame with END_STREAM set."""
+    var data = List[UInt8](); data.append(0x42)
+    var f = h2_make_data_frame(7, data, True)
+    if Int(f.flags) & Int(H2_FLAG_END_STREAM) == 0:
+        raise Error("END_STREAM must be set")
+
+
+def test_data_frame_empty_payload() raises:
+    """Empty DATA frame is valid."""
+    var f = h2_make_data_frame(1, List[UInt8](), True)
+    assert_eq_int(len(f.payload), 0, "payload len")
+    assert_eq_u8(f.frame_type, H2_DATA, "type")
+
+
+def test_get_hpack_block_no_priority() raises:
+    """No PRIORITY flag → entire payload is the HPACK block."""
+    var block = _hex_bytes("828684")
+    var f = h2_make_headers_frame(1, block, False, True)
+    var b = h2_get_hpack_block(f)
+    assert_eq_int(len(b), 3, "block len")
+    assert_eq_u8(b[0], 0x82, "b[0]")
+
+
+def test_get_hpack_block_with_priority() raises:
+    """PRIORITY flag set → skip 5-byte priority prefix."""
+    # Build a HEADERS frame manually with PRIORITY flag and 5 priority bytes
+    var priority_prefix = List[UInt8]()
+    priority_prefix.append(0x00); priority_prefix.append(0x00)
+    priority_prefix.append(0x00); priority_prefix.append(0x00)
+    priority_prefix.append(0x0F)  # weight-1 = 15 → weight = 16
+    var block = _hex_bytes("8286")
+    var payload = List[UInt8]()
+    for i in range(len(priority_prefix)):
+        payload.append(priority_prefix[i])
+    for i in range(len(block)):
+        payload.append(block[i])
+    var flags = H2_FLAG_END_HEADERS | H2_FLAG_PRIORITY
+    var f = Http2Frame(H2_HEADERS, flags, 1, payload)
+    var b = h2_get_hpack_block(f)
+    assert_eq_int(len(b), 2, "block len (priority bytes skipped)")
+    assert_eq_u8(b[0], 0x82, "b[0]")
+    assert_eq_u8(b[1], 0x86, "b[1]")
+
+
+def test_encode_request_headers_basic() raises:
+    """GET / HTTP/2 → HPACK block decodes to 4 pseudo-headers."""
+    var dyn = HpackDynTable(4096)
+    var extra = List[HpackHeader]()
+    var block = h2_encode_request_headers("GET", "/", "https", "example.com", dyn, extra, False)
+    var dyn2 = HpackDynTable(4096)
+    var headers = hpack_decode_block(block, dyn2)
+    # Must have :method, :path, :scheme, :authority
+    var found_method = False
+    var found_path   = False
+    var found_scheme = False
+    var found_auth   = False
+    for i in range(len(headers)):
+        if headers[i].name == ":method" and headers[i].value == "GET":
+            found_method = True
+        if headers[i].name == ":path" and headers[i].value == "/":
+            found_path = True
+        if headers[i].name == ":scheme" and headers[i].value == "https":
+            found_scheme = True
+        if headers[i].name == ":authority" and headers[i].value == "example.com":
+            found_auth = True
+    if not found_method:
+        raise Error(":method: GET not found")
+    if not found_path:
+        raise Error(":path: / not found")
+    if not found_scheme:
+        raise Error(":scheme: https not found")
+    if not found_auth:
+        raise Error(":authority: example.com not found")
+
+
+def test_encode_request_headers_extra() raises:
+    """Extra headers are included after pseudo-headers."""
+    var dyn = HpackDynTable(4096)
+    var extra = List[HpackHeader]()
+    extra.append(HpackHeader("accept", "application/json"))
+    extra.append(HpackHeader("x-custom", "value"))
+    var block = h2_encode_request_headers("POST", "/api", "https", "api.example.com", dyn, extra, False)
+    var dyn2 = HpackDynTable(4096)
+    var headers = hpack_decode_block(block, dyn2)
+    var found_accept = False
+    var found_custom = False
+    for i in range(len(headers)):
+        if headers[i].name == "accept" and headers[i].value == "application/json":
+            found_accept = True
+        if headers[i].name == "x-custom" and headers[i].value == "value":
+            found_custom = True
+    if not found_accept:
+        raise Error("accept header not found")
+    if not found_custom:
+        raise Error("x-custom header not found")
+
+
+def test_encode_response_headers_200() raises:
+    """:status=200 in response headers."""
+    var dyn = HpackDynTable(4096)
+    var extra = List[HpackHeader]()
+    var block = h2_encode_response_headers(200, dyn, extra, False)
+    var dyn2 = HpackDynTable(4096)
+    var headers = hpack_decode_block(block, dyn2)
+    var found = False
+    for i in range(len(headers)):
+        if headers[i].name == ":status" and headers[i].value == "200":
+            found = True
+    if not found:
+        raise Error(":status: 200 not found")
+
+
+def test_encode_response_headers_404() raises:
+    """:status=404 in response headers."""
+    var dyn = HpackDynTable(4096)
+    var extra = List[HpackHeader]()
+    extra.append(HpackHeader("content-length", "0"))
+    var block = h2_encode_response_headers(404, dyn, extra, False)
+    var dyn2 = HpackDynTable(4096)
+    var headers = hpack_decode_block(block, dyn2)
+    var found_status = False
+    var found_len    = False
+    for i in range(len(headers)):
+        if headers[i].name == ":status" and headers[i].value == "404":
+            found_status = True
+        if headers[i].name == "content-length" and headers[i].value == "0":
+            found_len = True
+    if not found_status:
+        raise Error(":status: 404 not found")
+    if not found_len:
+        raise Error("content-length not found")
+
+
+def test_headers_roundtrip() raises:
+    """encode_request_headers → h2_make_headers_frame → get_hpack_block → decode."""
+    var dyn_enc = HpackDynTable(4096)
+    var extra   = List[HpackHeader]()
+    var block   = h2_encode_request_headers("GET", "/index.html", "https", "www.example.com", dyn_enc, extra, False)
+    var f       = h2_make_headers_frame(1, block, True, True)
+    var hb      = h2_get_hpack_block(f)
+    var dyn_dec = HpackDynTable(4096)
+    var headers = hpack_decode_block(hb, dyn_dec)
+    var found_path = False
+    for i in range(len(headers)):
+        if headers[i].name == ":path" and headers[i].value == "/index.html":
+            found_path = True
+    if not found_path:
+        raise Error(":path: /index.html not found in roundtrip")
+
+
+def test_data_roundtrip() raises:
+    """make_data_frame → h2_frame_encode → h2_frame_decode → payload matches."""
+    var data = _hex_bytes("48656c6c6f20576f726c64")  # "Hello World"
+    var f    = h2_make_data_frame(1, data, True)
+    var enc  = h2_frame_encode(f)
+    var r    = h2_frame_decode(enc, 0)
+    var dec  = r[0].copy()
+    assert_eq_u8(dec.frame_type, H2_DATA, "type")
+    assert_eq_int(dec.stream_id, 1, "stream_id")
+    assert_eq_int(len(dec.payload), 11, "payload len")
+    assert_eq_u8(dec.payload[0], 0x48, "p[0] 'H'")
+    assert_eq_u8(dec.payload[10], 0x64, "p[10] 'd'")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -509,6 +728,23 @@ def main() raises:
     run_test("make_ping ack=True: ACK flag set", passed, failed, test_make_ping_ack)
     run_test("make_ping: non-8-byte opaque → raises", passed, failed, test_make_ping_bad_length)
     run_test("parse_ping_payload: returns 8 opaque bytes", passed, failed, test_parse_ping_payload)
+
+    print()
+    print("── 15C-3: HEADERS, CONTINUATION, DATA frames ──")
+    run_test("make_headers_frame: END_HEADERS flag set", passed, failed, test_make_headers_frame_end_headers)
+    run_test("make_headers_frame: END_STREAM + END_HEADERS", passed, failed, test_make_headers_frame_end_stream)
+    run_test("make_continuation_frame: END_HEADERS flag", passed, failed, test_make_continuation_frame)
+    run_test("make_data_frame: payload + END_STREAM clear", passed, failed, test_make_data_frame_no_end)
+    run_test("make_data_frame: END_STREAM set", passed, failed, test_make_data_frame_end_stream)
+    run_test("make_data_frame: empty payload valid", passed, failed, test_data_frame_empty_payload)
+    run_test("get_hpack_block: no PRIORITY flag → full payload", passed, failed, test_get_hpack_block_no_priority)
+    run_test("get_hpack_block: PRIORITY flag → skip 5 bytes", passed, failed, test_get_hpack_block_with_priority)
+    run_test("encode_request_headers: 4 pseudo-headers decode correctly", passed, failed, test_encode_request_headers_basic)
+    run_test("encode_request_headers: extra headers included", passed, failed, test_encode_request_headers_extra)
+    run_test("encode_response_headers: :status=200", passed, failed, test_encode_response_headers_200)
+    run_test("encode_response_headers: :status=404", passed, failed, test_encode_response_headers_404)
+    run_test("request headers roundtrip via HPACK decode", passed, failed, test_headers_roundtrip)
+    run_test("data frame roundtrip: encode → decode → payload matches", passed, failed, test_data_roundtrip)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
