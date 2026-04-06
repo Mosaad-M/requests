@@ -300,3 +300,162 @@ fn h2_parse_ping_payload(frame: Http2Frame) raises -> List[UInt8]:
             + String(len(frame.payload))
         )
     return frame.payload.copy()
+
+
+# ── 15C-3: HEADERS, CONTINUATION, DATA frames (RFC 7540 §6.1, §6.2, §6.10) ─
+
+fn h2_make_headers_frame(
+    stream_id:   Int,
+    hpack_block: List[UInt8],
+    end_stream:  Bool,
+    end_headers: Bool,
+) -> Http2Frame:
+    """Build a HEADERS frame.
+
+    Args:
+        stream_id:   Client stream ID (must be odd for client-initiated).
+        hpack_block: HPACK-encoded header block.
+        end_stream:  True to set END_STREAM flag.
+        end_headers: True to set END_HEADERS flag.
+
+    Returns:
+        Http2Frame ready to encode.
+    """
+    var flags = UInt8(0)
+    if end_stream:
+        flags = flags | H2_FLAG_END_STREAM
+    if end_headers:
+        flags = flags | H2_FLAG_END_HEADERS
+    return Http2Frame(H2_HEADERS, flags, stream_id, hpack_block.copy())
+
+
+fn h2_make_continuation_frame(
+    stream_id:   Int,
+    hpack_block: List[UInt8],
+    end_headers: Bool,
+) -> Http2Frame:
+    """Build a CONTINUATION frame.
+
+    Args:
+        stream_id:   Stream ID (same as the preceding HEADERS/PUSH_PROMISE).
+        hpack_block: Continuation of the HPACK header block.
+        end_headers: True to set END_HEADERS flag.
+
+    Returns:
+        Http2Frame ready to encode.
+    """
+    var flags = H2_FLAG_END_HEADERS if end_headers else UInt8(0)
+    return Http2Frame(H2_CONTINUATION, flags, stream_id, hpack_block.copy())
+
+
+fn h2_make_data_frame(
+    stream_id:  Int,
+    data:       List[UInt8],
+    end_stream: Bool,
+) -> Http2Frame:
+    """Build a DATA frame.
+
+    Args:
+        stream_id:  Stream ID.
+        data:       Raw payload bytes.
+        end_stream: True to set END_STREAM flag.
+
+    Returns:
+        Http2Frame ready to encode.
+    """
+    var flags = H2_FLAG_END_STREAM if end_stream else UInt8(0)
+    return Http2Frame(H2_DATA, flags, stream_id, data.copy())
+
+
+fn h2_get_hpack_block(frame: Http2Frame) raises -> List[UInt8]:
+    """Extract the HPACK block from a HEADERS or CONTINUATION frame.
+
+    Handles the PRIORITY flag: if set on a HEADERS frame, the first 5 bytes of
+    the payload are a priority prefix (exclusive+dep_stream_id:32, weight:8)
+    and must be skipped.
+
+    Args:
+        frame: A HEADERS or CONTINUATION frame.
+
+    Returns:
+        The HPACK-encoded header block bytes.
+
+    Raises:
+        Error if PRIORITY flag is set but payload is shorter than 5 bytes.
+    """
+    var has_priority = (Int(frame.flags) & Int(H2_FLAG_PRIORITY)) != 0
+    if has_priority:
+        if len(frame.payload) < 5:
+            raise Error(
+                "h2_get_hpack_block: PRIORITY flag set but payload too short ("
+                + String(len(frame.payload)) + " bytes)"
+            )
+        var skip = 5
+        var n    = len(frame.payload) - skip
+        var out  = List[UInt8](capacity=n)
+        for i in range(n):
+            out.append(frame.payload[skip + i])
+        return out^
+    return frame.payload.copy()
+
+
+fn h2_encode_request_headers(
+    method:        String,
+    path:          String,
+    scheme:        String,
+    authority:     String,
+    mut dyn_table: HpackDynTable,
+    extra:         List[HpackHeader],
+    use_huffman:   Bool,
+) raises -> List[UInt8]:
+    """Build an HPACK-encoded header block for an HTTP/2 request.
+
+    Pseudo-headers (:method, :path, :scheme, :authority) are prepended first
+    per RFC 7540 §8.1.2.1. Extra headers follow in the order provided.
+
+    Args:
+        method:      HTTP method (e.g. "GET").
+        path:        Request path (e.g. "/").
+        scheme:      URI scheme ("http" or "https").
+        authority:   Host[:port] (e.g. "example.com").
+        dyn_table:   Encoder dynamic table (mutated as headers are indexed).
+        extra:       Additional headers appended after pseudo-headers.
+        use_huffman: True to Huffman-encode literal strings.
+
+    Returns:
+        HPACK-encoded byte block.
+    """
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":method",    method))
+    headers.append(HpackHeader(":path",      path))
+    headers.append(HpackHeader(":scheme",    scheme))
+    headers.append(HpackHeader(":authority", authority))
+    for i in range(len(extra)):
+        headers.append(HpackHeader(extra[i].name, extra[i].value))
+    return hpack_encode_block(headers, dyn_table, use_huffman)
+
+
+fn h2_encode_response_headers(
+    status:        Int,
+    mut dyn_table: HpackDynTable,
+    extra:         List[HpackHeader],
+    use_huffman:   Bool,
+) raises -> List[UInt8]:
+    """Build an HPACK-encoded header block for an HTTP/2 response.
+
+    :status pseudo-header is first per RFC 7540 §8.1.2.3.
+
+    Args:
+        status:      HTTP status code (e.g. 200).
+        dyn_table:   Encoder dynamic table (mutated).
+        extra:       Additional headers appended after :status.
+        use_huffman: True to Huffman-encode literal strings.
+
+    Returns:
+        HPACK-encoded byte block.
+    """
+    var headers = List[HpackHeader]()
+    headers.append(HpackHeader(":status", String(status)))
+    for i in range(len(extra)):
+        headers.append(HpackHeader(extra[i].name, extra[i].value))
+    return hpack_encode_block(headers, dyn_table, use_huffman)
