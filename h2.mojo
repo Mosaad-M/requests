@@ -177,3 +177,126 @@ fn h2_frame_decode(data: List[UInt8], off: Int) raises -> Tuple[Http2Frame, Int]
     for i in range(length):
         payload.append(data[payload_start + i])
     return (Http2Frame(ftype, flags, sid, payload^), payload_start + length)
+
+
+# ── 15C-2: SETTINGS + PING frames (RFC 7540 §6.4, §6.7) ────────────────────
+
+fn h2_settings_encode(ids: List[Int], vals: List[Int]) -> List[UInt8]:
+    """Encode a SETTINGS payload: pairs of (id:16, val:32), big-endian.
+
+    Args:
+        ids:  List of 16-bit setting identifier values.
+        vals: List of 32-bit setting values (parallel to ids).
+
+    Returns:
+        len(ids) * 6 bytes.
+    """
+    var n   = len(ids)
+    var out = List[UInt8](capacity=n * 6)
+    for i in range(n):
+        var id  = ids[i]
+        var val = vals[i]
+        out.append(UInt8((id >> 8)  & 0xFF))
+        out.append(UInt8( id        & 0xFF))
+        out.append(UInt8((val >> 24) & 0xFF))
+        out.append(UInt8((val >> 16) & 0xFF))
+        out.append(UInt8((val >> 8)  & 0xFF))
+        out.append(UInt8( val        & 0xFF))
+    return out^
+
+
+fn h2_settings_decode(payload: List[UInt8]) raises -> Tuple[List[Int], List[Int]]:
+    """Decode a SETTINGS payload into parallel (ids, vals) lists.
+
+    Args:
+        payload: Raw SETTINGS payload bytes.
+
+    Returns:
+        (ids, vals) where each entry is one setting parameter.
+
+    Raises:
+        Error if payload length is not a multiple of 6.
+    """
+    var n = len(payload)
+    if n % 6 != 0:
+        raise Error(
+            "h2_settings_decode: payload length must be multiple of 6, got "
+            + String(n)
+        )
+    var count = n // 6
+    var ids  = List[Int](capacity=count)
+    var vals = List[Int](capacity=count)
+    for i in range(count):
+        var base = i * 6
+        var id   = (Int(payload[base])     << 8) | Int(payload[base + 1])
+        var val  = (Int(payload[base + 2]) << 24) \
+                 | (Int(payload[base + 3]) << 16) \
+                 | (Int(payload[base + 4]) << 8)  \
+                 |  Int(payload[base + 5])
+        ids.append(id)
+        vals.append(val)
+    return (ids^, vals^)
+
+
+fn h2_make_settings_frame(ids: List[Int], vals: List[Int]) -> Http2Frame:
+    """Build a SETTINGS frame (stream_id=0, flags=0).
+
+    Args:
+        ids:  Setting identifier list.
+        vals: Setting value list (parallel to ids).
+
+    Returns:
+        Http2Frame ready to encode.
+    """
+    return Http2Frame(H2_SETTINGS, UInt8(0), 0, h2_settings_encode(ids, vals))
+
+
+fn h2_make_settings_ack() -> Http2Frame:
+    """Build a SETTINGS ACK frame (stream_id=0, flags=ACK, empty payload).
+
+    Returns:
+        Http2Frame ready to encode.
+    """
+    return Http2Frame(H2_SETTINGS, H2_FLAG_ACK, 0, List[UInt8]())
+
+
+fn h2_make_ping_frame(opaque_data: List[UInt8], ack: Bool) raises -> Http2Frame:
+    """Build a PING frame (stream_id=0, 8-byte opaque payload).
+
+    Args:
+        opaque_data: Exactly 8 bytes of opaque data.
+        ack:         True to set the ACK flag.
+
+    Returns:
+        Http2Frame ready to encode.
+
+    Raises:
+        Error if opaque_data is not exactly 8 bytes.
+    """
+    if len(opaque_data) != 8:
+        raise Error(
+            "h2_make_ping_frame: opaque_data must be 8 bytes, got "
+            + String(len(opaque_data))
+        )
+    var flags = H2_FLAG_ACK if ack else UInt8(0)
+    return Http2Frame(H2_PING, flags, 0, opaque_data.copy())
+
+
+fn h2_parse_ping_payload(frame: Http2Frame) raises -> List[UInt8]:
+    """Extract the 8-byte opaque data from a PING frame.
+
+    Args:
+        frame: A PING frame (type must be H2_PING, payload must be 8 bytes).
+
+    Returns:
+        8-byte opaque data.
+
+    Raises:
+        Error if payload is not 8 bytes.
+    """
+    if len(frame.payload) != 8:
+        raise Error(
+            "h2_parse_ping_payload: expected 8-byte payload, got "
+            + String(len(frame.payload))
+        )
+    return frame.payload.copy()
