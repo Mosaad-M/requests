@@ -39,6 +39,9 @@ from h2 import (
     h2_make_window_update, h2_parse_window_update,
     h2_make_goaway, h2_parse_goaway,
     h2_make_priority_frame, h2_parse_priority_frame,
+    # Connection preface + multi-frame stream
+    h2_client_preface_bytes, h2_read_frames, h2_write_frames,
+    h2_make_initial_settings,
 )
 from hpack import HpackHeader, HpackDynTable, hpack_decode_block
 
@@ -833,6 +836,148 @@ def test_priority_roundtrip() raises:
     assert_eq_int(r[2], 32, "weight")
 
 
+# ── 15C-5: Connection Preface + Multi-frame Stream Tests ─────────────────────
+
+def test_client_preface_bytes() raises:
+    """Client preface is 24 bytes containing the magic string."""
+    var p = h2_client_preface_bytes()
+    assert_eq_int(len(p), 24, "length")
+    # "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    var magic = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    var mb    = magic.as_bytes()
+    for i in range(24):
+        if p[i] != mb[i]:
+            raise Error("preface byte " + String(i) + " mismatch")
+
+
+def test_read_frames_single() raises:
+    """One frame in buffer → list with 1 frame."""
+    var f    = Http2Frame(H2_SETTINGS, H2_FLAG_ACK, 0, List[UInt8]())
+    var buf  = h2_frame_encode(f)
+    var frames = h2_read_frames(buf)
+    assert_eq_int(len(frames), 1, "frame count")
+    assert_eq_u8(frames[0].frame_type, H2_SETTINGS, "type")
+
+
+def test_read_frames_multiple() raises:
+    """Three concatenated frames → list with 3 frames."""
+    var buf = List[UInt8]()
+    var types = List[UInt8]()
+    types.append(H2_SETTINGS); types.append(H2_PING); types.append(H2_DATA)
+    for i in range(3):
+        var payload = List[UInt8]()
+        if types[i] == H2_PING:
+            for _ in range(8):
+                payload.append(UInt8(0xAA))
+        var f   = Http2Frame(types[i], UInt8(0), 0, payload)
+        var enc = h2_frame_encode(f)
+        for j in range(len(enc)):
+            buf.append(enc[j])
+    var frames = h2_read_frames(buf)
+    assert_eq_int(len(frames), 3, "frame count")
+    assert_eq_u8(frames[0].frame_type, H2_SETTINGS, "f[0] type")
+    assert_eq_u8(frames[1].frame_type, H2_PING,     "f[1] type")
+    assert_eq_u8(frames[2].frame_type, H2_DATA,     "f[2] type")
+
+
+def test_read_frames_empty() raises:
+    """Empty buffer → empty list."""
+    var buf    = List[UInt8]()
+    var frames = h2_read_frames(buf)
+    assert_eq_int(len(frames), 0, "frame count")
+
+
+def test_read_frames_truncated() raises:
+    """Buffer with < 9 bytes → raises."""
+    var buf = _hex_bytes("000000")  # 3 bytes, not enough for a header
+    var raised = False
+    try:
+        _ = h2_read_frames(buf)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for truncated header")
+
+
+def test_read_frames_truncated_payload() raises:
+    """Header declares payload but bytes are missing → raises."""
+    var buf = List[UInt8]()
+    buf.append(0x00); buf.append(0x00); buf.append(0x08)  # length=8
+    buf.append(0x06); buf.append(0x00)                     # type=PING, flags=0
+    buf.append(0x00); buf.append(0x00); buf.append(0x00); buf.append(0x00)  # stream_id=0
+    # only 2 payload bytes follow (need 8)
+    buf.append(0x01); buf.append(0x02)
+    var raised = False
+    try:
+        _ = h2_read_frames(buf)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for truncated payload")
+
+
+def test_write_frames_single() raises:
+    """h2_write_frames encodes one frame correctly."""
+    var f = Http2Frame(H2_SETTINGS, H2_FLAG_ACK, 0, List[UInt8]())
+    var frames = List[Http2Frame]()
+    frames.append(f.copy())
+    var buf = h2_write_frames(frames)
+    assert_eq_int(len(buf), 9, "9 bytes for SETTINGS ACK")
+    assert_eq_u8(buf[3], H2_SETTINGS, "type byte")
+    assert_eq_u8(buf[4], H2_FLAG_ACK, "flags byte")
+
+
+def test_write_frames_multiple() raises:
+    """h2_write_frames concatenates 3 frames; h2_read_frames decodes back."""
+    var frames = List[Http2Frame]()
+    frames.append(Http2Frame(H2_SETTINGS, H2_FLAG_ACK, 0, List[UInt8]()))
+    var ping_payload = List[UInt8]()
+    for _ in range(8):
+        ping_payload.append(UInt8(0x42))
+    frames.append(Http2Frame(H2_PING, UInt8(0), 0, ping_payload))
+    frames.append(Http2Frame(H2_DATA, H2_FLAG_END_STREAM, 1, _hex_bytes("deadbeef")))
+    var buf    = h2_write_frames(frames)
+    var result = h2_read_frames(buf)
+    assert_eq_int(len(result), 3, "frame count")
+    assert_eq_u8(result[2].frame_type, H2_DATA, "f[2] type")
+    assert_eq_int(len(result[2].payload), 4, "f[2] payload len")
+
+
+def test_roundtrip_stream() raises:
+    """Write then read 5 frames of various types; all fields match."""
+    var frames = List[Http2Frame]()
+    var ping_p = List[UInt8]()
+    for _ in range(8):
+        ping_p.append(UInt8(0xFF))
+    frames.append(Http2Frame(H2_SETTINGS,      UInt8(0),        0, List[UInt8]()))
+    frames.append(Http2Frame(H2_PING,          UInt8(0),        0, ping_p))
+    frames.append(Http2Frame(H2_HEADERS,       H2_FLAG_END_HEADERS, 1, _hex_bytes("8286")))
+    frames.append(Http2Frame(H2_DATA,          H2_FLAG_END_STREAM,  1, _hex_bytes("01020304")))
+    frames.append(Http2Frame(H2_WINDOW_UPDATE, UInt8(0),        0, _hex_bytes("00010000")))
+    var buf    = h2_write_frames(frames)
+    var result = h2_read_frames(buf)
+    assert_eq_int(len(result), 5, "frame count")
+    for i in range(5):
+        if result[i].frame_type != frames[i].frame_type:
+            raise Error("type mismatch at frame " + String(i))
+        if result[i].stream_id != frames[i].stream_id:
+            raise Error("stream_id mismatch at frame " + String(i))
+        if len(result[i].payload) != len(frames[i].payload):
+            raise Error("payload len mismatch at frame " + String(i))
+
+
+def test_initial_settings() raises:
+    """h2_make_initial_settings: type=SETTINGS, stream_id=0, flags=0."""
+    var f = h2_make_initial_settings()
+    assert_eq_u8(f.frame_type, H2_SETTINGS, "type")
+    assert_eq_int(f.stream_id, 0, "stream_id")
+    assert_eq_u8(f.flags, UInt8(0), "flags")
+    # Must contain at least one setting parameter
+    assert_eq_int(len(f.payload) % 6, 0, "payload multiple of 6")
+    if len(f.payload) == 0:
+        raise Error("initial SETTINGS must have at least one parameter")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -908,6 +1053,19 @@ def main() raises:
     run_test("priority frame: exclusive bit set", passed, failed, test_priority_frame_exclusive)
     run_test("priority frame: exclusive bit clear", passed, failed, test_priority_frame_non_exclusive)
     run_test("priority roundtrip: encode then parse", passed, failed, test_priority_roundtrip)
+
+    print()
+    print("── 15C-5: Connection preface + multi-frame stream ──")
+    run_test("client_preface_bytes: 24 bytes, correct content", passed, failed, test_client_preface_bytes)
+    run_test("read_frames: single frame in buffer", passed, failed, test_read_frames_single)
+    run_test("read_frames: 3 concatenated frames", passed, failed, test_read_frames_multiple)
+    run_test("read_frames: empty buffer → 0 frames", passed, failed, test_read_frames_empty)
+    run_test("read_frames: partial header → raises", passed, failed, test_read_frames_truncated)
+    run_test("read_frames: partial payload → raises", passed, failed, test_read_frames_truncated_payload)
+    run_test("write_frames: single frame encodes correctly", passed, failed, test_write_frames_single)
+    run_test("write_frames: 3 frames concatenated", passed, failed, test_write_frames_multiple)
+    run_test("roundtrip: write_frames then read_frames", passed, failed, test_roundtrip_stream)
+    run_test("initial_settings: type=SETTINGS, stream_id=0", passed, failed, test_initial_settings)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

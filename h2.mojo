@@ -674,3 +674,79 @@ fn h2_parse_priority_frame(frame: Http2Frame) raises -> Tuple[Int, Bool, Int]:
                   |  Int(frame.payload[3])
     var weight = Int(frame.payload[4]) + 1
     return (dep_sid, exclusive, weight)
+
+
+# ── 15C-5: Connection Preface + Multi-frame Stream (RFC 7540 §3.5) ──────────
+
+comptime H2_CLIENT_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+fn h2_client_preface_bytes() -> List[UInt8]:
+    """Return the 24-byte HTTP/2 client connection preface.
+
+    Returns:
+        24 bytes: "PRI * HTTP/2.0\\r\\n\\r\\nSM\\r\\n\\r\\n"
+    """
+    var s   = H2_CLIENT_PREFACE
+    var raw = s.as_bytes()
+    var out = List[UInt8](capacity=len(raw))
+    for i in range(len(raw)):
+        out.append(raw[i])
+    return out^
+
+
+fn h2_read_frames(data: List[UInt8]) raises -> List[Http2Frame]:
+    """Decode all HTTP/2 frames in a byte buffer.
+
+    Args:
+        data: Byte buffer containing zero or more complete frames.
+
+    Returns:
+        List of decoded frames (empty if data is empty).
+
+    Raises:
+        Error if any frame header is truncated or its payload is incomplete.
+    """
+    var frames = List[Http2Frame]()
+    var off    = 0
+    while off < len(data):
+        var r   = h2_frame_decode(data, off)
+        frames.append(r[0].copy())
+        off = r[1]
+    return frames^
+
+
+fn h2_write_frames(frames: List[Http2Frame]) -> List[UInt8]:
+    """Encode all frames into a single byte buffer.
+
+    Args:
+        frames: Frames to encode.
+
+    Returns:
+        Concatenated encoded bytes.
+    """
+    var out = List[UInt8]()
+    for i in range(len(frames)):
+        var enc = h2_frame_encode(frames[i])
+        for j in range(len(enc)):
+            out.append(enc[j])
+    return out^
+
+
+fn h2_make_initial_settings() -> Http2Frame:
+    """Build the client's initial SETTINGS frame with sensible defaults.
+
+    Parameters:
+        HEADER_TABLE_SIZE    = 65536  (larger dynamic table)
+        INITIAL_WINDOW_SIZE  = 65535  (max initial window)
+        MAX_FRAME_SIZE       = 16384  (minimum allowed per RFC)
+
+    Returns:
+        SETTINGS frame (stream_id=0, flags=0).
+    """
+    var ids  = List[Int]()
+    var vals = List[Int]()
+    ids.append(H2_SETTING_HEADER_TABLE_SIZE);   vals.append(65536)
+    ids.append(H2_SETTING_INITIAL_WINDOW_SIZE); vals.append(65535)
+    ids.append(H2_SETTING_MAX_FRAME_SIZE);      vals.append(16384)
+    return h2_make_settings_frame(ids, vals)
