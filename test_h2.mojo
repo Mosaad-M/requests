@@ -22,6 +22,10 @@ from h2 import (
     H2_ERR_HTTP_1_1_REQUIRED,
     # Frame struct + encode/decode
     Http2Frame, h2_frame_encode, h2_frame_decode,
+    # SETTINGS + PING
+    h2_settings_encode, h2_settings_decode,
+    h2_make_settings_frame, h2_make_settings_ack,
+    h2_make_ping_frame, h2_parse_ping_payload,
 )
 
 
@@ -311,6 +315,159 @@ def test_frame_roundtrip_all_types() raises:
             raise Error("type " + String(Int(t)) + " roundtrip failed")
 
 
+# ── 15C-2: SETTINGS + PING Tests ─────────────────────────────────────────────
+
+def test_settings_encode_empty() raises:
+    """h2_settings_encode with no pairs → empty payload."""
+    var ids  = List[Int]()
+    var vals = List[Int]()
+    var p = h2_settings_encode(ids, vals)
+    assert_eq_int(len(p), 0, "empty payload len")
+
+
+def test_settings_encode_one() raises:
+    """Single pair HEADER_TABLE_SIZE=4096 → 6 bytes."""
+    var ids  = List[Int](); ids.append(H2_SETTING_HEADER_TABLE_SIZE)
+    var vals = List[Int](); vals.append(4096)
+    var p = h2_settings_encode(ids, vals)
+    assert_eq_int(len(p), 6, "payload len")
+    # id = 0x0001 big-endian
+    assert_eq_u8(p[0], 0x00, "id hi")
+    assert_eq_u8(p[1], 0x01, "id lo")
+    # value = 0x00001000 big-endian
+    assert_eq_u8(p[2], 0x00, "val[0]")
+    assert_eq_u8(p[3], 0x00, "val[1]")
+    assert_eq_u8(p[4], 0x10, "val[2]")
+    assert_eq_u8(p[5], 0x00, "val[3]")
+
+
+def test_settings_encode_multiple() raises:
+    """Three pairs → 18 bytes."""
+    var ids  = List[Int]()
+    var vals = List[Int]()
+    ids.append(H2_SETTING_HEADER_TABLE_SIZE);      vals.append(4096)
+    ids.append(H2_SETTING_INITIAL_WINDOW_SIZE);    vals.append(65535)
+    ids.append(H2_SETTING_MAX_FRAME_SIZE);         vals.append(16384)
+    var p = h2_settings_encode(ids, vals)
+    assert_eq_int(len(p), 18, "payload len")
+
+
+def test_settings_decode_empty() raises:
+    """Empty payload → ([], [])."""
+    var p    = List[UInt8]()
+    var r    = h2_settings_decode(p)
+    assert_eq_int(len(r[0]), 0, "ids len")
+    assert_eq_int(len(r[1]), 0, "vals len")
+
+
+def test_settings_decode_one() raises:
+    """6-byte payload → single (id, val) pair."""
+    var p = List[UInt8]()
+    p.append(0x00); p.append(0x04)  # id = INITIAL_WINDOW_SIZE
+    p.append(0x00); p.append(0x00); p.append(0xFF); p.append(0xFF)  # val = 65535
+    var r = h2_settings_decode(p)
+    assert_eq_int(len(r[0]), 1, "ids len")
+    assert_eq_int(r[0][0], H2_SETTING_INITIAL_WINDOW_SIZE, "id")
+    assert_eq_int(r[1][0], 65535, "val")
+
+
+def test_settings_roundtrip() raises:
+    """Encode then decode; identical pairs."""
+    var ids  = List[Int]()
+    var vals = List[Int]()
+    ids.append(H2_SETTING_HEADER_TABLE_SIZE);      vals.append(8192)
+    ids.append(H2_SETTING_MAX_CONCURRENT_STREAMS); vals.append(100)
+    ids.append(H2_SETTING_MAX_FRAME_SIZE);         vals.append(32768)
+    var p  = h2_settings_encode(ids, vals)
+    var r  = h2_settings_decode(p)
+    assert_eq_int(len(r[0]), 3, "ids len")
+    for i in range(3):
+        assert_eq_int(r[0][i], ids[i], "id " + String(i))
+        assert_eq_int(r[1][i], vals[i], "val " + String(i))
+
+
+def test_settings_decode_bad_length() raises:
+    """Payload not multiple of 6 → raises."""
+    var p = List[UInt8]()
+    p.append(0x00); p.append(0x01); p.append(0x00); p.append(0x00)
+    p.append(0x10); p.append(0x00); p.append(0xFF)  # 7 bytes
+    var raised = False
+    try:
+        _ = h2_settings_decode(p)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for 7-byte SETTINGS payload")
+
+
+def test_make_settings_frame() raises:
+    """h2_make_settings_frame: type=SETTINGS, stream_id=0, flags=0."""
+    var ids  = List[Int](); ids.append(H2_SETTING_ENABLE_PUSH)
+    var vals = List[Int](); vals.append(0)
+    var f = h2_make_settings_frame(ids, vals)
+    assert_eq_u8(f.frame_type, H2_SETTINGS, "type")
+    assert_eq_u8(f.flags, UInt8(0), "flags")
+    assert_eq_int(f.stream_id, 0, "stream_id")
+    assert_eq_int(len(f.payload), 6, "payload len")
+
+
+def test_make_settings_ack() raises:
+    """h2_make_settings_ack: type=SETTINGS, flags=ACK, empty payload."""
+    var f = h2_make_settings_ack()
+    assert_eq_u8(f.frame_type, H2_SETTINGS, "type")
+    assert_eq_u8(f.flags, H2_FLAG_ACK, "flags")
+    assert_eq_int(f.stream_id, 0, "stream_id")
+    assert_eq_int(len(f.payload), 0, "payload len")
+
+
+def test_make_ping() raises:
+    """PING frame with ack=False: 8-byte opaque, ACK flag clear."""
+    var opaque = List[UInt8]()
+    for i in range(8):
+        opaque.append(UInt8(i + 1))
+    var f = h2_make_ping_frame(opaque, False)
+    assert_eq_u8(f.frame_type, H2_PING, "type")
+    assert_eq_u8(f.flags, UInt8(0), "flags (no ack)")
+    assert_eq_int(f.stream_id, 0, "stream_id")
+    assert_eq_int(len(f.payload), 8, "payload len")
+    assert_eq_u8(f.payload[0], 0x01, "p[0]")
+    assert_eq_u8(f.payload[7], 0x08, "p[7]")
+
+
+def test_make_ping_ack() raises:
+    """PING frame with ack=True: ACK flag set."""
+    var opaque = List[UInt8]()
+    for i in range(8):
+        opaque.append(UInt8(0xAA))
+    var f = h2_make_ping_frame(opaque, True)
+    assert_eq_u8(f.flags, H2_FLAG_ACK, "ACK flag set")
+
+
+def test_make_ping_bad_length() raises:
+    """PING opaque_data != 8 bytes → raises."""
+    var opaque = List[UInt8]()
+    opaque.append(0x01); opaque.append(0x02)  # only 2 bytes
+    var raised = False
+    try:
+        _ = h2_make_ping_frame(opaque, False)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected Error for non-8-byte PING payload")
+
+
+def test_parse_ping_payload() raises:
+    """h2_parse_ping_payload returns the 8 opaque bytes."""
+    var opaque = List[UInt8]()
+    for i in range(8):
+        opaque.append(UInt8(0x10 + i))
+    var f  = h2_make_ping_frame(opaque, False)
+    var p  = h2_parse_ping_payload(f)
+    assert_eq_int(len(p), 8, "len")
+    for i in range(8):
+        assert_eq_u8(p[i], UInt8(0x10 + i), "p[" + String(i) + "]")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -336,6 +493,22 @@ def main() raises:
     run_test("declared payload > available bytes → raises", passed, failed, test_frame_decode_truncated_payload)
     run_test("payload > 65535 bytes: 24-bit length correct", passed, failed, test_frame_length_24bit)
     run_test("roundtrip one frame of each type", passed, failed, test_frame_roundtrip_all_types)
+
+    print()
+    print("── 15C-2: SETTINGS + PING frames ──")
+    run_test("settings_encode: no pairs → empty payload", passed, failed, test_settings_encode_empty)
+    run_test("settings_encode: single pair correct bytes", passed, failed, test_settings_encode_one)
+    run_test("settings_encode: 3 pairs → 18 bytes", passed, failed, test_settings_encode_multiple)
+    run_test("settings_decode: empty payload → ([], [])", passed, failed, test_settings_decode_empty)
+    run_test("settings_decode: single pair", passed, failed, test_settings_decode_one)
+    run_test("settings roundtrip: encode then decode identical", passed, failed, test_settings_roundtrip)
+    run_test("settings_decode: bad length → raises", passed, failed, test_settings_decode_bad_length)
+    run_test("make_settings_frame: type/stream_id/flags correct", passed, failed, test_make_settings_frame)
+    run_test("make_settings_ack: ACK flag, empty payload", passed, failed, test_make_settings_ack)
+    run_test("make_ping: 8-byte opaque, no ACK flag", passed, failed, test_make_ping)
+    run_test("make_ping ack=True: ACK flag set", passed, failed, test_make_ping_ack)
+    run_test("make_ping: non-8-byte opaque → raises", passed, failed, test_make_ping_bad_length)
+    run_test("parse_ping_payload: returns 8 opaque bytes", passed, failed, test_parse_ping_payload)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
