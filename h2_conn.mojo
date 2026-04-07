@@ -73,6 +73,10 @@ struct Http2Conn(Movable):
         self._peer_initial_window = take._peer_initial_window
         self._conn_window         = take._conn_window
 
+    fn close(mut self) raises:
+        """Close the underlying TLS connection."""
+        self._tls.close()
+
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -107,6 +111,51 @@ fn _read_one_frame(mut conn: Http2Conn) raises -> Http2Frame:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+fn h2_preface_and_settings_exchange(mut conn: Http2Conn) raises:
+    """Send client connection preface + initial SETTINGS; read and ACK server SETTINGS.
+
+    Called on a fresh Http2Conn whose _tls is already TLS-connected.
+    Mutates conn's peer parameters (_peer_max_frame_size, _peer_initial_window,
+    _conn_window, _hpack_enc table size) from the server's SETTINGS payload.
+
+    Used by both h2_connect() and HttpClient (which manages its own TLS socket).
+
+    Args:
+        conn: Http2Conn with _tls already connected (preface not yet sent).
+
+    Raises:
+        Error if the TLS connection closes before server SETTINGS is received.
+    """
+    # Send 24-byte client connection preface magic + initial SETTINGS frame
+    _ = conn._tls.send(h2_client_preface_bytes())
+    _ = conn._tls.send(h2_frame_encode(h2_make_initial_settings()))
+
+    # Server SETTINGS exchange — skip WINDOW_UPDATE or other frames that may
+    # arrive before the server's SETTINGS (RFC 7540 §3.5 allows this)
+    var got_server_settings = False
+    while not got_server_settings:
+        var f = _read_one_frame(conn)
+        if f.frame_type == H2_SETTINGS \
+                and f.stream_id == 0 \
+                and Int(f.flags) & Int(H2_FLAG_ACK) == 0:
+            # Apply peer parameters from SETTINGS payload
+            if len(f.payload) >= 6:
+                var r    = h2_settings_decode(f.payload)
+                var ids  = r[0].copy()
+                var vals = r[1].copy()
+                for i in range(len(ids)):
+                    if ids[i] == H2_SETTING_MAX_FRAME_SIZE:
+                        conn._peer_max_frame_size = vals[i]
+                    elif ids[i] == H2_SETTING_INITIAL_WINDOW_SIZE:
+                        conn._peer_initial_window = vals[i]
+                        conn._conn_window         = vals[i]
+                    elif ids[i] == H2_SETTING_HEADER_TABLE_SIZE:
+                        conn._hpack_enc.update_max_size(vals[i])
+            # Send SETTINGS ACK
+            _ = conn._tls.send(h2_frame_encode(h2_make_settings_ack()))
+            got_server_settings = True
+
+
 fn h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
     """Establish an HTTP/2 connection via TLS + ALPN.
 
@@ -134,7 +183,7 @@ fn h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
     var tcp = TcpSocket()
     tcp.connect(host, port)
 
-    # 3. TLS handshake with ALPN
+    # 3. TLS handshake with ALPN "h2"
     var alpn = List[String]()
     alpn.append("h2")
     var tls = TlsSocket(tcp.fd)
@@ -147,43 +196,10 @@ fn h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
             "h2_connect: server negotiated http/1.1 via ALPN, expected h2"
         )
 
-    # 5. Send client connection preface (24-byte magic)
-    var preface = h2_client_preface_bytes()
-    _ = tls.send(preface)
-
-    # 6. Send initial SETTINGS
-    var init_settings_enc = h2_frame_encode(h2_make_initial_settings())
-    _ = tls.send(init_settings_enc)
-
-    # 7. Create conn; move real TLS socket in
+    # 5. Create conn; move real TLS socket in; run preface + SETTINGS exchange
     var conn  = Http2Conn()
     conn._tls = tls^
-
-    # 8. Server SETTINGS exchange — loop until we receive the server's SETTINGS
-    #    (skip WINDOW_UPDATE or other frames that may arrive first)
-    var got_server_settings = False
-    while not got_server_settings:
-        var f = _read_one_frame(conn)
-        if f.frame_type == H2_SETTINGS \
-                and f.stream_id == 0 \
-                and Int(f.flags) & Int(H2_FLAG_ACK) == 0:
-            # Apply peer parameters
-            if len(f.payload) >= 6:
-                var r    = h2_settings_decode(f.payload)
-                var ids  = r[0].copy()
-                var vals = r[1].copy()
-                for i in range(len(ids)):
-                    if ids[i] == H2_SETTING_MAX_FRAME_SIZE:
-                        conn._peer_max_frame_size = vals[i]
-                    elif ids[i] == H2_SETTING_INITIAL_WINDOW_SIZE:
-                        conn._peer_initial_window = vals[i]
-                        conn._conn_window         = vals[i]
-                    elif ids[i] == H2_SETTING_HEADER_TABLE_SIZE:
-                        conn._hpack_enc.update_max_size(vals[i])
-            # Send SETTINGS ACK
-            _ = conn._tls.send(h2_frame_encode(h2_make_settings_ack()))
-            got_server_settings = True
-
+    h2_preface_and_settings_exchange(conn)
     return conn^
 
 
