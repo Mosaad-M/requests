@@ -937,8 +937,9 @@ struct HttpClient(Movable):
         # HEAD responses have no body — stop reading after headers
         var skip_body = (method == "HEAD")
 
-        var tls_hit = -1
+        var tls_hit  = -1
         var http_hit = -1
+        var h2_hit   = -1
 
         if url.scheme == "https":
             # Lazy-load CA bundle (once per HttpClient lifetime)
@@ -946,7 +947,26 @@ struct HttpClient(Movable):
                 self._ca_bundle = load_system_ca_bundle()
                 self._ca_loaded = True
 
-            # Phase 1: try to reuse a cached TLS slot (skip idle-expired slots)
+            # Phase 1: try to reuse a cached H2 slot
+            var now_h2 = _unix_time_secs()
+            for i in range(4):
+                if self._h2_keys[i] == conn_key and self._h2_times[i] > Int64(0):
+                    var idle = Int(now_h2 - self._h2_times[i])
+                    if idle > self.pool_idle_timeout_secs:
+                        self._h2_close_slot(i)
+                        continue
+                    h2_hit = i
+                    break
+            if h2_hit >= 0:
+                try:
+                    var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
+                    self._h2_times[h2_hit] = _unix_time_secs()
+                    return h2_resp^
+                except:
+                    self._h2_close_slot(h2_hit)
+                    h2_hit = -1
+
+            # Phase 2: try to reuse a cached H1 TLS slot
             var now_tls = _unix_time_secs()
             for i in range(4):
                 if self._tls_keys[i] == conn_key and self._tls_times[i] > Int64(0):
@@ -964,28 +984,56 @@ struct HttpClient(Movable):
                     self._tls_close_slot(tls_hit)
                     tls_hit = -1
 
-            # Phase 2: new TLS connection if no reuse
-            if tls_hit < 0:
+            # Phase 3: new connection with ALPN ["h2", "http/1.1"]
+            if h2_hit < 0 and tls_hit < 0:
+                var alpn = List[String]()
+                alpn.append("h2")
+                alpn.append("http/1.1")
                 var tcp_sock = self._tcp_connect(url.host, url.port, "https")
-                var new_tls = TlsSocket(tcp_sock.fd)
-                new_tls.connect(url.host, self._ca_bundle)
-                _ = new_tls.send(req_buf)
-                raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
-                var evict = self._tls_evict_slot()
-                if self._tls_times[evict] > Int64(0):
-                    self._tls_close_slot(evict)
-                # Store new socket into evicted slot
-                self._tls_keys[evict] = conn_key
-                self._tls_times[evict] = _unix_time_secs()
-                if evict == 0:
-                    self._tls_sock0 = new_tls^
-                elif evict == 1:
-                    self._tls_sock1 = new_tls^
-                elif evict == 2:
-                    self._tls_sock2 = new_tls^
+                var new_tls  = TlsSocket(tcp_sock.fd)
+                new_tls.connect(url.host, self._ca_bundle, alpn_protocols=alpn)
+                var proto = new_tls.negotiated_protocol()
+
+                if proto == "h2":
+                    # Complete H2 preface + SETTINGS, store in H2 pool, return
+                    var new_h2 = Http2Conn()
+                    new_h2._tls = new_tls^
+                    h2_preface_and_settings_exchange(new_h2)
+                    var evict = self._h2_evict_slot()
+                    if self._h2_times[evict] > Int64(0):
+                        self._h2_close_slot(evict)
+                    self._h2_keys[evict]  = conn_key
+                    self._h2_times[evict] = _unix_time_secs()
+                    if evict == 0:
+                        self._h2_conn0 = new_h2^
+                    elif evict == 1:
+                        self._h2_conn1 = new_h2^
+                    elif evict == 2:
+                        self._h2_conn2 = new_h2^
+                    else:
+                        self._h2_conn3 = new_h2^
+                    h2_hit = evict
+                    var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
+                    self._h2_times[h2_hit] = _unix_time_secs()
+                    return h2_resp^
                 else:
-                    self._tls_sock3 = new_tls^
-                tls_hit = evict
+                    # H1 fallback: send request, store socket in TLS pool
+                    _ = new_tls.send(req_buf)
+                    raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
+                    var evict = self._tls_evict_slot()
+                    if self._tls_times[evict] > Int64(0):
+                        self._tls_close_slot(evict)
+                    self._tls_keys[evict]  = conn_key
+                    self._tls_times[evict] = _unix_time_secs()
+                    if evict == 0:
+                        self._tls_sock0 = new_tls^
+                    elif evict == 1:
+                        self._tls_sock1 = new_tls^
+                    elif evict == 2:
+                        self._tls_sock2 = new_tls^
+                    else:
+                        self._tls_sock3 = new_tls^
+                    tls_hit = evict
         else:
             # Plain HTTP
             # Phase 1: try to reuse a cached HTTP slot (skip idle-expired slots)
@@ -1224,6 +1272,144 @@ struct HttpClient(Movable):
             pass
         self._h2_times[i] = Int64(0)
         self._h2_keys[i]  = String("")
+
+    def _h2_do_request(
+        mut self,
+        slot:          Int,
+        method:        String,
+        url:           Url,
+        body:          String,
+        extra_headers: HttpHeaders,
+    ) raises -> HttpResponse:
+        """Execute one HTTP/2 request on H2 pool slot `slot`.
+
+        Builds the HPACK header list (authority, user-agent, accept,
+        accept-encoding, content-length/type, cookies, extra headers),
+        calls h2_do_request(), converts the result tuple to HttpResponse,
+        decompresses the body if Content-Encoding is set, and stores any
+        Set-Cookie headers in the cookie jar.
+
+        The `connection` header is intentionally omitted — it is forbidden
+        in HTTP/2 (RFC 7540 §8.1.2.2).
+
+        Args:
+            slot:          H2 pool slot index (0–3).
+            method:        HTTP method ("GET", "POST", etc.).
+            url:           Parsed request URL.
+            body:          Request body string (empty for GET/HEAD).
+            extra_headers: Caller-supplied extra headers.
+
+        Raises:
+            Error on GOAWAY, RST_STREAM, TLS failure, or decompression error.
+        """
+        # ── Build HPACK header list ───────────────────────────────────────
+        # :method, :path, :scheme are prepended by h2_do_request itself.
+        var h2_hdrs = List[HpackHeader]()
+
+        # :authority — host:port equivalent in HTTP/2
+        h2_hdrs.append(HpackHeader(":authority", url.host_header()))
+
+        # user-agent
+        h2_hdrs.append(HpackHeader("user-agent", self.user_agent))
+
+        # accept (unless caller overrides)
+        if not extra_headers.has("Accept"):
+            h2_hdrs.append(HpackHeader("accept", "*/*"))
+
+        # accept-encoding (unless caller overrides)
+        if not extra_headers.has("Accept-Encoding"):
+            h2_hdrs.append(HpackHeader("accept-encoding", "gzip, deflate, br, zstd"))
+
+        # content-length and content-type for non-empty bodies
+        var body_bytes = List[UInt8]()
+        if len(body) > 0:
+            var bb = body.as_bytes()
+            for i in range(len(bb)):
+                body_bytes.append(bb[i])
+            h2_hdrs.append(HpackHeader("content-length", String(len(body_bytes))))
+            if not extra_headers.has("Content-Type"):
+                h2_hdrs.append(HpackHeader("content-type", "application/json"))
+
+        # cookies from jar
+        var jar_cookie = self._jar_cookie_for(
+            url.host, url.request_path(), url.scheme == "https"
+        )
+        if len(jar_cookie) > 0 and not extra_headers.has("Cookie"):
+            h2_hdrs.append(HpackHeader("cookie", jar_cookie))
+
+        # extra headers from caller — H2 requires lowercase header names (RFC 7540 §8.1.2)
+        for i in range(len(extra_headers)):
+            var raw_key = extra_headers._keys[i]
+            var kb = raw_key.as_bytes()
+            var low = List[UInt8](capacity=len(kb))
+            for j in range(len(kb)):
+                var b = kb[j]
+                if b >= 65 and b <= 90:
+                    low.append(b + 32)
+                else:
+                    low.append(b)
+            h2_hdrs.append(HpackHeader(String(unsafe_from_utf8=low^), extra_headers._values[i]))
+
+        # ── Call h2_do_request on the correct pool slot ───────────────────
+        var result: Tuple[Int, List[HpackHeader], List[UInt8]]
+        if slot == 0:
+            result = h2_do_request(self._h2_conn0, method, url.request_path(),
+                                   h2_hdrs, body_bytes)
+        elif slot == 1:
+            result = h2_do_request(self._h2_conn1, method, url.request_path(),
+                                   h2_hdrs, body_bytes)
+        elif slot == 2:
+            result = h2_do_request(self._h2_conn2, method, url.request_path(),
+                                   h2_hdrs, body_bytes)
+        else:
+            result = h2_do_request(self._h2_conn3, method, url.request_path(),
+                                   h2_hdrs, body_bytes)
+
+        var status       = result[0]
+        var resp_headers = result[1].copy()
+        var resp_body    = result[2].copy()
+
+        # ── Build HttpResponse ────────────────────────────────────────────
+        var resp = HttpResponse()
+        resp.status_code = status
+        resp.status_text = String("")   # HTTP/2 has no reason phrase
+        resp.url         = url.scheme + "://" + url.host_header() + url.request_path()
+        resp.ok          = (status >= 200 and status < 300)
+        for i in range(len(resp_headers)):
+            resp.headers.add(resp_headers[i].name, resp_headers[i].value)
+
+        # ── Decompress body (same encodings as _do_request) ───────────────
+        # HTTP/2 headers are lowercase; use case-insensitive compare.
+        # Convert resp_body → String first so as_bytes().unsafe_ptr() matches
+        # the proven H1 decompression path exactly.
+        var ce = resp.headers.get("content-encoding")
+        if len(ce) > 0:
+            var body_str   = String(unsafe_from_utf8=resp_body^)
+            var body_bytes = body_str.as_bytes()
+            if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip"):
+                resp.body = String(unsafe_from_utf8=
+                    zlib_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes), True)^)
+            elif _eq_ignore_case(ce, "deflate"):
+                resp.body = String(unsafe_from_utf8=
+                    zlib_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes), False)^)
+            elif _eq_ignore_case(ce, "br"):
+                resp.body = String(unsafe_from_utf8=
+                    brotli_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes))^)
+            elif _eq_ignore_case(ce, "zstd"):
+                resp.body = String(unsafe_from_utf8=
+                    zstd_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes))^)
+            else:
+                resp.body = body_str
+        else:
+            resp.body = String(unsafe_from_utf8=resp_body^)
+
+        # ── Store Set-Cookie headers in jar ───────────────────────────────
+        var set_cookie = resp.headers.get("set-cookie")
+        if len(set_cookie) > 0:
+            self._jar_store(url.host, url.request_path(),
+                            url.scheme == "https", set_cookie)
+
+        return resp^
 
     # -------------------------------------------------------------------------
     # Proxy CONNECT helper
