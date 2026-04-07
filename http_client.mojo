@@ -1016,8 +1016,63 @@ struct HttpClient(Movable):
                     var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
                     self._h2_times[h2_hit] = _unix_time_secs()
                     return h2_resp^
+                elif len(proto) == 0:
+                    # Server did not echo ALPN (TLS 1.2 fallback or silent h2).
+                    # Probe H2 first; if the preface exchange fails, fall back to
+                    # a fresh H1 connection (new_tls^ was consumed — cannot reuse).
+                    var new_h2 = Http2Conn()
+                    new_h2._tls = new_tls^
+                    var h2_ok = False
+                    try:
+                        h2_preface_and_settings_exchange(new_h2)
+                        h2_ok = True
+                    except:
+                        try:
+                            new_h2.close()
+                        except:
+                            pass
+
+                    if h2_ok:
+                        var evict = self._h2_evict_slot()
+                        if self._h2_times[evict] > Int64(0):
+                            self._h2_close_slot(evict)
+                        self._h2_keys[evict]  = conn_key
+                        self._h2_times[evict] = _unix_time_secs()
+                        if evict == 0:
+                            self._h2_conn0 = new_h2^
+                        elif evict == 1:
+                            self._h2_conn1 = new_h2^
+                        elif evict == 2:
+                            self._h2_conn2 = new_h2^
+                        else:
+                            self._h2_conn3 = new_h2^
+                        h2_hit = evict
+                        var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
+                        self._h2_times[h2_hit] = _unix_time_secs()
+                        return h2_resp^
+                    else:
+                        # H2 probe failed — open fresh TCP+TLS (no ALPN) for H1
+                        var fb_tcp = self._tcp_connect(url.host, url.port, "https")
+                        var fb_tls = TlsSocket(fb_tcp.fd)
+                        fb_tls.connect(url.host, self._ca_bundle)
+                        _ = fb_tls.send(req_buf)
+                        raw_bytes = _recv_tls_keepalive(fb_tls, skip_body)
+                        var evict = self._tls_evict_slot()
+                        if self._tls_times[evict] > Int64(0):
+                            self._tls_close_slot(evict)
+                        self._tls_keys[evict]  = conn_key
+                        self._tls_times[evict] = _unix_time_secs()
+                        if evict == 0:
+                            self._tls_sock0 = fb_tls^
+                        elif evict == 1:
+                            self._tls_sock1 = fb_tls^
+                        elif evict == 2:
+                            self._tls_sock2 = fb_tls^
+                        else:
+                            self._tls_sock3 = fb_tls^
+                        tls_hit = evict
                 else:
-                    # H1 fallback: send request, store socket in TLS pool
+                    # proto == "http/1.1": server explicitly chose H1 via ALPN
                     _ = new_tls.send(req_buf)
                     raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
                     var evict = self._tls_evict_slot()
