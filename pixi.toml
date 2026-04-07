@@ -2,7 +2,7 @@
 channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "requests"
 platforms = ["linux-64"]
-version = "0.3.0"
+version = "2.0.0"
 
 [activation]
 env = { TLS_PURE = "../tls_pure" }
@@ -13,6 +13,7 @@ test = "bash -c 'python test_server.py & python test_proxy_server.py & sleep 1 &
 test-hpack = "bash build_and_run.sh test_hpack.mojo"
 test-h2 = "bash build_and_run.sh test_h2.mojo"
 test-h2-conn = "bash build_and_run.sh test_h2_conn.mojo"
+test-h2-client = "bash build_and_run.sh test_h2_client.mojo"
 format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]
