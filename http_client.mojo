@@ -19,6 +19,8 @@
 
 from tcp import TcpSocket
 from tls.socket import TlsSocket, load_system_ca_bundle
+from h2_conn import Http2Conn, h2_preface_and_settings_exchange, h2_request as h2_do_request
+from hpack import HpackHeader
 from crypto.cert import X509Cert
 from crypto.base64 import base64_encode
 from url import Url, parse_url
@@ -421,6 +423,15 @@ struct HttpClient(Movable):
     var _tls_sock2: TlsSocket
     var _tls_sock3: TlsSocket
 
+    # HTTP/2 connection pool — LRU-4 (for HTTPS hosts that negotiate h2 via ALPN)
+    # _h2_times[i] == 0 means slot unused; >0 == last-used Unix timestamp
+    var _h2_keys:  List[String]
+    var _h2_times: List[Int64]
+    var _h2_conn0: Http2Conn
+    var _h2_conn1: Http2Conn
+    var _h2_conn2: Http2Conn
+    var _h2_conn3: Http2Conn
+
     # Cookie jar: parallel lists (RFC 6265 attributes per entry)
     # expiry == 0 means session cookie (no expiry); >0 means Unix timestamp
     # path defaults to "/" if not set; secure=True → HTTPS only; host_only=True → exact host match
@@ -471,6 +482,16 @@ struct HttpClient(Movable):
         self._tls_sock1 = TlsSocket(0)
         self._tls_sock2 = TlsSocket(0)
         self._tls_sock3 = TlsSocket(0)
+        # H2 pool — 4 slots, all unused
+        self._h2_keys  = List[String]()
+        self._h2_times = List[Int64]()
+        for _ in range(4):
+            self._h2_keys.append(String(""))
+            self._h2_times.append(Int64(0))
+        self._h2_conn0 = Http2Conn()
+        self._h2_conn1 = Http2Conn()
+        self._h2_conn2 = Http2Conn()
+        self._h2_conn3 = Http2Conn()
         self._jar_domains = List[String]()
         self._jar_names = List[String]()
         self._jar_values = List[String]()
@@ -504,6 +525,12 @@ struct HttpClient(Movable):
         self._tls_sock1 = take._tls_sock1^
         self._tls_sock2 = take._tls_sock2^
         self._tls_sock3 = take._tls_sock3^
+        self._h2_keys  = take._h2_keys^
+        self._h2_times = take._h2_times^
+        self._h2_conn0 = take._h2_conn0^
+        self._h2_conn1 = take._h2_conn1^
+        self._h2_conn2 = take._h2_conn2^
+        self._h2_conn3 = take._h2_conn3^
         self._jar_domains = take._jar_domains^
         self._jar_names = take._jar_names^
         self._jar_values = take._jar_values^
@@ -1162,6 +1189,41 @@ struct HttpClient(Movable):
         else:
             _ = self._tls_sock3.send(req_buf)
             return _recv_tls_keepalive(self._tls_sock3, skip_body)
+
+    # -------------------------------------------------------------------------
+    # LRU-4 Pool Helpers — H2
+    # -------------------------------------------------------------------------
+
+    def _h2_evict_slot(self) -> Int:
+        """Return index of best H2 pool slot to evict (unused > idle-expired > LRU)."""
+        var now = _unix_time_secs()
+        for i in range(4):
+            if self._h2_times[i] == Int64(0):
+                return i
+        for i in range(4):
+            if Int(now - self._h2_times[i]) > self.pool_idle_timeout_secs:
+                return i
+        var lru = 0
+        for i in range(1, 4):
+            if self._h2_times[i] < self._h2_times[lru]:
+                lru = i
+        return lru
+
+    def _h2_close_slot(mut self, i: Int):
+        """Close H2 conn in pool slot i and mark slot unused."""
+        try:
+            if i == 0:
+                self._h2_conn0.close()
+            elif i == 1:
+                self._h2_conn1.close()
+            elif i == 2:
+                self._h2_conn2.close()
+            else:
+                self._h2_conn3.close()
+        except:
+            pass
+        self._h2_times[i] = Int64(0)
+        self._h2_keys[i]  = String("")
 
     # -------------------------------------------------------------------------
     # Proxy CONNECT helper
