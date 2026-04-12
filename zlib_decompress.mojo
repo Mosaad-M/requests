@@ -23,23 +23,23 @@
 from std.ffi import external_call
 from std.memory.unsafe_pointer import alloc
 
-alias _ZSTREAM_SIZE: Int = 112
-alias _ZSTREAM_NEXT_IN: Int = 0
-alias _ZSTREAM_AVAIL_IN: Int = 8
-alias _ZSTREAM_NEXT_OUT: Int = 24
-alias _ZSTREAM_AVAIL_OUT: Int = 32
-alias _ZSTREAM_TOTAL_OUT: Int = 40
+comptime _ZSTREAM_SIZE: Int = 112
+comptime _ZSTREAM_NEXT_IN: Int = 0
+comptime _ZSTREAM_AVAIL_IN: Int = 8
+comptime _ZSTREAM_NEXT_OUT: Int = 24
+comptime _ZSTREAM_AVAIL_OUT: Int = 32
+comptime _ZSTREAM_TOTAL_OUT: Int = 40
 
-alias _Z_OK = Int32(0)
-alias _Z_STREAM_END = Int32(1)
-alias _Z_NO_FLUSH = Int32(0)
+comptime _Z_OK = Int32(0)
+comptime _Z_STREAM_END = Int32(1)
+comptime _Z_NO_FLUSH = Int32(0)
 
 # ZLIB_VERSION string required by inflateInit2_ — must match the installed libz
-alias _ZLIB_VERSION = "1.2.11"
+comptime _ZLIB_VERSION = "1.2.11"
 
 # Decompression safety limits (zip-bomb protection)
-alias _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
-alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
+comptime _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
+comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
 
 
 def zlib_decompress_ptr(

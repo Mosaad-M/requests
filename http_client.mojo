@@ -132,16 +132,16 @@ fn _unix_time_secs() -> Int64:
 #   ChunkedBodyError — chunked encoding protocol violation
 
 
-alias ERR_HTTP = "HTTPError"
-alias ERR_CONNECTION = "ConnectionError"
-alias ERR_REDIRECT = "TooManyRedirects"
-alias ERR_VALIDATION = "ValidationError"
-alias ERR_PARSE = "ParseError"
-alias ERR_CHUNKED = "ChunkedBodyError"
+comptime ERR_HTTP = "HTTPError"
+comptime ERR_CONNECTION = "ConnectionError"
+comptime ERR_REDIRECT = "TooManyRedirects"
+comptime ERR_VALIDATION = "ValidationError"
+comptime ERR_PARSE = "ParseError"
+comptime ERR_CHUNKED = "ChunkedBodyError"
 
 # Maximum bytes allowed in a single response (headers + body).
 # Prevents memory exhaustion from malicious or runaway servers.
-alias MAX_RESPONSE_BYTES = 100 * 1024 * 1024  # 100 MB
+comptime MAX_RESPONSE_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
 def _err_http(status: Int, text: String) -> Error:
@@ -2503,7 +2503,7 @@ def _is_unreserved(c: UInt8) -> Bool:
     return False
 
 
-alias _HEX_CHARS = "0123456789ABCDEF"
+comptime _HEX_CHARS = "0123456789ABCDEF"
 
 
 def _percent_encode(s: String) -> String:

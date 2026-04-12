@@ -76,7 +76,7 @@ def assert_contains(haystack: String, needle: String, label: String) raises:
 # Tests — all use localhost:18080 test server
 # ============================================================================
 
-alias BASE = "http://127.0.0.1:18080"
+comptime BASE = "http://127.0.0.1:18080"
 
 
 def test_get_root() raises:
@@ -1095,7 +1095,7 @@ def test_multipart_content_type() raises:
 # HTTPS Tests — use jsonplaceholder.typicode.com (no local server needed)
 # ============================================================================
 
-alias HTTPS_BASE = "https://jsonplaceholder.typicode.com"
+comptime HTTPS_BASE = "https://jsonplaceholder.typicode.com"
 
 
 def test_https_get() raises:
@@ -1306,7 +1306,7 @@ def test_redirect_same_host_only() raises:
 # Phase 13 Tests — HTTP CONNECT Proxy
 # ============================================================================
 
-alias PROXY_URL = "http://127.0.0.1:18081"
+comptime PROXY_URL = "http://127.0.0.1:18081"
 
 
 def test_proxy_http_get() raises:
