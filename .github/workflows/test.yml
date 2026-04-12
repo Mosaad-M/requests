@@ -7,9 +7,12 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check AVX2 support
+        run: grep -q avx2 /proc/cpuinfo || { echo "AVX2 not available on this runner — Mojo runtime requires AVX2; re-queue this job"; exit 1; }
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.1
