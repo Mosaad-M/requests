@@ -17,7 +17,7 @@
 
 # All known public suffixes packed into a pipe-delimited string.
 # Search: "|" + domain + "|" to avoid prefix/suffix false matches.
-alias _PSL = (
+comptime _PSL = (
     # Country-code TLDs with second-level registries
     # United Kingdom
     "|co.uk|org.uk|me.uk|net.uk|ltd.uk|plc.uk|sch.uk"

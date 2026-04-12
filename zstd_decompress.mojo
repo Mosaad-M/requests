@@ -20,16 +20,16 @@
 #   _MAX_DECOMP_BYTES = 512 MB (absolute cap)
 # ============================================================================
 
-from ffi import external_call
-from memory.unsafe_pointer import alloc
+from std.ffi import external_call
+from std.memory.unsafe_pointer import alloc
 
-alias _MAX_DECOMP_RATIO: Int = 256
-alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024
+comptime _MAX_DECOMP_RATIO: Int = 256
+comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024
 
 # ZSTD_CONTENTSIZE_UNKNOWN = 0ULL - 1 = max UInt64
 # ZSTD_CONTENTSIZE_ERROR   = 0ULL - 2 = max UInt64 - 1
 # Both are sentinel values — any valid content size will be < _MAX_DECOMP_BYTES.
-alias _ZSTD_SIZE_SENTINEL: UInt64 = UInt64(18446744073709551614)  # >= this = sentinel
+comptime _ZSTD_SIZE_SENTINEL: UInt64 = UInt64(18446744073709551614)  # >= this = sentinel
 
 
 def zstd_decompress_ptr(data_addr: Int, data_len: Int) raises -> List[UInt8]:
