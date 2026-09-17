@@ -21,7 +21,7 @@
 # ============================================================================
 
 from std.ffi import external_call
-from std.memory.unsafe_pointer import alloc
+from std.memory import alloc
 
 comptime _ZSTREAM_SIZE: Int = 112
 comptime _ZSTREAM_NEXT_IN: Int = 0

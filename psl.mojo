@@ -104,7 +104,7 @@ comptime _PSL = (
 )
 
 
-fn is_public_suffix(domain: String) -> Bool:
+def is_public_suffix(domain: String) -> Bool:
     """Return True if `domain` is a well-known public suffix.
 
     Searches a pipe-delimited table for "|domain|" to avoid prefix/suffix

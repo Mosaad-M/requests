@@ -85,7 +85,7 @@ struct Http2Frame(Copyable, Movable):
     var stream_id:  Int
     var payload:    List[UInt8]
 
-    fn __init__(
+    def __init__(
         out self,
         frame_type: UInt8,
         flags:      UInt8,
@@ -97,20 +97,20 @@ struct Http2Frame(Copyable, Movable):
         self.stream_id  = stream_id
         self.payload    = payload.copy()
 
-    fn __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self.frame_type = copy.frame_type
         self.flags      = copy.flags
         self.stream_id  = copy.stream_id
         self.payload    = copy.payload.copy()
 
-    fn __moveinit__(out self, deinit take: Self):
-        self.frame_type = take.frame_type
-        self.flags      = take.flags
-        self.stream_id  = take.stream_id
-        self.payload    = take.payload^
+    def __init__(out self, *, deinit move: Self):
+        self.frame_type = move.frame_type
+        self.flags      = move.flags
+        self.stream_id  = move.stream_id
+        self.payload    = move.payload^
 
 
-fn h2_frame_encode(frame: Http2Frame) -> List[UInt8]:
+def h2_frame_encode(frame: Http2Frame) -> List[UInt8]:
     """Encode an HTTP/2 frame to bytes (9-byte header + payload).
 
     Args:
@@ -137,7 +137,7 @@ fn h2_frame_encode(frame: Http2Frame) -> List[UInt8]:
     return out^
 
 
-fn h2_frame_decode(data: List[UInt8], off: Int) raises -> Tuple[Http2Frame, Int]:
+def h2_frame_decode(data: List[UInt8], off: Int) raises -> Tuple[Http2Frame, Int]:
     """Decode one HTTP/2 frame starting at data[off].
 
     Args:
@@ -181,7 +181,7 @@ fn h2_frame_decode(data: List[UInt8], off: Int) raises -> Tuple[Http2Frame, Int]
 
 # ── 15C-2: SETTINGS + PING frames (RFC 7540 §6.4, §6.7) ────────────────────
 
-fn h2_settings_encode(ids: List[Int], vals: List[Int]) -> List[UInt8]:
+def h2_settings_encode(ids: List[Int], vals: List[Int]) -> List[UInt8]:
     """Encode a SETTINGS payload: pairs of (id:16, val:32), big-endian.
 
     Args:
@@ -205,7 +205,7 @@ fn h2_settings_encode(ids: List[Int], vals: List[Int]) -> List[UInt8]:
     return out^
 
 
-fn h2_settings_decode(payload: List[UInt8]) raises -> Tuple[List[Int], List[Int]]:
+def h2_settings_decode(payload: List[UInt8]) raises -> Tuple[List[Int], List[Int]]:
     """Decode a SETTINGS payload into parallel (ids, vals) lists.
 
     Args:
@@ -238,7 +238,7 @@ fn h2_settings_decode(payload: List[UInt8]) raises -> Tuple[List[Int], List[Int]
     return (ids^, vals^)
 
 
-fn h2_make_settings_frame(ids: List[Int], vals: List[Int]) -> Http2Frame:
+def h2_make_settings_frame(ids: List[Int], vals: List[Int]) -> Http2Frame:
     """Build a SETTINGS frame (stream_id=0, flags=0).
 
     Args:
@@ -251,7 +251,7 @@ fn h2_make_settings_frame(ids: List[Int], vals: List[Int]) -> Http2Frame:
     return Http2Frame(H2_SETTINGS, UInt8(0), 0, h2_settings_encode(ids, vals))
 
 
-fn h2_make_settings_ack() -> Http2Frame:
+def h2_make_settings_ack() -> Http2Frame:
     """Build a SETTINGS ACK frame (stream_id=0, flags=ACK, empty payload).
 
     Returns:
@@ -260,7 +260,7 @@ fn h2_make_settings_ack() -> Http2Frame:
     return Http2Frame(H2_SETTINGS, H2_FLAG_ACK, 0, List[UInt8]())
 
 
-fn h2_make_ping_frame(opaque_data: List[UInt8], ack: Bool) raises -> Http2Frame:
+def h2_make_ping_frame(opaque_data: List[UInt8], ack: Bool) raises -> Http2Frame:
     """Build a PING frame (stream_id=0, 8-byte opaque payload).
 
     Args:
@@ -282,7 +282,7 @@ fn h2_make_ping_frame(opaque_data: List[UInt8], ack: Bool) raises -> Http2Frame:
     return Http2Frame(H2_PING, flags, 0, opaque_data.copy())
 
 
-fn h2_parse_ping_payload(frame: Http2Frame) raises -> List[UInt8]:
+def h2_parse_ping_payload(frame: Http2Frame) raises -> List[UInt8]:
     """Extract the 8-byte opaque data from a PING frame.
 
     Args:
@@ -304,7 +304,7 @@ fn h2_parse_ping_payload(frame: Http2Frame) raises -> List[UInt8]:
 
 # ── 15C-3: HEADERS, CONTINUATION, DATA frames (RFC 7540 §6.1, §6.2, §6.10) ─
 
-fn h2_make_headers_frame(
+def h2_make_headers_frame(
     stream_id:   Int,
     hpack_block: List[UInt8],
     end_stream:  Bool,
@@ -329,7 +329,7 @@ fn h2_make_headers_frame(
     return Http2Frame(H2_HEADERS, flags, stream_id, hpack_block.copy())
 
 
-fn h2_make_continuation_frame(
+def h2_make_continuation_frame(
     stream_id:   Int,
     hpack_block: List[UInt8],
     end_headers: Bool,
@@ -348,7 +348,7 @@ fn h2_make_continuation_frame(
     return Http2Frame(H2_CONTINUATION, flags, stream_id, hpack_block.copy())
 
 
-fn h2_make_data_frame(
+def h2_make_data_frame(
     stream_id:  Int,
     data:       List[UInt8],
     end_stream: Bool,
@@ -367,7 +367,7 @@ fn h2_make_data_frame(
     return Http2Frame(H2_DATA, flags, stream_id, data.copy())
 
 
-fn h2_get_hpack_block(frame: Http2Frame) raises -> List[UInt8]:
+def h2_get_hpack_block(frame: Http2Frame) raises -> List[UInt8]:
     """Extract the HPACK block from a HEADERS or CONTINUATION frame.
 
     Handles the PRIORITY flag: if set on a HEADERS frame, the first 5 bytes of
@@ -399,7 +399,7 @@ fn h2_get_hpack_block(frame: Http2Frame) raises -> List[UInt8]:
     return frame.payload.copy()
 
 
-fn h2_encode_request_headers(
+def h2_encode_request_headers(
     method:        String,
     path:          String,
     scheme:        String,
@@ -435,7 +435,7 @@ fn h2_encode_request_headers(
     return hpack_encode_block(headers, dyn_table, use_huffman)
 
 
-fn h2_encode_response_headers(
+def h2_encode_response_headers(
     status:        Int,
     mut dyn_table: HpackDynTable,
     extra:         List[HpackHeader],
@@ -463,7 +463,7 @@ fn h2_encode_response_headers(
 
 # ── 15C-4: RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY ──────────────────────
 
-fn h2_make_rst_stream(stream_id: Int, error_code: Int) -> Http2Frame:
+def h2_make_rst_stream(stream_id: Int, error_code: Int) -> Http2Frame:
     """Build a RST_STREAM frame (4-byte big-endian error code).
 
     Args:
@@ -481,7 +481,7 @@ fn h2_make_rst_stream(stream_id: Int, error_code: Int) -> Http2Frame:
     return Http2Frame(H2_RST_STREAM, UInt8(0), stream_id, payload^)
 
 
-fn h2_parse_rst_stream(frame: Http2Frame) raises -> Int:
+def h2_parse_rst_stream(frame: Http2Frame) raises -> Int:
     """Parse a RST_STREAM frame and return the error code.
 
     Args:
@@ -504,7 +504,7 @@ fn h2_parse_rst_stream(frame: Http2Frame) raises -> Int:
          |  Int(frame.payload[3])
 
 
-fn h2_make_window_update(stream_id: Int, increment: Int) raises -> Http2Frame:
+def h2_make_window_update(stream_id: Int, increment: Int) raises -> Http2Frame:
     """Build a WINDOW_UPDATE frame.
 
     Args:
@@ -533,7 +533,7 @@ fn h2_make_window_update(stream_id: Int, increment: Int) raises -> Http2Frame:
     return Http2Frame(H2_WINDOW_UPDATE, UInt8(0), stream_id, payload^)
 
 
-fn h2_parse_window_update(frame: Http2Frame) raises -> Int:
+def h2_parse_window_update(frame: Http2Frame) raises -> Int:
     """Parse a WINDOW_UPDATE frame and return the increment.
 
     Args:
@@ -556,7 +556,7 @@ fn h2_parse_window_update(frame: Http2Frame) raises -> Int:
          |  Int(frame.payload[3])
 
 
-fn h2_make_goaway(
+def h2_make_goaway(
     last_stream_id: Int,
     error_code:     Int,
     debug_data:     List[UInt8],
@@ -588,7 +588,7 @@ fn h2_make_goaway(
     return Http2Frame(H2_GOAWAY, UInt8(0), 0, payload^)
 
 
-fn h2_parse_goaway(frame: Http2Frame) raises -> Tuple[Int, Int, List[UInt8]]:
+def h2_parse_goaway(frame: Http2Frame) raises -> Tuple[Int, Int, List[UInt8]]:
     """Parse a GOAWAY frame.
 
     Args:
@@ -620,7 +620,7 @@ fn h2_parse_goaway(frame: Http2Frame) raises -> Tuple[Int, Int, List[UInt8]]:
     return (last_sid, ec, dbg^)
 
 
-fn h2_make_priority_frame(
+def h2_make_priority_frame(
     stream_id:     Int,
     dep_stream_id: Int,
     exclusive:     Bool,
@@ -650,7 +650,7 @@ fn h2_make_priority_frame(
     return Http2Frame(H2_PRIORITY, UInt8(0), stream_id, payload^)
 
 
-fn h2_parse_priority_frame(frame: Http2Frame) raises -> Tuple[Int, Bool, Int]:
+def h2_parse_priority_frame(frame: Http2Frame) raises -> Tuple[Int, Bool, Int]:
     """Parse a PRIORITY frame.
 
     Args:
@@ -681,7 +681,7 @@ fn h2_parse_priority_frame(frame: Http2Frame) raises -> Tuple[Int, Bool, Int]:
 comptime H2_CLIENT_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 
-fn h2_client_preface_bytes() -> List[UInt8]:
+def h2_client_preface_bytes() -> List[UInt8]:
     """Return the 24-byte HTTP/2 client connection preface.
 
     Returns:
@@ -695,7 +695,7 @@ fn h2_client_preface_bytes() -> List[UInt8]:
     return out^
 
 
-fn h2_read_frames(data: List[UInt8]) raises -> List[Http2Frame]:
+def h2_read_frames(data: List[UInt8]) raises -> List[Http2Frame]:
     """Decode all HTTP/2 frames in a byte buffer.
 
     Args:
@@ -716,7 +716,7 @@ fn h2_read_frames(data: List[UInt8]) raises -> List[Http2Frame]:
     return frames^
 
 
-fn h2_write_frames(frames: List[Http2Frame]) -> List[UInt8]:
+def h2_write_frames(frames: List[Http2Frame]) -> List[UInt8]:
     """Encode all frames into a single byte buffer.
 
     Args:
@@ -733,7 +733,7 @@ fn h2_write_frames(frames: List[Http2Frame]) -> List[UInt8]:
     return out^
 
 
-fn h2_make_initial_settings() -> Http2Frame:
+def h2_make_initial_settings() -> Http2Frame:
     """Build the client's initial SETTINGS frame with sensible defaults.
 
     Parameters:

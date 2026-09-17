@@ -15,7 +15,7 @@ test-h2-client = "bash build_and_run.sh test_h2_client.mojo"
 format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]
-mojo = ">=0.26.2"
+mojo = ">=1.0.0"
 brotli = ">=1.0"
 zstd = ">=1.5"
 

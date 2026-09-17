@@ -21,7 +21,7 @@
 # ============================================================================
 
 from std.ffi import external_call
-from std.memory.unsafe_pointer import alloc
+from std.memory import alloc
 
 comptime _MAX_DECOMP_RATIO: Int = 256
 comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024

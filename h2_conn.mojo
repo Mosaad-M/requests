@@ -50,7 +50,7 @@ struct Http2Conn(Movable):
     var _peer_initial_window: Int          # from peer SETTINGS_INITIAL_WINDOW_SIZE
     var _conn_window:         Int          # outbound connection-level flow-control window
 
-    fn __init__(out self):
+    def __init__(out self):
         """Create an Http2Conn with a placeholder TLS socket (fd=0).
 
         h2_connect() immediately overwrites _tls with the real connected
@@ -64,23 +64,23 @@ struct Http2Conn(Movable):
         self._peer_initial_window = 65535
         self._conn_window         = 65535
 
-    fn __moveinit__(out self, deinit take: Self):
-        self._tls                 = take._tls^
-        self._next_stream         = take._next_stream
-        self._hpack_enc           = take._hpack_enc^
-        self._hpack_dec           = take._hpack_dec^
-        self._peer_max_frame_size = take._peer_max_frame_size
-        self._peer_initial_window = take._peer_initial_window
-        self._conn_window         = take._conn_window
+    def __init__(out self, *, deinit move: Self):
+        self._tls                 = move._tls^
+        self._next_stream         = move._next_stream
+        self._hpack_enc           = move._hpack_enc^
+        self._hpack_dec           = move._hpack_dec^
+        self._peer_max_frame_size = move._peer_max_frame_size
+        self._peer_initial_window = move._peer_initial_window
+        self._conn_window         = move._conn_window
 
-    fn close(mut self) raises:
+    def close(mut self) raises:
         """Close the underlying TLS connection."""
         self._tls.close()
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-fn _read_one_frame(mut conn: Http2Conn) raises -> Http2Frame:
+def _read_one_frame(mut conn: Http2Conn) raises -> Http2Frame:
     """Read exactly one HTTP/2 frame from the TLS stream.
 
     Calls recv_exact(9) for the fixed header, then recv_exact(length)
@@ -111,7 +111,7 @@ fn _read_one_frame(mut conn: Http2Conn) raises -> Http2Frame:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-fn h2_preface_and_settings_exchange(mut conn: Http2Conn) raises:
+def h2_preface_and_settings_exchange(mut conn: Http2Conn) raises:
     """Send client connection preface + initial SETTINGS; read and ACK server SETTINGS.
 
     Called on a fresh Http2Conn whose _tls is already TLS-connected.
@@ -156,7 +156,7 @@ fn h2_preface_and_settings_exchange(mut conn: Http2Conn) raises:
             got_server_settings = True
 
 
-fn h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
+def h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
     """Establish an HTTP/2 connection via TLS + ALPN.
 
     1. Loads system CA bundle.
@@ -203,7 +203,7 @@ fn h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
     return conn^
 
 
-fn h2_request(
+def h2_request(
     mut conn:  Http2Conn,
     method:    String,
     path:      String,

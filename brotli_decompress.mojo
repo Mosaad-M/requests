@@ -16,7 +16,7 @@
 # ============================================================================
 
 from std.ffi import external_call
-from std.memory.unsafe_pointer import alloc
+from std.memory import alloc
 
 # Decompression safety limits (zip-bomb protection)
 comptime _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio

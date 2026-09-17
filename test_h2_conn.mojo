@@ -11,11 +11,10 @@ from hpack import HpackHeader
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def run_test(
+def run_test[test_fn: def () thin raises -> None](
     name: String,
     mut passed: Int,
     mut failed: Int,
-    test_fn: def () raises -> None,
 ):
     try:
         test_fn()
@@ -26,17 +25,17 @@ def run_test(
         failed += 1
 
 
-fn assert_eq_int(got: Int, expected: Int, label: String) raises:
+def assert_eq_int(got: Int, expected: Int, label: String) raises:
     if got != expected:
         raise Error(label + ": expected " + String(expected) + " got " + String(got))
 
 
-fn assert_true(cond: Bool, label: String) raises:
+def assert_true(cond: Bool, label: String) raises:
     if not cond:
         raise Error(label + ": expected True")
 
 
-fn _bytes_contain_str(haystack: List[UInt8], needle: String) -> Bool:
+def _bytes_contain_str(haystack: List[UInt8], needle: String) -> Bool:
     """Return True if haystack bytes contain the ASCII string needle."""
     var nb   = needle.as_bytes()
     var nlen = len(nb)
@@ -117,10 +116,10 @@ def main() raises:
     print("(Requires network access)")
     print()
     print("── 15C-6: Http2Conn ──")
-    run_test("h2_connect to www.google.com:443", passed, failed, test_h2_connect)
-    run_test("GET www.google.com / → 200 or 301, non-empty body", passed, failed, test_h2_get_google)
-    run_test("GET httpbin.org/get → 200, body has 'headers'", passed, failed, test_h2_get_httpbin)
-    run_test("custom header x-test-id echoed in response body", passed, failed, test_h2_custom_headers)
+    run_test[test_h2_connect]("h2_connect to www.google.com:443", passed, failed)
+    run_test[test_h2_get_google]("GET www.google.com / → 200 or 301, non-empty body", passed, failed)
+    run_test[test_h2_get_httpbin]("GET httpbin.org/get → 200, body has 'headers'", passed, failed)
+    run_test[test_h2_custom_headers]("custom header x-test-id echoed in response body", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

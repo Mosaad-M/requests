@@ -11,11 +11,10 @@ from http_client import HttpClient, HttpHeaders
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def run_test(
+def run_test[test_fn: def () thin raises -> None](
     name: String,
     mut passed: Int,
     mut failed: Int,
-    test_fn: def () raises -> None,
 ):
     try:
         test_fn()
@@ -26,17 +25,17 @@ def run_test(
         failed += 1
 
 
-fn assert_eq_int(got: Int, expected: Int, label: String) raises:
+def assert_eq_int(got: Int, expected: Int, label: String) raises:
     if got != expected:
         raise Error(label + ": expected " + String(expected) + " got " + String(got))
 
 
-fn assert_true(cond: Bool, label: String) raises:
+def assert_true(cond: Bool, label: String) raises:
     if not cond:
         raise Error(label + ": expected True")
 
 
-fn assert_contains(haystack: String, needle: String, label: String) raises:
+def assert_contains(haystack: String, needle: String, label: String) raises:
     if needle not in haystack:
         raise Error(label + ": '" + needle + "' not found in body")
 
@@ -48,7 +47,7 @@ def test_h2_client_get() raises:
     var client = HttpClient()
     var resp = client.get("https://jsonplaceholder.typicode.com/posts/1")
     assert_eq_int(resp.status_code, 200, "status")
-    assert_true(len(resp.body) > 0, "non-empty body")
+    assert_true(resp.body.byte_length() > 0, "non-empty body")
     assert_contains(resp.body, "userId", "body contains 'userId' key")
 
 
@@ -70,7 +69,7 @@ def test_h2_client_pool_reuse() raises:
     assert_eq_int(r1.status_code, 200, "first request status")
     var r2 = client.get("https://jsonplaceholder.typicode.com/posts/2")
     assert_eq_int(r2.status_code, 200, "second request status (pool reuse)")
-    assert_true(len(r2.body) > 0, "second response has body")
+    assert_true(r2.body.byte_length() > 0, "second response has body")
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -83,12 +82,9 @@ def main() raises:
     print("(Requires network access)")
     print()
     print("── 15D: HttpClient H2 ──")
-    run_test("GET https://jsonplaceholder.typicode.com/posts/1 → 200", passed, failed,
-             test_h2_client_get)
-    run_test("POST https://jsonplaceholder.typicode.com/posts → 201", passed, failed,
-             test_h2_client_post)
-    run_test("pool reuse: two GETs to same host both 200", passed, failed,
-             test_h2_client_pool_reuse)
+    run_test[test_h2_client_get]("GET https://jsonplaceholder.typicode.com/posts/1 → 200", passed, failed)
+    run_test[test_h2_client_post]("POST https://jsonplaceholder.typicode.com/posts → 201", passed, failed)
+    run_test[test_h2_client_pool_reuse]("pool reuse: two GETs to same host both 200", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

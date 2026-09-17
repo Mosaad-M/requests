@@ -30,7 +30,7 @@ from brotli_decompress import brotli_decompress, brotli_decompress_ptr
 from zstd_decompress import zstd_decompress, zstd_decompress_ptr
 from psl import is_public_suffix
 from std.ffi import external_call
-from std.memory.unsafe_pointer import alloc
+from std.memory import alloc
 
 
 # ============================================================================
@@ -38,7 +38,7 @@ from std.memory.unsafe_pointer import alloc
 # ============================================================================
 
 
-fn _getenv(name: String) -> String:
+def _getenv(name: String) -> String:
     """Read an environment variable by name. Returns empty string if not set."""
     var nb = name.as_bytes()
     var nlen = len(nb)
@@ -62,7 +62,7 @@ fn _getenv(name: String) -> String:
     return String(unsafe_from_utf8=out^)
 
 
-fn _no_proxy_matches(host: String, no_proxy: String) -> Bool:
+def _no_proxy_matches(host: String, no_proxy: String) -> Bool:
     """Return True if host matches the NO_PROXY env var value.
 
     Formats supported:
@@ -72,7 +72,7 @@ fn _no_proxy_matches(host: String, no_proxy: String) -> Bool:
       192.168.1.1    — exact IP match
     Entries are comma-separated; leading/trailing whitespace is ignored.
     """
-    if len(no_proxy) == 0:
+    if no_proxy.byte_length() == 0:
         return False
     var np_bytes = no_proxy.as_bytes()
     var start = 0
@@ -104,7 +104,7 @@ fn _no_proxy_matches(host: String, no_proxy: String) -> Bool:
     return False
 
 
-fn _unix_time_secs() -> Int64:
+def _unix_time_secs() -> Int64:
     """Return current Unix time in seconds via clock_gettime(CLOCK_REALTIME)."""
     # struct timespec { int64_t tv_sec; int64_t tv_nsec; }  (16 bytes on 64-bit)
     var ts = alloc[UInt8](16)
@@ -186,13 +186,13 @@ struct HttpHeaders(Copyable, Movable, Sized):
         self._keys = List[String]()
         self._values = List[String]()
 
-    def __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self._keys = copy._keys.copy()
         self._values = copy._values.copy()
 
-    def __moveinit__(out self, deinit take: Self):
-        self._keys = take._keys^
-        self._values = take._values^
+    def __init__(out self, *, deinit move: Self):
+        self._keys = move._keys^
+        self._values = move._values^
 
     def add(mut self, key: String, value: String):
         """Add a header key-value pair."""
@@ -222,7 +222,7 @@ struct HttpHeaders(Copyable, Movable, Sized):
 # ============================================================================
 
 
-struct HttpResponse(Copyable, Movable):
+struct HttpResponse(Copyable, Movable, Deinitable):
     """HTTP response with status, headers, and body."""
 
     var status_code: Int
@@ -245,7 +245,7 @@ struct HttpResponse(Copyable, Movable):
         self.ok = False
         self.history = List[HttpResponse]()
 
-    def __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self.status_code = copy.status_code
         self.status_text = copy.status_text
         self.headers = copy.headers.copy()
@@ -254,14 +254,17 @@ struct HttpResponse(Copyable, Movable):
         self.ok = copy.ok
         self.history = copy.history.copy()
 
-    def __moveinit__(out self, deinit take: Self):
-        self.status_code = take.status_code
-        self.status_text = take.status_text^
-        self.headers = take.headers^
-        self.body = take.body^
-        self.url = take.url^
-        self.ok = take.ok
-        self.history = take.history^
+    def __init__(out self, *, deinit move: Self):
+        self.status_code = move.status_code
+        self.status_text = move.status_text^
+        self.headers = move.headers^
+        self.body = move.body^
+        self.url = move.url^
+        self.ok = move.ok
+        self.history = move.history^
+
+    def __deinit__(deinit self):
+        pass
 
     def raise_for_status(self) raises:
         """Raise an error if the response status code is 4xx or 5xx.
@@ -333,13 +336,13 @@ struct BasicAuth(Copyable, Movable):
         self.username = username
         self.password = password
 
-    def __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self.username = copy.username
         self.password = copy.password
 
-    def __moveinit__(out self, deinit take: Self):
-        self.username = take.username^
-        self.password = take.password^
+    def __init__(out self, *, deinit move: Self):
+        self.username = move.username^
+        self.password = move.password^
 
     def header(self) -> String:
         """Return the Authorization header value: 'Basic <base64(user:pass)>'."""
@@ -363,11 +366,11 @@ struct BearerAuth(Copyable, Movable):
     def __init__(out self, token: String):
         self.token = token
 
-    def __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self.token = copy.token
 
-    def __moveinit__(out self, deinit take: Self):
-        self.token = take.token^
+    def __init__(out self, *, deinit move: Self):
+        self.token = move.token^
 
     def header(self) -> String:
         """Return the Authorization header value: 'Bearer <token>'."""
@@ -502,44 +505,44 @@ struct HttpClient(Movable):
         self._jar_samesite = List[String]()
         self._jar_httponly = List[Bool]()
 
-    def __moveinit__(out self, deinit take: Self):
-        self.user_agent = take.user_agent^
-        self.allow_private_ips = take.allow_private_ips
-        self.max_redirects = take.max_redirects
-        self.follow_redirects = take.follow_redirects
-        self.redirect_same_host_only = take.redirect_same_host_only
-        self.pool_idle_timeout_secs = take.pool_idle_timeout_secs
-        self.proxy_url = take.proxy_url^
-        self._timeout_secs = take._timeout_secs
-        self._ca_bundle = take._ca_bundle^
-        self._ca_loaded = take._ca_loaded
-        self._http_keys = take._http_keys^
-        self._http_times = take._http_times^
-        self._http_sock0 = take._http_sock0^
-        self._http_sock1 = take._http_sock1^
-        self._http_sock2 = take._http_sock2^
-        self._http_sock3 = take._http_sock3^
-        self._tls_keys = take._tls_keys^
-        self._tls_times = take._tls_times^
-        self._tls_sock0 = take._tls_sock0^
-        self._tls_sock1 = take._tls_sock1^
-        self._tls_sock2 = take._tls_sock2^
-        self._tls_sock3 = take._tls_sock3^
-        self._h2_keys  = take._h2_keys^
-        self._h2_times = take._h2_times^
-        self._h2_conn0 = take._h2_conn0^
-        self._h2_conn1 = take._h2_conn1^
-        self._h2_conn2 = take._h2_conn2^
-        self._h2_conn3 = take._h2_conn3^
-        self._jar_domains = take._jar_domains^
-        self._jar_names = take._jar_names^
-        self._jar_values = take._jar_values^
-        self._jar_expiries = take._jar_expiries^
-        self._jar_paths = take._jar_paths^
-        self._jar_secure = take._jar_secure^
-        self._jar_host_only = take._jar_host_only^
-        self._jar_samesite = take._jar_samesite^
-        self._jar_httponly = take._jar_httponly^
+    def __init__(out self, *, deinit move: Self):
+        self.user_agent = move.user_agent^
+        self.allow_private_ips = move.allow_private_ips
+        self.max_redirects = move.max_redirects
+        self.follow_redirects = move.follow_redirects
+        self.redirect_same_host_only = move.redirect_same_host_only
+        self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
+        self.proxy_url = move.proxy_url^
+        self._timeout_secs = move._timeout_secs
+        self._ca_bundle = move._ca_bundle^
+        self._ca_loaded = move._ca_loaded
+        self._http_keys = move._http_keys^
+        self._http_times = move._http_times^
+        self._http_sock0 = move._http_sock0^
+        self._http_sock1 = move._http_sock1^
+        self._http_sock2 = move._http_sock2^
+        self._http_sock3 = move._http_sock3^
+        self._tls_keys = move._tls_keys^
+        self._tls_times = move._tls_times^
+        self._tls_sock0 = move._tls_sock0^
+        self._tls_sock1 = move._tls_sock1^
+        self._tls_sock2 = move._tls_sock2^
+        self._tls_sock3 = move._tls_sock3^
+        self._h2_keys  = move._h2_keys^
+        self._h2_times = move._h2_times^
+        self._h2_conn0 = move._h2_conn0^
+        self._h2_conn1 = move._h2_conn1^
+        self._h2_conn2 = move._h2_conn2^
+        self._h2_conn3 = move._h2_conn3^
+        self._jar_domains = move._jar_domains^
+        self._jar_names = move._jar_names^
+        self._jar_values = move._jar_values^
+        self._jar_expiries = move._jar_expiries^
+        self._jar_paths = move._jar_paths^
+        self._jar_secure = move._jar_secure^
+        self._jar_host_only = move._jar_host_only^
+        self._jar_samesite = move._jar_samesite^
+        self._jar_httponly = move._jar_httponly^
 
     # === GET ===
 
@@ -828,7 +831,7 @@ struct HttpClient(Movable):
                 return resp^
 
             var location = resp.headers.get("Location")
-            if len(location) == 0:
+            if location.byte_length() == 0:
                 # No Location header — return as-is
                 resp.history = history^
                 return resp^
@@ -904,16 +907,16 @@ struct HttpClient(Movable):
         _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
-        if len(body) > 0:
+        if body.byte_length() > 0:
             _append_str(req_buf, "Content-Length: ")
-            _append_str(req_buf, String(len(body)))
+            _append_str(req_buf, String(body.byte_length()))
             _append_str(req_buf, "\r\n")
             if not extra_headers.has("Content-Type"):
                 _append_str(req_buf, "Content-Type: application/json\r\n")
 
         # Auto-send cookies from jar for this host
         var jar_cookie = self._jar_cookie_for(url.host, url.request_path(), url.scheme == "https")
-        if len(jar_cookie) > 0 and not extra_headers.has("Cookie"):
+        if jar_cookie.byte_length() > 0 and not extra_headers.has("Cookie"):
             _append_str(req_buf, "Cookie: ")
             _append_str(req_buf, jar_cookie)
             _append_str(req_buf, "\r\n")
@@ -928,7 +931,7 @@ struct HttpClient(Movable):
         _append_str(req_buf, "\r\n")  # End of headers
 
         # Append body if present
-        if len(body) > 0:
+        if body.byte_length() > 0:
             _append_str(req_buf, body)
 
         # Step 3: Send request and receive response (TLS or plain TCP)
@@ -1016,7 +1019,7 @@ struct HttpClient(Movable):
                     var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
                     self._h2_times[h2_hit] = _unix_time_secs()
                     return h2_resp^
-                elif len(proto) == 0:
+                elif proto.byte_length() == 0:
                     # Server did not echo ALPN (TLS 1.2 fallback or silent h2).
                     # Probe H2 first; if the preface exchange fails, fall back to
                     # a fresh H1 connection (new_tls^ was consumed — cannot reuse).
@@ -1170,7 +1173,7 @@ struct HttpClient(Movable):
 
         # Store Set-Cookie headers in the cookie jar
         var set_cookie = parsed.headers.get("Set-Cookie")
-        if len(set_cookie) > 0:
+        if set_cookie.byte_length() > 0:
             self._jar_store(url.host, url.request_path(), url.scheme == "https", set_cookie)
 
         # If server requested connection close, evict the slot we just used
@@ -1377,7 +1380,7 @@ struct HttpClient(Movable):
 
         # content-length and content-type for non-empty bodies
         var body_bytes = List[UInt8]()
-        if len(body) > 0:
+        if body.byte_length() > 0:
             var bb = body.as_bytes()
             for i in range(len(bb)):
                 body_bytes.append(bb[i])
@@ -1389,7 +1392,7 @@ struct HttpClient(Movable):
         var jar_cookie = self._jar_cookie_for(
             url.host, url.request_path(), url.scheme == "https"
         )
-        if len(jar_cookie) > 0 and not extra_headers.has("Cookie"):
+        if jar_cookie.byte_length() > 0 and not extra_headers.has("Cookie"):
             h2_hdrs.append(HpackHeader("cookie", jar_cookie))
 
         # extra headers from caller — H2 requires lowercase header names (RFC 7540 §8.1.2)
@@ -1438,7 +1441,7 @@ struct HttpClient(Movable):
         # Convert resp_body → String first so as_bytes().unsafe_ptr() matches
         # the proven H1 decompression path exactly.
         var ce = resp.headers.get("content-encoding")
-        if len(ce) > 0:
+        if ce.byte_length() > 0:
             var body_str   = String(unsafe_from_utf8=resp_body^)
             var body_bytes = body_str.as_bytes()
             if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip"):
@@ -1460,7 +1463,7 @@ struct HttpClient(Movable):
 
         # ── Store Set-Cookie headers in jar ───────────────────────────────
         var set_cookie = resp.headers.get("set-cookie")
-        if len(set_cookie) > 0:
+        if set_cookie.byte_length() > 0:
             self._jar_store(url.host, url.request_path(),
                             url.scheme == "https", set_cookie)
 
@@ -1483,26 +1486,26 @@ struct HttpClient(Movable):
         """
         # Determine effective proxy URL: field takes priority over env vars
         var effective_proxy = self.proxy_url
-        if len(effective_proxy) == 0:
+        if effective_proxy.byte_length() == 0:
             # Phase 13B: auto-detect from environment
             if scheme == "https":
                 effective_proxy = _getenv("HTTPS_PROXY")
-                if len(effective_proxy) == 0:
+                if effective_proxy.byte_length() == 0:
                     effective_proxy = _getenv("https_proxy")
-            if len(effective_proxy) == 0:
+            if effective_proxy.byte_length() == 0:
                 effective_proxy = _getenv("HTTP_PROXY")
-                if len(effective_proxy) == 0:
+                if effective_proxy.byte_length() == 0:
                     effective_proxy = _getenv("http_proxy")
 
         # Check NO_PROXY — bypass proxy for matching hosts
-        if len(effective_proxy) > 0:
+        if effective_proxy.byte_length() > 0:
             var no_proxy = _getenv("NO_PROXY")
-            if len(no_proxy) == 0:
+            if no_proxy.byte_length() == 0:
                 no_proxy = _getenv("no_proxy")
             if _no_proxy_matches(target_host, no_proxy):
                 effective_proxy = String("")
 
-        if len(effective_proxy) == 0:
+        if effective_proxy.byte_length() == 0:
             # Direct connection — existing behaviour
             var sock = TcpSocket()
             sock.connect(
@@ -1574,7 +1577,7 @@ struct HttpClient(Movable):
 
         # Status line: "HTTP/1.x 200 ..."
         var status_ok = False
-        if len(resp_str) >= 12:
+        if resp_str.byte_length() >= 12:
             var resp_b = resp_str.as_bytes()
             # Check for "200" at position 9 (after "HTTP/1.x ")
             if (
@@ -1957,20 +1960,20 @@ struct StreamResponse(Movable):
         self._http_sock = TcpSocket()
         self._tls_sock = TlsSocket(0)
 
-    def __moveinit__(out self, deinit take: Self):
-        self.status_code = take.status_code
-        self.status_text = take.status_text^
-        self.headers = take.headers^
-        self.url = take.url^
-        self.ok = take.ok
-        self._leftover = take._leftover^
-        self._leftover_pos = take._leftover_pos
-        self._content_length = take._content_length
-        self._body_read = take._body_read
-        self._is_tls = take._is_tls
-        self._done = take._done
-        self._http_sock = take._http_sock^
-        self._tls_sock = take._tls_sock^
+    def __init__(out self, *, deinit move: Self):
+        self.status_code = move.status_code
+        self.status_text = move.status_text^
+        self.headers = move.headers^
+        self.url = move.url^
+        self.ok = move.ok
+        self._leftover = move._leftover^
+        self._leftover_pos = move._leftover_pos
+        self._content_length = move._content_length
+        self._body_read = move._body_read
+        self._is_tls = move._is_tls
+        self._done = move._done
+        self._http_sock = move._http_sock^
+        self._tls_sock = move._tls_sock^
 
     def read_chunk(mut self, size: Int = 8192) raises -> List[UInt8]:
         """Read up to size bytes of the response body.
@@ -2448,10 +2451,10 @@ def _recv_http_keepalive(
 
 def _validate_method(method: String) raises:
     """Validate HTTP method contains only uppercase ASCII letters (A-Z)."""
-    if len(method) == 0:
+    if method.byte_length() == 0:
         raise _err_validation("HTTP method must not be empty")
     var bytes = method.as_bytes()
-    for i in range(len(method)):
+    for i in range(method.byte_length()):
         var b = bytes[i]
         if b < UInt8(ord("A")) or b > UInt8(ord("Z")):
             raise _err_validation("invalid HTTP method: must be uppercase ASCII letters")
@@ -2460,7 +2463,7 @@ def _validate_method(method: String) raises:
 def _validate_header_key(key: String) raises:
     """Validate header key contains no CR, LF, or colon characters."""
     var bytes = key.as_bytes()
-    for i in range(len(key)):
+    for i in range(key.byte_length()):
         var b = bytes[i]
         if b == 13 or b == 10 or b == 58:  # \r, \n, :
             raise _err_validation("invalid header key: contains CR, LF, or colon")
@@ -2469,7 +2472,7 @@ def _validate_header_key(key: String) raises:
 def _validate_header_value(value: String) raises:
     """Validate header value contains no CR or LF characters."""
     var bytes = value.as_bytes()
-    for i in range(len(value)):
+    for i in range(value.byte_length()):
         var b = bytes[i]
         if b == 13 or b == 10:  # \r, \n
             raise _err_validation("invalid header value: contains CR or LF")
@@ -2478,7 +2481,7 @@ def _validate_header_value(value: String) raises:
 def _validate_path(path: String) raises:
     """Validate request path contains no CR or LF characters."""
     var bytes = path.as_bytes()
-    for i in range(len(path)):
+    for i in range(path.byte_length()):
         var b = bytes[i]
         if b == 13 or b == 10:  # \r, \n
             raise _err_validation("invalid request path: contains CR or LF")
@@ -2509,7 +2512,7 @@ comptime _HEX_CHARS = "0123456789ABCDEF"
 def _percent_encode(s: String) -> String:
     """Percent-encode a string per RFC 3986 (for query string values)."""
     var bytes = s.as_bytes()
-    var result = List[UInt8](capacity=len(s) * 3)
+    var result = List[UInt8](capacity=s.byte_length() * 3)
     var hex = _HEX_CHARS.as_bytes()
     for i in range(len(bytes)):
         var c = bytes[i]
@@ -2546,7 +2549,7 @@ def _append_params_to_url(url: String, params: Dict[String, String]) raises -> S
     if len(params) == 0:
         return url
     var query = _encode_params(params)
-    if len(query) == 0:
+    if query.byte_length() == 0:
         return url
     # Check if URL already has a query string (contains '?')
     var url_bytes = url.as_bytes()
@@ -2593,7 +2596,7 @@ def _resolve_url(base_url: String, location: String) raises -> String:
 
     # Absolute URL check: starts with "http://" or "https://"
     var is_abs = False
-    if len(location) >= 7:
+    if location.byte_length() >= 7:
         var h = loc_bytes
         if (
             h[0] == UInt8(ord("h"))
@@ -2604,7 +2607,7 @@ def _resolve_url(base_url: String, location: String) raises -> String:
             if h[4] == UInt8(ord(":")) and h[5] == UInt8(ord("/")) and h[6] == UInt8(ord("/")):
                 is_abs = True
             elif (
-                len(location) >= 8
+                location.byte_length() >= 8
                 and h[4] == UInt8(ord("s"))
                 and h[5] == UInt8(ord(":"))
                 and h[6] == UInt8(ord("/"))
@@ -2651,7 +2654,7 @@ def _resolve_url(base_url: String, location: String) raises -> String:
         return origin + location
 
     # Relative path — strip last component from base_url path
-    var base_path_end = len(base_url)
+    var base_path_end = base_url.byte_length()
     var j = len(base_bytes) - 1
     while j >= origin_end:
         if base_bytes[j] == UInt8(ord("/")):
@@ -2672,8 +2675,8 @@ def _resolve_url(base_url: String, location: String) raises -> String:
 def _to_lower(s: String) -> String:
     """Convert string to lowercase (ASCII only)."""
     var s_bytes = s.as_bytes()
-    var result = List[UInt8](capacity=len(s))
-    for i in range(len(s)):
+    var result = List[UInt8](capacity=s.byte_length())
+    for i in range(s.byte_length()):
         var c = s_bytes[i]
         if c >= UInt8(ord("A")) and c <= UInt8(ord("Z")):
             result.append(c + UInt8(32))
@@ -2684,11 +2687,11 @@ def _to_lower(s: String) -> String:
 
 def _eq_ignore_case(a: String, b: String) -> Bool:
     """Case-insensitive string comparison. Zero allocations."""
-    if len(a) != len(b):
+    if a.byte_length() != b.byte_length():
         return False
     var a_bytes = a.as_bytes()
     var b_bytes = b.as_bytes()
-    for i in range(len(a)):
+    for i in range(a.byte_length()):
         var ca = a_bytes[i]
         var cb = b_bytes[i]
         if ca >= UInt8(ord("A")) and ca <= UInt8(ord("Z")):
@@ -2708,8 +2711,8 @@ def _path_matches(req_path: String, cookie_path: String) -> Bool:
       - cookie_path ends with '/'
       - next char in req_path is '/'
     """
-    var cp_len = len(cookie_path)
-    var rp_len = len(req_path)
+    var cp_len = cookie_path.byte_length()
+    var rp_len = req_path.byte_length()
     if cp_len == 0:
         return True  # empty cookie path matches everything
     var cp_bytes = cookie_path.as_bytes()
@@ -2741,8 +2744,8 @@ def _domain_matches(host: String, cookie_domain: String, host_only: Bool) -> Boo
         return False
     # Subdomain match: host ends with "." + cookie_domain
     var suffix = "." + cookie_domain
-    var h_len = len(host)
-    var s_len = len(suffix)
+    var h_len = host.byte_length()
+    var s_len = suffix.byte_length()
     if h_len <= s_len:
         return False
     var h_bytes = host.as_bytes()
@@ -2757,7 +2760,7 @@ def _domain_matches(host: String, cookie_domain: String, host_only: Bool) -> Boo
 def _append_str(mut buf: List[UInt8], s: String):
     """Append all bytes of a string to a byte buffer."""
     var s_bytes = s.as_bytes()
-    for i in range(len(s)):
+    for i in range(s.byte_length()):
         buf.append(s_bytes[i])
 
 
@@ -2860,10 +2863,10 @@ def _decode_chunked(body: String) raises -> String:
     Uses UnsafePointer for zero-copy parsing — only materializes the
     final decoded body string.
     """
-    var result = List[UInt8](capacity=len(body))
+    var result = List[UInt8](capacity=body.byte_length())
     var body_copy = body
     var ptr = body_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
-    var body_len = len(body)
+    var body_len = body.byte_length()
     var pos = 0
     var total_decoded = 0
     while pos < body_len:
@@ -2922,7 +2925,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
     # Convert to pointer once — all parsing uses pointer arithmetic
     var raw_copy = raw
     var ptr = raw_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
-    var raw_len = len(raw)
+    var raw_len = raw.byte_length()
 
     # Find header/body separator (\r\n\r\n)
     var separator = _find_crlf_crlf(ptr, raw_len)
@@ -3063,12 +3066,12 @@ struct Session(Movable):
         self._auth_bearer = BearerAuth(String(""))
         self._auth_mode = 0
 
-    def __moveinit__(out self, deinit take: Self):
-        self.client = take.client^
-        self.default_headers = take.default_headers^
-        self._auth_basic = take._auth_basic^
-        self._auth_bearer = take._auth_bearer^
-        self._auth_mode = take._auth_mode
+    def __init__(out self, *, deinit move: Self):
+        self.client = move.client^
+        self.default_headers = move.default_headers^
+        self._auth_basic = move._auth_basic^
+        self._auth_bearer = move._auth_bearer^
+        self._auth_mode = move._auth_mode
 
     def set_header(mut self, key: String, value: String):
         """Add or update a default header sent with every request."""
