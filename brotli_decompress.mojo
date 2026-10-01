@@ -16,11 +16,11 @@
 # ============================================================================
 
 from std.ffi import external_call
-from std.memory.unsafe_pointer import alloc
+from std.memory import alloc
 
 # Decompression safety limits (zip-bomb protection)
-alias _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
-alias _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
+comptime _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
+comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
 
 
 def brotli_decompress_ptr(data_addr: Int, data_len: Int) raises -> List[UInt8]:

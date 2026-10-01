@@ -13,7 +13,7 @@
 
 # ── 15B-1: Integer Codec (RFC 7541 §5.1) ───────────────────────────────────
 
-fn hpack_encode_int(value: Int, prefix_bits: Int) -> List[UInt8]:
+def hpack_encode_int(value: Int, prefix_bits: Int) -> List[UInt8]:
     """Encode an HPACK integer with the given prefix bit width.
 
     Returns only the value bytes. The caller is responsible for ORing any
@@ -41,12 +41,12 @@ fn hpack_encode_int(value: Int, prefix_bits: Int) -> List[UInt8]:
     return out^
 
 
-fn _append_bytes(mut out: List[UInt8], src: List[UInt8]):
+def _append_bytes(mut out: List[UInt8], src: List[UInt8]):
     for i in range(len(src)):
         out.append(src[i])
 
 
-fn hpack_decode_int(data: List[UInt8], off: Int, prefix_bits: Int) -> Tuple[Int, Int]:
+def hpack_decode_int(data: List[UInt8], off: Int, prefix_bits: Int) -> Tuple[Int, Int]:
     """Decode an HPACK integer starting at data[off].
 
     The caller must have already consumed any opcode bits in the first byte
@@ -81,7 +81,7 @@ fn hpack_decode_int(data: List[UInt8], off: Int, prefix_bits: Int) -> Tuple[Int,
 
 # ── 15B-2: String Codec — literal (RFC 7541 §5.2) ──────────────────────────
 
-fn hpack_encode_str_literal(s: String) -> List[UInt8]:
+def hpack_encode_str_literal(s: String) -> List[UInt8]:
     """Encode a string as an HPACK literal string (H=0, no Huffman).
 
     Format: [ H=0 | length (7-bit prefix integer) ] [ raw UTF-8 bytes ]
@@ -97,7 +97,7 @@ fn hpack_encode_str_literal(s: String) -> List[UInt8]:
     return out^
 
 
-fn hpack_decode_str(data: List[UInt8], off: Int) raises -> Tuple[String, Int]:
+def hpack_decode_str(data: List[UInt8], off: Int) raises -> Tuple[String, Int]:
     """Decode an HPACK string starting at data[off].
 
     Reads the H flag and length, then decodes the string bytes.
@@ -127,7 +127,7 @@ fn hpack_decode_str(data: List[UInt8], off: Int) raises -> Tuple[String, Int]:
 
 # ── 15B-3: Huffman Codec (RFC 7541 Appendix B) ──────────────────────────────
 
-fn _huff_tables() -> Tuple[List[UInt32], List[UInt8]]:
+def _huff_tables() -> Tuple[List[UInt32], List[UInt8]]:
     """Return (codes, lengths) for RFC 7541 Huffman symbols 0-256 (EOS=256).
 
     Using var lists because comptime arrays cannot be subscripted at runtime.
@@ -404,7 +404,7 @@ fn _huff_tables() -> Tuple[List[UInt32], List[UInt8]]:
     return (codes^, lens^)
 
 
-fn huffman_encode(s: String) -> List[UInt8]:
+def huffman_encode(s: String) -> List[UInt8]:
     """Encode string using RFC 7541 Huffman codes.
 
     Returns raw Huffman bytes (no length prefix or H flag — those are added by
@@ -414,7 +414,7 @@ fn huffman_encode(s: String) -> List[UInt8]:
     var tables = _huff_tables()
     var codes = tables[0].copy()
     var lens  = tables[1].copy()
-    var out   = List[UInt8](capacity=len(s))
+    var out   = List[UInt8](capacity=s.byte_length())
     var acc:  Int = 0   # bit accumulator (Int is 64-bit; max 37 bits used before flush)
     var bits: Int = 0   # bits currently in accumulator
     var raw = s.as_bytes()
@@ -434,7 +434,7 @@ fn huffman_encode(s: String) -> List[UInt8]:
     return out^
 
 
-fn _build_huff_trie() -> Tuple[List[Int], List[Int], List[Int]]:
+def _build_huff_trie() -> Tuple[List[Int], List[Int], List[Int]]:
     """Build Huffman decode trie as three parallel index arrays.
 
     NL[i] = left child (bit=0) of node i, or -1 if absent.
@@ -471,7 +471,7 @@ fn _build_huff_trie() -> Tuple[List[Int], List[Int], List[Int]]:
     return (NL^, NR^, NS^)
 
 
-fn huffman_decode(data: List[UInt8]) raises -> String:
+def huffman_decode(data: List[UInt8]) raises -> String:
     """Decode RFC 7541 Huffman bytes into a String.
 
     Raises Error on:
@@ -519,7 +519,7 @@ fn huffman_decode(data: List[UInt8]) raises -> String:
     return String(unsafe_from_utf8=out^)
 
 
-fn hpack_encode_str(s: String, huffman: Bool) -> List[UInt8]:
+def hpack_encode_str(s: String, huffman: Bool) -> List[UInt8]:
     """Encode a string as an HPACK string field (RFC 7541 §5.2).
 
     If huffman=True: H=1 bit set, content is Huffman-encoded.
@@ -541,7 +541,7 @@ fn hpack_encode_str(s: String, huffman: Bool) -> List[UInt8]:
 
 # ── 15B-4: Static Table (RFC 7541 Appendix A, 61 entries) ──────────────────
 
-fn _static_table() -> Tuple[List[String], List[String]]:
+def _static_table() -> Tuple[List[String], List[String]]:
     """Return (names, values) lists with 62 entries (index 0 unused; 1–61 per RFC)."""
     var names  = List[String](capacity=62)
     var values = List[String](capacity=62)
@@ -613,7 +613,7 @@ fn _static_table() -> Tuple[List[String], List[String]]:
     return (names^, values^)
 
 
-fn static_table_get(idx: Int) raises -> Tuple[String, String]:
+def static_table_get(idx: Int) raises -> Tuple[String, String]:
     """Return the (name, value) pair at the given 1-based static table index.
 
     Args:
@@ -633,7 +633,7 @@ fn static_table_get(idx: Int) raises -> Tuple[String, String]:
     return (names[idx], values[idx])
 
 
-fn static_table_find(name: String, value: String) -> Tuple[Int, Bool]:
+def static_table_find(name: String, value: String) -> Tuple[Int, Bool]:
     """Search the static table for a header name/value pair.
 
     Args:
@@ -677,33 +677,33 @@ struct HpackDynTable(Copyable, Movable):
     var current_size: Int            # sum of (name_len + value_len + 32) for all entries
     var max_size:     Int            # negotiated max via SETTINGS_HEADER_TABLE_SIZE
 
-    fn __init__(out self, max_size: Int = 4096):
+    def __init__(out self, max_size: Int = 4096):
         self._names       = List[String]()
         self._values      = List[String]()
         self.current_size = 0
         self.max_size     = max_size
 
-    fn __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self._names       = copy._names.copy()
         self._values      = copy._values.copy()
         self.current_size = copy.current_size
         self.max_size     = copy.max_size
 
-    fn __moveinit__(out self, deinit take: Self):
-        self._names       = take._names^
-        self._values      = take._values^
-        self.current_size = take.current_size
-        self.max_size     = take.max_size
+    def __init__(out self, *, deinit move: Self):
+        self._names       = move._names^
+        self._values      = move._values^
+        self.current_size = move.current_size
+        self.max_size     = move.max_size
 
-    fn len(self) -> Int:
+    def len(self) -> Int:
         """Return number of entries currently in the dynamic table."""
         return len(self._names)
 
-    fn _evict_to_fit(mut self, needed: Int):
+    def _evict_to_fit(mut self, needed: Int):
         """Evict oldest entries until current_size + needed <= max_size."""
         while len(self._names) > 0 and self.current_size + needed > self.max_size:
             var last = len(self._names) - 1
-            var evict_size = len(self._names[last]) + len(self._values[last]) + 32
+            var evict_size = self._names[last].byte_length() + self._values[last].byte_length() + 32
             self.current_size -= evict_size
             # Remove last element by rebuilding without it
             var new_names  = List[String](capacity=last)
@@ -714,13 +714,13 @@ struct HpackDynTable(Copyable, Movable):
             self._names  = new_names^
             self._values = new_values^
 
-    fn insert(mut self, name: String, value: String):
+    def insert(mut self, name: String, value: String):
         """Insert a new entry at the front (newest position).
 
         Evicts oldest entries first if needed. If the entry itself exceeds
         max_size, the table is emptied (RFC 7541 §4.4).
         """
-        var entry_size = len(name) + len(value) + 32
+        var entry_size = name.byte_length() + value.byte_length() + 32
         if entry_size > self.max_size:
             # Entry too large — clear table entirely (RFC §4.4)
             self._names       = List[String]()
@@ -741,7 +741,7 @@ struct HpackDynTable(Copyable, Movable):
         self._values       = new_values^
         self.current_size += entry_size
 
-    fn get(self, dyn_idx: Int) raises -> Tuple[String, String]:
+    def get(self, dyn_idx: Int) raises -> Tuple[String, String]:
         """Return the entry at 1-based dynamic-table index dyn_idx.
 
         dyn_idx=1 is the most recently added entry.
@@ -757,7 +757,7 @@ struct HpackDynTable(Copyable, Movable):
         var i = dyn_idx - 1
         return (self._names[i], self._values[i])
 
-    fn combined_get(self, idx: Int) raises -> Tuple[String, String]:
+    def combined_get(self, idx: Int) raises -> Tuple[String, String]:
         """Look up a header by its combined index (RFC 7541 §2.3.3).
 
         idx 1–61:  static table entry.
@@ -772,12 +772,12 @@ struct HpackDynTable(Copyable, Movable):
             return static_table_get(idx)
         return self.get(idx - 61)
 
-    fn update_max_size(mut self, new_max: Int):
+    def update_max_size(mut self, new_max: Int):
         """Update max_size and evict entries until current_size <= new_max (RFC §6.3)."""
         self.max_size = new_max
         while len(self._names) > 0 and self.current_size > self.max_size:
             var last       = len(self._names) - 1
-            var evict_size = len(self._names[last]) + len(self._values[last]) + 32
+            var evict_size = self._names[last].byte_length() + self._values[last].byte_length() + 32
             self.current_size -= evict_size
             var new_names  = List[String](capacity=last)
             var new_values = List[String](capacity=last)
@@ -796,20 +796,20 @@ struct HpackHeader(Copyable, Movable):
     var name:  String
     var value: String
 
-    fn __init__(out self, name: String, value: String):
+    def __init__(out self, name: String, value: String):
         self.name  = name
         self.value = value
 
-    fn __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self.name  = copy.name
         self.value = copy.value
 
-    fn __moveinit__(out self, deinit take: Self):
-        self.name  = take.name^
-        self.value = take.value^
+    def __init__(out self, *, deinit move: Self):
+        self.name  = move.name^
+        self.value = move.value^
 
 
-fn hpack_decode_block(
+def hpack_decode_block(
     data: List[UInt8],
     mut dyn_table: HpackDynTable,
 ) raises -> List[HpackHeader]:
@@ -915,7 +915,7 @@ fn hpack_decode_block(
 
 # ── 15B-7: Header Block Encode (RFC 7541 §6) ───────────────────────────────
 
-fn hpack_encode_block(
+def hpack_encode_block(
     headers: List[HpackHeader],
     mut dyn_table: HpackDynTable,
     use_huffman: Bool = False,

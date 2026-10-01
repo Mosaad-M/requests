@@ -17,7 +17,7 @@
 
 # All known public suffixes packed into a pipe-delimited string.
 # Search: "|" + domain + "|" to avoid prefix/suffix false matches.
-alias _PSL = (
+comptime _PSL = (
     # Country-code TLDs with second-level registries
     # United Kingdom
     "|co.uk|org.uk|me.uk|net.uk|ltd.uk|plc.uk|sch.uk"
@@ -104,7 +104,7 @@ alias _PSL = (
 )
 
 
-fn is_public_suffix(domain: String) -> Bool:
+def is_public_suffix(domain: String) -> Bool:
     """Return True if `domain` is a well-known public suffix.
 
     Searches a pipe-delimited table for "|domain|" to avoid prefix/suffix

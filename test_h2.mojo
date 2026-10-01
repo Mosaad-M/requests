@@ -48,11 +48,10 @@ from hpack import HpackHeader, HpackDynTable, hpack_decode_block
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
-def run_test(
+def run_test[test_fn: def () thin raises -> None](
     name: String,
     mut passed: Int,
     mut failed: Int,
-    test_fn: def () raises -> None,
 ):
     try:
         test_fn()
@@ -63,12 +62,12 @@ def run_test(
         failed += 1
 
 
-fn assert_eq_int(actual: Int, expected: Int, label: String) raises:
+def assert_eq_int(actual: Int, expected: Int, label: String) raises:
     if actual != expected:
         raise Error(label + ": expected " + String(expected) + ", got " + String(actual))
 
 
-fn assert_eq_u8(actual: UInt8, expected: UInt8, label: String) raises:
+def assert_eq_u8(actual: UInt8, expected: UInt8, label: String) raises:
     if actual != expected:
         raise Error(
             label + ": expected 0x" + String(Int(expected))
@@ -76,7 +75,7 @@ fn assert_eq_u8(actual: UInt8, expected: UInt8, label: String) raises:
         )
 
 
-fn _hex_digit(b: UInt8) -> UInt8:
+def _hex_digit(b: UInt8) -> UInt8:
     if b >= 48 and b <= 57:
         return b - 48
     if b >= 97 and b <= 102:
@@ -84,7 +83,7 @@ fn _hex_digit(b: UInt8) -> UInt8:
     return b - 65 + 10
 
 
-fn _hex_bytes(s: String) -> List[UInt8]:
+def _hex_bytes(s: String) -> List[UInt8]:
     var raw = s.as_bytes()
     var out = List[UInt8](capacity=len(raw) // 2)
     var i   = 0
@@ -96,7 +95,7 @@ fn _hex_bytes(s: String) -> List[UInt8]:
     return out^
 
 
-fn _assert_bytes_eq(got: List[UInt8], expected: List[UInt8], label: String) raises:
+def _assert_bytes_eq(got: List[UInt8], expected: List[UInt8], label: String) raises:
     if len(got) != len(expected):
         raise Error(
             label + ": length mismatch — expected "
@@ -110,7 +109,7 @@ fn _assert_bytes_eq(got: List[UInt8], expected: List[UInt8], label: String) rais
             )
 
 
-fn _make_payload(size: Int, fill: UInt8 = 0xAB) -> List[UInt8]:
+def _make_payload(size: Int, fill: UInt8 = 0xAB) -> List[UInt8]:
     var p = List[UInt8](capacity=size)
     for _ in range(size):
         p.append(fill)
@@ -987,85 +986,85 @@ def main() raises:
     print("=== HTTP/2 Frame Layer Tests ===")
     print()
     print("── 15C-1: Frame Header + Http2Frame ──")
-    run_test("frame type constants match RFC 7540 §6", passed, failed, test_frame_type_constants)
-    run_test("flag constants have correct bit values", passed, failed, test_frame_flag_constants)
-    run_test("SETTINGS ACK (no payload) → 9 correct bytes", passed, failed, test_frame_encode_empty_payload)
-    run_test("DATA frame with 4-byte payload → 13 bytes", passed, failed, test_frame_encode_with_payload)
-    run_test("decode 9-byte SETTINGS ACK", passed, failed, test_frame_decode_settings_ack)
-    run_test("decode DATA frame with payload", passed, failed, test_frame_decode_data)
-    run_test("decode frame at non-zero buffer offset", passed, failed, test_frame_decode_at_offset)
-    run_test("encode→decode HEADERS frame: all fields identical", passed, failed, test_frame_roundtrip_headers)
-    run_test("stream_id=0 encodes/decodes correctly", passed, failed, test_frame_stream_id_zero)
-    run_test("stream_id=0x1FFFFFFF encodes/decodes correctly", passed, failed, test_frame_stream_id_large)
-    run_test("encoder always clears R bit", passed, failed, test_frame_reserved_bit_cleared_on_encode)
-    run_test("decoder masks R bit → stream_id always ≤ 2^31-1", passed, failed, test_frame_reserved_bit_masked_on_decode)
-    run_test("< 9 bytes → raises Error", passed, failed, test_frame_decode_too_short)
-    run_test("declared payload > available bytes → raises", passed, failed, test_frame_decode_truncated_payload)
-    run_test("payload > 65535 bytes: 24-bit length correct", passed, failed, test_frame_length_24bit)
-    run_test("roundtrip one frame of each type", passed, failed, test_frame_roundtrip_all_types)
+    run_test[test_frame_type_constants]("frame type constants match RFC 7540 §6", passed, failed)
+    run_test[test_frame_flag_constants]("flag constants have correct bit values", passed, failed)
+    run_test[test_frame_encode_empty_payload]("SETTINGS ACK (no payload) → 9 correct bytes", passed, failed)
+    run_test[test_frame_encode_with_payload]("DATA frame with 4-byte payload → 13 bytes", passed, failed)
+    run_test[test_frame_decode_settings_ack]("decode 9-byte SETTINGS ACK", passed, failed)
+    run_test[test_frame_decode_data]("decode DATA frame with payload", passed, failed)
+    run_test[test_frame_decode_at_offset]("decode frame at non-zero buffer offset", passed, failed)
+    run_test[test_frame_roundtrip_headers]("encode→decode HEADERS frame: all fields identical", passed, failed)
+    run_test[test_frame_stream_id_zero]("stream_id=0 encodes/decodes correctly", passed, failed)
+    run_test[test_frame_stream_id_large]("stream_id=0x1FFFFFFF encodes/decodes correctly", passed, failed)
+    run_test[test_frame_reserved_bit_cleared_on_encode]("encoder always clears R bit", passed, failed)
+    run_test[test_frame_reserved_bit_masked_on_decode]("decoder masks R bit → stream_id always ≤ 2^31-1", passed, failed)
+    run_test[test_frame_decode_too_short]("< 9 bytes → raises Error", passed, failed)
+    run_test[test_frame_decode_truncated_payload]("declared payload > available bytes → raises", passed, failed)
+    run_test[test_frame_length_24bit]("payload > 65535 bytes: 24-bit length correct", passed, failed)
+    run_test[test_frame_roundtrip_all_types]("roundtrip one frame of each type", passed, failed)
 
     print()
     print("── 15C-2: SETTINGS + PING frames ──")
-    run_test("settings_encode: no pairs → empty payload", passed, failed, test_settings_encode_empty)
-    run_test("settings_encode: single pair correct bytes", passed, failed, test_settings_encode_one)
-    run_test("settings_encode: 3 pairs → 18 bytes", passed, failed, test_settings_encode_multiple)
-    run_test("settings_decode: empty payload → ([], [])", passed, failed, test_settings_decode_empty)
-    run_test("settings_decode: single pair", passed, failed, test_settings_decode_one)
-    run_test("settings roundtrip: encode then decode identical", passed, failed, test_settings_roundtrip)
-    run_test("settings_decode: bad length → raises", passed, failed, test_settings_decode_bad_length)
-    run_test("make_settings_frame: type/stream_id/flags correct", passed, failed, test_make_settings_frame)
-    run_test("make_settings_ack: ACK flag, empty payload", passed, failed, test_make_settings_ack)
-    run_test("make_ping: 8-byte opaque, no ACK flag", passed, failed, test_make_ping)
-    run_test("make_ping ack=True: ACK flag set", passed, failed, test_make_ping_ack)
-    run_test("make_ping: non-8-byte opaque → raises", passed, failed, test_make_ping_bad_length)
-    run_test("parse_ping_payload: returns 8 opaque bytes", passed, failed, test_parse_ping_payload)
+    run_test[test_settings_encode_empty]("settings_encode: no pairs → empty payload", passed, failed)
+    run_test[test_settings_encode_one]("settings_encode: single pair correct bytes", passed, failed)
+    run_test[test_settings_encode_multiple]("settings_encode: 3 pairs → 18 bytes", passed, failed)
+    run_test[test_settings_decode_empty]("settings_decode: empty payload → ([], [])", passed, failed)
+    run_test[test_settings_decode_one]("settings_decode: single pair", passed, failed)
+    run_test[test_settings_roundtrip]("settings roundtrip: encode then decode identical", passed, failed)
+    run_test[test_settings_decode_bad_length]("settings_decode: bad length → raises", passed, failed)
+    run_test[test_make_settings_frame]("make_settings_frame: type/stream_id/flags correct", passed, failed)
+    run_test[test_make_settings_ack]("make_settings_ack: ACK flag, empty payload", passed, failed)
+    run_test[test_make_ping]("make_ping: 8-byte opaque, no ACK flag", passed, failed)
+    run_test[test_make_ping_ack]("make_ping ack=True: ACK flag set", passed, failed)
+    run_test[test_make_ping_bad_length]("make_ping: non-8-byte opaque → raises", passed, failed)
+    run_test[test_parse_ping_payload]("parse_ping_payload: returns 8 opaque bytes", passed, failed)
 
     print()
     print("── 15C-3: HEADERS, CONTINUATION, DATA frames ──")
-    run_test("make_headers_frame: END_HEADERS flag set", passed, failed, test_make_headers_frame_end_headers)
-    run_test("make_headers_frame: END_STREAM + END_HEADERS", passed, failed, test_make_headers_frame_end_stream)
-    run_test("make_continuation_frame: END_HEADERS flag", passed, failed, test_make_continuation_frame)
-    run_test("make_data_frame: payload + END_STREAM clear", passed, failed, test_make_data_frame_no_end)
-    run_test("make_data_frame: END_STREAM set", passed, failed, test_make_data_frame_end_stream)
-    run_test("make_data_frame: empty payload valid", passed, failed, test_data_frame_empty_payload)
-    run_test("get_hpack_block: no PRIORITY flag → full payload", passed, failed, test_get_hpack_block_no_priority)
-    run_test("get_hpack_block: PRIORITY flag → skip 5 bytes", passed, failed, test_get_hpack_block_with_priority)
-    run_test("encode_request_headers: 4 pseudo-headers decode correctly", passed, failed, test_encode_request_headers_basic)
-    run_test("encode_request_headers: extra headers included", passed, failed, test_encode_request_headers_extra)
-    run_test("encode_response_headers: :status=200", passed, failed, test_encode_response_headers_200)
-    run_test("encode_response_headers: :status=404", passed, failed, test_encode_response_headers_404)
-    run_test("request headers roundtrip via HPACK decode", passed, failed, test_headers_roundtrip)
-    run_test("data frame roundtrip: encode → decode → payload matches", passed, failed, test_data_roundtrip)
+    run_test[test_make_headers_frame_end_headers]("make_headers_frame: END_HEADERS flag set", passed, failed)
+    run_test[test_make_headers_frame_end_stream]("make_headers_frame: END_STREAM + END_HEADERS", passed, failed)
+    run_test[test_make_continuation_frame]("make_continuation_frame: END_HEADERS flag", passed, failed)
+    run_test[test_make_data_frame_no_end]("make_data_frame: payload + END_STREAM clear", passed, failed)
+    run_test[test_make_data_frame_end_stream]("make_data_frame: END_STREAM set", passed, failed)
+    run_test[test_data_frame_empty_payload]("make_data_frame: empty payload valid", passed, failed)
+    run_test[test_get_hpack_block_no_priority]("get_hpack_block: no PRIORITY flag → full payload", passed, failed)
+    run_test[test_get_hpack_block_with_priority]("get_hpack_block: PRIORITY flag → skip 5 bytes", passed, failed)
+    run_test[test_encode_request_headers_basic]("encode_request_headers: 4 pseudo-headers decode correctly", passed, failed)
+    run_test[test_encode_request_headers_extra]("encode_request_headers: extra headers included", passed, failed)
+    run_test[test_encode_response_headers_200]("encode_response_headers: :status=200", passed, failed)
+    run_test[test_encode_response_headers_404]("encode_response_headers: :status=404", passed, failed)
+    run_test[test_headers_roundtrip]("request headers roundtrip via HPACK decode", passed, failed)
+    run_test[test_data_roundtrip]("data frame roundtrip: encode → decode → payload matches", passed, failed)
 
     print()
     print("── 15C-4: RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY ──")
-    run_test("rst_stream encode: 4-byte error code", passed, failed, test_rst_stream_encode)
-    run_test("rst_stream decode: error code correct", passed, failed, test_rst_stream_decode)
-    run_test("rst_stream roundtrip: encode then parse", passed, failed, test_rst_stream_roundtrip)
-    run_test("window_update encode: stream-level increment", passed, failed, test_window_update_encode_stream)
-    run_test("window_update encode: connection-level (stream_id=0)", passed, failed, test_window_update_encode_connection)
-    run_test("window_update decode: increment correct", passed, failed, test_window_update_decode)
-    run_test("window_update: increment=0 → raises", passed, failed, test_window_update_zero_increment)
-    run_test("window_update: increment > 2^31-1 → raises", passed, failed, test_window_update_overflow)
-    run_test("goaway: no debug data", passed, failed, test_goaway_no_debug)
-    run_test("goaway: with debug data", passed, failed, test_goaway_with_debug)
-    run_test("goaway roundtrip: encode then parse", passed, failed, test_goaway_roundtrip)
-    run_test("priority frame: exclusive bit set", passed, failed, test_priority_frame_exclusive)
-    run_test("priority frame: exclusive bit clear", passed, failed, test_priority_frame_non_exclusive)
-    run_test("priority roundtrip: encode then parse", passed, failed, test_priority_roundtrip)
+    run_test[test_rst_stream_encode]("rst_stream encode: 4-byte error code", passed, failed)
+    run_test[test_rst_stream_decode]("rst_stream decode: error code correct", passed, failed)
+    run_test[test_rst_stream_roundtrip]("rst_stream roundtrip: encode then parse", passed, failed)
+    run_test[test_window_update_encode_stream]("window_update encode: stream-level increment", passed, failed)
+    run_test[test_window_update_encode_connection]("window_update encode: connection-level (stream_id=0)", passed, failed)
+    run_test[test_window_update_decode]("window_update decode: increment correct", passed, failed)
+    run_test[test_window_update_zero_increment]("window_update: increment=0 → raises", passed, failed)
+    run_test[test_window_update_overflow]("window_update: increment > 2^31-1 → raises", passed, failed)
+    run_test[test_goaway_no_debug]("goaway: no debug data", passed, failed)
+    run_test[test_goaway_with_debug]("goaway: with debug data", passed, failed)
+    run_test[test_goaway_roundtrip]("goaway roundtrip: encode then parse", passed, failed)
+    run_test[test_priority_frame_exclusive]("priority frame: exclusive bit set", passed, failed)
+    run_test[test_priority_frame_non_exclusive]("priority frame: exclusive bit clear", passed, failed)
+    run_test[test_priority_roundtrip]("priority roundtrip: encode then parse", passed, failed)
 
     print()
     print("── 15C-5: Connection preface + multi-frame stream ──")
-    run_test("client_preface_bytes: 24 bytes, correct content", passed, failed, test_client_preface_bytes)
-    run_test("read_frames: single frame in buffer", passed, failed, test_read_frames_single)
-    run_test("read_frames: 3 concatenated frames", passed, failed, test_read_frames_multiple)
-    run_test("read_frames: empty buffer → 0 frames", passed, failed, test_read_frames_empty)
-    run_test("read_frames: partial header → raises", passed, failed, test_read_frames_truncated)
-    run_test("read_frames: partial payload → raises", passed, failed, test_read_frames_truncated_payload)
-    run_test("write_frames: single frame encodes correctly", passed, failed, test_write_frames_single)
-    run_test("write_frames: 3 frames concatenated", passed, failed, test_write_frames_multiple)
-    run_test("roundtrip: write_frames then read_frames", passed, failed, test_roundtrip_stream)
-    run_test("initial_settings: type=SETTINGS, stream_id=0", passed, failed, test_initial_settings)
+    run_test[test_client_preface_bytes]("client_preface_bytes: 24 bytes, correct content", passed, failed)
+    run_test[test_read_frames_single]("read_frames: single frame in buffer", passed, failed)
+    run_test[test_read_frames_multiple]("read_frames: 3 concatenated frames", passed, failed)
+    run_test[test_read_frames_empty]("read_frames: empty buffer → 0 frames", passed, failed)
+    run_test[test_read_frames_truncated]("read_frames: partial header → raises", passed, failed)
+    run_test[test_read_frames_truncated_payload]("read_frames: partial payload → raises", passed, failed)
+    run_test[test_write_frames_single]("write_frames: single frame encodes correctly", passed, failed)
+    run_test[test_write_frames_multiple]("write_frames: 3 frames concatenated", passed, failed)
+    run_test[test_roundtrip_stream]("roundtrip: write_frames then read_frames", passed, failed)
+    run_test[test_initial_settings]("initial_settings: type=SETTINGS, stream_id=0", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

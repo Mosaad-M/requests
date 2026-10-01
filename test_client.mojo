@@ -39,8 +39,8 @@ def assert_not_contains(haystack: String, needle: String, label: String) raises:
     """Check that haystack does NOT contain needle."""
     var h_bytes = haystack.as_bytes()
     var n_bytes = needle.as_bytes()
-    var n_len = len(needle)
-    var h_len = len(haystack)
+    var n_len = needle.byte_length()
+    var h_len = haystack.byte_length()
     if n_len > h_len:
         return  # needle longer than haystack, impossible to contain
     for i in range(h_len - n_len + 1):
@@ -57,8 +57,8 @@ def assert_contains(haystack: String, needle: String, label: String) raises:
     """Check that haystack contains needle."""
     var h_bytes = haystack.as_bytes()
     var n_bytes = needle.as_bytes()
-    var n_len = len(needle)
-    var h_len = len(haystack)
+    var n_len = needle.byte_length()
+    var h_len = haystack.byte_length()
     if n_len > h_len:
         raise Error(label + ": '" + needle + "' not found in response")
     for i in range(h_len - n_len + 1):
@@ -76,7 +76,7 @@ def assert_contains(haystack: String, needle: String, label: String) raises:
 # Tests — all use localhost:18080 test server
 # ============================================================================
 
-alias BASE = "http://127.0.0.1:18080"
+comptime BASE = "http://127.0.0.1:18080"
 
 
 def test_get_root() raises:
@@ -145,7 +145,7 @@ def test_large_response() raises:
     var client = HttpClient(allow_private_ips=True)
     var resp = client.get(BASE + "/large")
     assert_eq(resp.status_code, 200, "status_code")
-    assert_eq(len(resp.body), 100000, "body length")
+    assert_eq(resp.body.byte_length(), 100000, "body length")
 
 
 def test_query_string() raises:
@@ -575,7 +575,7 @@ def test_stream_status_headers() raises:
     var stream = client.get_stream(BASE + "/stream/medium")
     assert_eq(stream.status_code, 200, "stream status_code")
     assert_true(stream.ok, "stream ok")
-    assert_true(len(stream.headers.get("Content-Type")) > 0, "Content-Type present")
+    assert_true(stream.headers.get("Content-Type").byte_length() > 0, "Content-Type present")
     stream.close()
 
 
@@ -584,7 +584,7 @@ def test_stream_read_all() raises:
     var client = HttpClient(allow_private_ips=True)
     var stream = client.get_stream(BASE + "/stream/medium")
     var body = stream.read_all()
-    assert_eq(len(body), 256 * 1024, "body length matches 256KB")
+    assert_eq(body.byte_length(), 256 * 1024, "body length matches 256KB")
 
 
 def test_stream_read_chunks() raises:
@@ -628,7 +628,7 @@ def test_pool_connection_close_cleared() raises:
     # /large returns Connection: close — pool must clear slot and reconnect
     var resp1 = client.get(BASE + "/large")
     assert_eq(resp1.status_code, 200, "large status")
-    assert_true(len(resp1.body) == 100000, "large body length")
+    assert_true(resp1.body.byte_length() == 100000, "large body length")
     # Next request must reconnect successfully
     var resp2 = client.get(BASE + "/status/200")
     assert_eq(resp2.status_code, 200, "after close status")
@@ -1095,7 +1095,7 @@ def test_multipart_content_type() raises:
 # HTTPS Tests — use jsonplaceholder.typicode.com (no local server needed)
 # ============================================================================
 
-alias HTTPS_BASE = "https://jsonplaceholder.typicode.com"
+comptime HTTPS_BASE = "https://jsonplaceholder.typicode.com"
 
 
 def test_https_get() raises:
@@ -1113,7 +1113,7 @@ def test_https_large() raises:
     var client = HttpClient()
     var resp = client.get(HTTPS_BASE + "/posts")
     assert_eq(resp.status_code, 200, "status_code")
-    assert_true(len(resp.body) > 1000, "body length > 1000")
+    assert_true(resp.body.byte_length() > 1000, "body length > 1000")
 
 
 def test_https_custom_headers() raises:
@@ -1134,7 +1134,7 @@ def test_https_json_parse() raises:
     var data = resp.json()
     assert_eq(data["userId"].as_int(), 1, "userId")
     assert_eq(data["id"].as_int(), 1, "id")
-    assert_true(len(data["title"].as_string()) > 0, "title non-empty")
+    assert_true(data["title"].as_string().byte_length() > 0, "title non-empty")
 
 
 # ============================================================================
@@ -1306,7 +1306,7 @@ def test_redirect_same_host_only() raises:
 # Phase 13 Tests — HTTP CONNECT Proxy
 # ============================================================================
 
-alias PROXY_URL = "http://127.0.0.1:18081"
+comptime PROXY_URL = "http://127.0.0.1:18081"
 
 
 def test_proxy_http_get() raises:
@@ -1361,7 +1361,7 @@ def test_streaming_gzip_large() raises:
     var resp = client.get(BASE + "/gzip-large")
     assert_eq(resp.status_code, 200, "status_code")
     # Body is 50,000 bytes of semi-random printable ASCII
-    assert_eq(len(resp.body), 50000, "decompressed body length")
+    assert_eq(resp.body.byte_length(), 50000, "decompressed body length")
 
 
 def test_streaming_gzip_existing() raises:
@@ -1401,12 +1401,7 @@ def main() raises:
     var passed = 0
     var failed = 0
 
-    def run_test(
-        name: String,
-        mut passed: Int,
-        mut failed: Int,
-        test_fn: def () raises -> None,
-    ):
+    def run_test[test_fn: def () thin raises -> None](name: String, mut passed: Int, mut failed: Int):
         try:
             test_fn()
             print("  PASS:", name)
@@ -1419,225 +1414,165 @@ def main() raises:
     print("(Requires test_server.py on localhost:18080)")
     print()
 
-    run_test("GET /", passed, failed, test_get_root)
-    run_test("status 200", passed, failed, test_status_200)
-    run_test("status 404", passed, failed, test_status_404)
-    run_test("status 500", passed, failed, test_status_500)
-    run_test("response headers", passed, failed, test_response_headers)
-    run_test("custom headers", passed, failed, test_custom_headers)
-    run_test("user-agent", passed, failed, test_user_agent)
-    run_test("large response (100KB)", passed, failed, test_large_response)
-    run_test("query string", passed, failed, test_query_string)
-    run_test(
-        "case-insensitive headers",
-        passed,
-        failed,
-        test_case_insensitive_headers,
-    )
-    run_test("chunked response", passed, failed, test_chunked_response)
+    run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_status_200]("status 200", passed, failed)
+    run_test[test_status_404]("status 404", passed, failed)
+    run_test[test_status_500]("status 500", passed, failed)
+    run_test[test_response_headers]("response headers", passed, failed)
+    run_test[test_custom_headers]("custom headers", passed, failed)
+    run_test[test_user_agent]("user-agent", passed, failed)
+    run_test[test_large_response]("large response (100KB)", passed, failed)
+    run_test[test_query_string]("query string", passed, failed)
+    run_test[test_case_insensitive_headers]("case-insensitive headers", passed, failed)
+    run_test[test_chunked_response]("chunked response", passed, failed)
 
     # POST / PUT / DELETE / PATCH tests
-    run_test("POST JSON", passed, failed, test_post_json)
-    run_test("POST custom Content-Type", passed, failed, test_post_custom_content_type)
-    run_test("PUT JSON", passed, failed, test_put_json)
-    run_test("DELETE no body", passed, failed, test_delete_no_body)
-    run_test("DELETE with body", passed, failed, test_delete_with_body)
-    run_test("PATCH JSON", passed, failed, test_patch_json)
-    run_test("POST empty body", passed, failed, test_post_empty_body)
-    run_test("POST custom headers", passed, failed, test_post_custom_headers)
+    run_test[test_post_json]("POST JSON", passed, failed)
+    run_test[test_post_custom_content_type]("POST custom Content-Type", passed, failed)
+    run_test[test_put_json]("PUT JSON", passed, failed)
+    run_test[test_delete_no_body]("DELETE no body", passed, failed)
+    run_test[test_delete_with_body]("DELETE with body", passed, failed)
+    run_test[test_patch_json]("PATCH JSON", passed, failed)
+    run_test[test_post_empty_body]("POST empty body", passed, failed)
+    run_test[test_post_custom_headers]("POST custom headers", passed, failed)
 
     # Security validation tests
-    run_test(
-        "CRLF header value rejected",
-        passed,
-        failed,
-        test_crlf_header_value_rejected,
-    )
-    run_test(
-        "CRLF header key rejected",
-        passed,
-        failed,
-        test_crlf_header_key_rejected,
-    )
-    run_test(
-        "header key with colon rejected",
-        passed,
-        failed,
-        test_header_key_with_colon_rejected,
-    )
-    run_test(
-        "SSRF private IP blocked",
-        passed,
-        failed,
-        test_ssrf_private_ip_blocked,
-    )
-    run_test(
-        "SSRF default blocks private IP",
-        passed,
-        failed,
-        test_ssrf_default_blocks_private_ip,
-    )
-    run_test(
-        "SSRF allow_private_ips opt-in",
-        passed,
-        failed,
-        test_ssrf_allow_private_ips_opt_in,
-    )
+    run_test[test_crlf_header_value_rejected]("CRLF header value rejected", passed, failed)
+    run_test[test_crlf_header_key_rejected]("CRLF header key rejected", passed, failed)
+    run_test[test_header_key_with_colon_rejected]("header key with colon rejected", passed, failed)
+    run_test[test_ssrf_private_ip_blocked]("SSRF private IP blocked", passed, failed)
+    run_test[test_ssrf_default_blocks_private_ip]("SSRF default blocks private IP", passed, failed)
+    run_test[test_ssrf_allow_private_ips_opt_in]("SSRF allow_private_ips opt-in", passed, failed)
 
     # Compression tests
-    run_test("Accept-Encoding sent", passed, failed, test_accept_encoding_sent)
-    run_test("gzip response decoded", passed, failed, test_gzip_response_decoded)
-    run_test("deflate response decoded", passed, failed, test_deflate_response_decoded)
-    run_test("identity encoding unchanged", passed, failed, test_identity_encoding_unchanged)
+    run_test[test_accept_encoding_sent]("Accept-Encoding sent", passed, failed)
+    run_test[test_gzip_response_decoded]("gzip response decoded", passed, failed)
+    run_test[test_deflate_response_decoded]("deflate response decoded", passed, failed)
+    run_test[test_identity_encoding_unchanged]("identity encoding unchanged", passed, failed)
 
     # Cookie tests
-    run_test("Set-Cookie stored", passed, failed, test_set_cookie_stored)
-    run_test("cookie sent on next request", passed, failed, test_cookie_sent_on_next_request)
-    run_test("cookies param", passed, failed, test_cookies_param)
-    run_test("cookie Max-Age positive", passed, failed, test_cookie_max_age_positive)
-    run_test("cookie Max-Age=0 deletes", passed, failed, test_cookie_max_age_zero_deletes)
-    run_test("cookie session persists", passed, failed, test_cookie_session_persists)
+    run_test[test_set_cookie_stored]("Set-Cookie stored", passed, failed)
+    run_test[test_cookie_sent_on_next_request]("cookie sent on next request", passed, failed)
+    run_test[test_cookies_param]("cookies param", passed, failed)
+    run_test[test_cookie_max_age_positive]("cookie Max-Age positive", passed, failed)
+    run_test[test_cookie_max_age_zero_deletes]("cookie Max-Age=0 deletes", passed, failed)
+    run_test[test_cookie_session_persists]("cookie session persists", passed, failed)
 
     # Cookie attribute tests
-    run_test("cookie path match", passed, failed, test_cookie_path_match)
-    run_test("cookie path no match", passed, failed, test_cookie_path_no_match)
-    run_test("cookie secure not sent HTTP", passed, failed, test_cookie_secure_not_sent_http)
-    run_test("cookie domain exact", passed, failed, test_cookie_domain_exact)
+    run_test[test_cookie_path_match]("cookie path match", passed, failed)
+    run_test[test_cookie_path_no_match]("cookie path no match", passed, failed)
+    run_test[test_cookie_secure_not_sent_http]("cookie secure not sent HTTP", passed, failed)
+    run_test[test_cookie_domain_exact]("cookie domain exact", passed, failed)
 
     # Streaming tests
-    run_test("stream status+headers", passed, failed, test_stream_status_headers)
-    run_test("stream read_all", passed, failed, test_stream_read_all)
-    run_test("stream read_chunks", passed, failed, test_stream_read_chunks)
-    run_test("stream partial+close", passed, failed, test_stream_partial_then_close)
+    run_test[test_stream_status_headers]("stream status+headers", passed, failed)
+    run_test[test_stream_read_all]("stream read_all", passed, failed)
+    run_test[test_stream_read_chunks]("stream read_chunks", passed, failed)
+    run_test[test_stream_partial_then_close]("stream partial+close", passed, failed)
 
     # Connection pool tests
-    run_test("pool keepalive reuse", passed, failed, test_pool_reuse_keepalive)
-    run_test("pool connection-close cleared", passed, failed, test_pool_connection_close_cleared)
-    run_test("pool four slots no corruption", passed, failed, test_pool_four_slots_no_corruption)
+    run_test[test_pool_reuse_keepalive]("pool keepalive reuse", passed, failed)
+    run_test[test_pool_connection_close_cleared]("pool connection-close cleared", passed, failed)
+    run_test[test_pool_four_slots_no_corruption]("pool four slots no corruption", passed, failed)
 
     # Redirect tests
-    run_test("redirect 301 followed", passed, failed, test_redirect_301_followed)
-    run_test("redirect 302 followed", passed, failed, test_redirect_302_followed)
-    run_test("redirect 303 followed", passed, failed, test_redirect_303_followed)
-    run_test("redirect 307 preserves method", passed, failed, test_redirect_307_preserves_method)
-    run_test("redirect no follow", passed, failed, test_redirect_no_follow)
-    run_test("redirect max exceeded", passed, failed, test_redirect_max_exceeded)
-    run_test("redirect response url", passed, failed, test_redirect_response_url)
+    run_test[test_redirect_301_followed]("redirect 301 followed", passed, failed)
+    run_test[test_redirect_302_followed]("redirect 302 followed", passed, failed)
+    run_test[test_redirect_303_followed]("redirect 303 followed", passed, failed)
+    run_test[test_redirect_307_preserves_method]("redirect 307 preserves method", passed, failed)
+    run_test[test_redirect_no_follow]("redirect no follow", passed, failed)
+    run_test[test_redirect_max_exceeded]("redirect max exceeded", passed, failed)
+    run_test[test_redirect_response_url]("redirect response url", passed, failed)
 
     # Auth helper tests
-    run_test("BasicAuth header", passed, failed, test_basic_auth_header)
-    run_test("BearerAuth header", passed, failed, test_bearer_auth_header)
-    run_test("BasicAuth applied to request", passed, failed, test_basic_auth_applied_to_request)
-    run_test("BearerAuth applied to request", passed, failed, test_bearer_auth_applied_to_request)
+    run_test[test_basic_auth_header]("BasicAuth header", passed, failed)
+    run_test[test_bearer_auth_header]("BearerAuth header", passed, failed)
+    run_test[test_basic_auth_applied_to_request]("BasicAuth applied to request", passed, failed)
+    run_test[test_bearer_auth_applied_to_request]("BearerAuth applied to request", passed, failed)
 
     # data= form encoding tests
-    run_test("data form encoded", passed, failed, test_data_form_encoded)
-    run_test("data special chars", passed, failed, test_data_special_chars)
-    run_test("data multiple fields", passed, failed, test_data_multiple_fields)
+    run_test[test_data_form_encoded]("data form encoded", passed, failed)
+    run_test[test_data_special_chars]("data special chars", passed, failed)
+    run_test[test_data_multiple_fields]("data multiple fields", passed, failed)
 
     # params= query string tests
-    run_test("params simple", passed, failed, test_params_simple)
-    run_test("params special chars", passed, failed, test_params_special_chars)
-    run_test("params multiple", passed, failed, test_params_multiple)
-    run_test("params empty dict", passed, failed, test_params_empty_dict)
-    run_test("params merges with url query", passed, failed, test_params_merges_with_url_query)
+    run_test[test_params_simple]("params simple", passed, failed)
+    run_test[test_params_special_chars]("params special chars", passed, failed)
+    run_test[test_params_multiple]("params multiple", passed, failed)
+    run_test[test_params_empty_dict]("params empty dict", passed, failed)
+    run_test[test_params_merges_with_url_query]("params merges with url query", passed, failed)
 
     # Timeout tests
-    run_test("timeout default works", passed, failed, test_timeout_default_works)
-    run_test("timeout custom works", passed, failed, test_timeout_custom_works)
-    run_test("timeout zero raises", passed, failed, test_timeout_zero_raises)
+    run_test[test_timeout_default_works]("timeout default works", passed, failed)
+    run_test[test_timeout_custom_works]("timeout custom works", passed, failed)
+    run_test[test_timeout_zero_raises]("timeout zero raises", passed, failed)
 
     # HEAD / OPTIONS tests
-    run_test("HEAD no body", passed, failed, test_head_returns_no_body)
-    run_test("HEAD has headers", passed, failed, test_head_has_headers)
-    run_test("OPTIONS Allow header", passed, failed, test_options_returns_allow_header)
+    run_test[test_head_returns_no_body]("HEAD no body", passed, failed)
+    run_test[test_head_has_headers]("HEAD has headers", passed, failed)
+    run_test[test_options_returns_allow_header]("OPTIONS Allow header", passed, failed)
 
     # Error prefix tests
-    run_test("error HTTPError prefix", passed, failed, test_error_http_prefix)
-    run_test("error TooManyRedirects prefix", passed, failed, test_error_redirect_prefix)
-    run_test("error ValidationError prefix", passed, failed, test_error_validation_prefix)
+    run_test[test_error_http_prefix]("error HTTPError prefix", passed, failed)
+    run_test[test_error_redirect_prefix]("error TooManyRedirects prefix", passed, failed)
+    run_test[test_error_validation_prefix]("error ValidationError prefix", passed, failed)
 
     # Session tests
-    run_test("session default headers", passed, failed, test_session_default_headers)
-    run_test("session BasicAuth", passed, failed, test_session_auth_basic)
-    run_test("session caller override", passed, failed, test_session_caller_override)
+    run_test[test_session_default_headers]("session default headers", passed, failed)
+    run_test[test_session_auth_basic]("session BasicAuth", passed, failed)
+    run_test[test_session_caller_override]("session caller override", passed, failed)
 
     # SameSite cookie tests
-    run_test("cookie SameSite stored", passed, failed, test_cookie_samesite_stored)
-    run_test("cookie SameSite=None not sent HTTP", passed, failed, test_cookie_samesite_none_http)
-    run_test("cookie TLD domain rejected", passed, failed, test_supercookie_tld_rejected)
-    run_test("cookie HttpOnly stored", passed, failed, test_httponly_flag_stored)
-    run_test("cookie SameSite normalization", passed, failed, test_samesite_normalization)
+    run_test[test_cookie_samesite_stored]("cookie SameSite stored", passed, failed)
+    run_test[test_cookie_samesite_none_http]("cookie SameSite=None not sent HTTP", passed, failed)
+    run_test[test_supercookie_tld_rejected]("cookie TLD domain rejected", passed, failed)
+    run_test[test_httponly_flag_stored]("cookie HttpOnly stored", passed, failed)
+    run_test[test_samesite_normalization]("cookie SameSite normalization", passed, failed)
 
     # Brotli tests
-    run_test("brotli decompression", passed, failed, test_brotli_decompression)
-    run_test("Accept-Encoding includes br", passed, failed, test_accept_encoding_br)
+    run_test[test_brotli_decompression]("brotli decompression", passed, failed)
+    run_test[test_accept_encoding_br]("Accept-Encoding includes br", passed, failed)
 
     # Multipart tests
-    run_test("multipart POST fields", passed, failed, test_multipart_post)
-    run_test("multipart Content-Type", passed, failed, test_multipart_content_type)
+    run_test[test_multipart_post]("multipart POST fields", passed, failed)
+    run_test[test_multipart_content_type]("multipart Content-Type", passed, failed)
 
     # raise_for_status() tests
-    run_test(
-        "raise_for_status 200 ok",
-        passed,
-        failed,
-        test_raise_for_status_200_ok,
-    )
-    run_test(
-        "raise_for_status 201 ok",
-        passed,
-        failed,
-        test_raise_for_status_201_ok,
-    )
-    run_test(
-        "raise_for_status 404 raises",
-        passed,
-        failed,
-        test_raise_for_status_404_raises,
-    )
-    run_test(
-        "raise_for_status 500 raises",
-        passed,
-        failed,
-        test_raise_for_status_500_raises,
-    )
+    run_test[test_raise_for_status_200_ok]("raise_for_status 200 ok", passed, failed)
+    run_test[test_raise_for_status_201_ok]("raise_for_status 201 ok", passed, failed)
+    run_test[test_raise_for_status_404_raises]("raise_for_status 404 raises", passed, failed)
+    run_test[test_raise_for_status_500_raises]("raise_for_status 500 raises", passed, failed)
 
     # Phase 10 tests
-    run_test("max_redirects configurable", passed, failed, test_max_redirects_configurable)
-    run_test("max_redirects=0 raises", passed, failed, test_max_redirects_zero_raises)
-    run_test("sanitized_url strips query", passed, failed, test_sanitized_url_strips_query)
-    run_test("sanitized_url no query unchanged", passed, failed, test_sanitized_url_no_query_unchanged)
-    run_test("redirect to private IP blocked", passed, failed, test_redirect_private_ip_blocked)
+    run_test[test_max_redirects_configurable]("max_redirects configurable", passed, failed)
+    run_test[test_max_redirects_zero_raises]("max_redirects=0 raises", passed, failed)
+    run_test[test_sanitized_url_strips_query]("sanitized_url strips query", passed, failed)
+    run_test[test_sanitized_url_no_query_unchanged]("sanitized_url no query unchanged", passed, failed)
+    run_test[test_redirect_private_ip_blocked]("redirect to private IP blocked", passed, failed)
 
     # Security hardening tests (Phase 9)
-    run_test(
-        "Content-Length over limit raises",
-        passed,
-        failed,
-        test_content_length_over_limit,
-    )
+    run_test[test_content_length_over_limit]("Content-Length over limit raises", passed, failed)
 
     # Phase 11 tests
-    run_test("cookie PSL co.uk rejected", passed, failed, test_cookie_psl_co_uk_rejected)
-    run_test("cookie PSL github.io rejected", passed, failed, test_cookie_psl_github_io_rejected)
-    run_test("cookie PSL example.co.uk accepted", passed, failed, test_cookie_psl_example_co_uk_accepted)
-    run_test("follow_redirects=False", passed, failed, test_follow_redirects_disabled)
-    run_test("redirect same host only", passed, failed, test_redirect_same_host_only)
+    run_test[test_cookie_psl_co_uk_rejected]("cookie PSL co.uk rejected", passed, failed)
+    run_test[test_cookie_psl_github_io_rejected]("cookie PSL github.io rejected", passed, failed)
+    run_test[test_cookie_psl_example_co_uk_accepted]("cookie PSL example.co.uk accepted", passed, failed)
+    run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)
+    run_test[test_redirect_same_host_only]("redirect same host only", passed, failed)
 
     # Phase 13 tests
-    run_test("proxy HTTP GET", passed, failed, test_proxy_http_get)
-    run_test("proxy HTTP POST", passed, failed, test_proxy_http_post)
-    run_test("no proxy when unset", passed, failed, test_no_proxy_when_unset)
-    run_test("proxy env var auto-detect", passed, failed, test_proxy_env_var)
+    run_test[test_proxy_http_get]("proxy HTTP GET", passed, failed)
+    run_test[test_proxy_http_post]("proxy HTTP POST", passed, failed)
+    run_test[test_no_proxy_when_unset]("no proxy when unset", passed, failed)
+    run_test[test_proxy_env_var]("proxy env var auto-detect", passed, failed)
 
     # Phase 14 tests
-    run_test("streaming gzip large", passed, failed, test_streaming_gzip_large)
-    run_test("streaming gzip existing still works", passed, failed, test_streaming_gzip_existing)
+    run_test[test_streaming_gzip_large]("streaming gzip large", passed, failed)
+    run_test[test_streaming_gzip_existing]("streaming gzip existing still works", passed, failed)
 
     # Phase 12 tests
-    run_test("zstd decompression", passed, failed, test_zstd_decompression)
-    run_test("Accept-Encoding includes zstd", passed, failed, test_accept_encoding_zstd)
+    run_test[test_zstd_decompression]("zstd decompression", passed, failed)
+    run_test[test_accept_encoding_zstd]("Accept-Encoding includes zstd", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
@@ -1661,25 +1596,10 @@ def main() raises:
     print("(Using jsonplaceholder.typicode.com)")
     print()
 
-    run_test("HTTPS GET /posts/1", https_passed, https_failed, test_https_get)
-    run_test(
-        "HTTPS GET /posts (large)",
-        https_passed,
-        https_failed,
-        test_https_large,
-    )
-    run_test(
-        "HTTPS custom headers",
-        https_passed,
-        https_failed,
-        test_https_custom_headers,
-    )
-    run_test(
-        "HTTPS JSON parse",
-        https_passed,
-        https_failed,
-        test_https_json_parse,
-    )
+    run_test[test_https_get]("HTTPS GET /posts/1", https_passed, https_failed)
+    run_test[test_https_large]("HTTPS GET /posts (large)", https_passed, https_failed)
+    run_test[test_https_custom_headers]("HTTPS custom headers", https_passed, https_failed)
+    run_test[test_https_json_parse]("HTTPS JSON parse", https_passed, https_failed)
 
     print()
     print("Results:", https_passed, "passed,", https_failed, "failed")
