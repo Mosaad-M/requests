@@ -42,7 +42,7 @@ print(doc.get_string("name"))
 - [tls](https://github.com/Mosaad-M/tls) — Pure Mojo TLS 1.3 + 1.2
 - [tcp](https://github.com/Mosaad-M/tcp) — TCP socket layer
 - [url](https://github.com/Mosaad-M/url) — URL parser
-- [json](https://github.com/Mosaad-M/json) — JSON parser (>= 3.0.0)
+- [json](https://github.com/Mosaad-M/json) — JSON parser (>= 3.0.1)
 
 ## Requirements
 

@@ -12,4 +12,4 @@ requires = ">=1.0.0"
 tls  = { git = "Mosaad-M/tls",      version = ">=1.4.0" }
 tcp  = { git = "Mosaad-M/tcp",      version = ">=1.1.0" }
 url  = { git = "Mosaad-M/url",      version = ">=1.1.0" }
-json = { git = "Mosaad-M/json",     version = ">=3.0.0" }
+json = { git = "Mosaad-M/json",     version = ">=3.0.1" }
