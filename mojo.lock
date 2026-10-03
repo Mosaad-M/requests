@@ -24,10 +24,10 @@
     },
     {
       "name": "json",
-      "version": "1.1.0",
-      "source_url": "https://github.com/Mosaad-M/json/archive/refs/tags/v1.1.0.tar.gz",
-      "sha256": "b0db95fea72f05051af41fe5ee8f8da0838e86fa77dc2cc86d2da46ec95a3ae3",
-      "install_path": "/Users/myronmosaad/.mojo/packages/json/1.1.0"
+      "version": "3.0.1",
+      "source_url": "https://github.com/Mosaad-M/json/archive/refs/tags/v3.0.1.tar.gz",
+      "sha256": "e5c215633a2b0ac53d608aeaa5b48e279b7e1c1cb0d19e6eb397de5754666594",
+      "install_path": "/Users/myronmosaad/.mojo/packages/json/3.0.1"
     }
   ]
 }

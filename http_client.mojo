@@ -24,7 +24,7 @@ from hpack import HpackHeader
 from crypto.cert import X509Cert
 from crypto.base64 import base64_encode
 from url import Url, parse_url
-from json import JsonValue, parse_json
+from json import JsonDoc, JsonValue, parse_json
 from zlib_decompress import zlib_decompress, zlib_decompress_ptr
 from brotli_decompress import brotli_decompress, brotli_decompress_ptr
 from zstd_decompress import zstd_decompress, zstd_decompress_ptr
@@ -309,7 +309,18 @@ struct HttpResponse(Copyable, Movable, Deinitable):
         """Parse response body as JSON.
 
         Returns:
-            JsonValue tree parsed from body.
+            Mutable JsonValue tree parsed from body.
+
+        Raises:
+            Error if body is not valid JSON.
+        """
+        return parse_json(self.body).to_value()
+
+    def json_doc(self) raises -> JsonDoc:
+        """Parse response body as a read-only JsonDoc (json >= 3.0).
+
+        Faster and far more compact than json() for reading: lookups
+        return views into the document instead of copies.
 
         Raises:
             Error if body is not valid JSON.

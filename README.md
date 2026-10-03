@@ -30,6 +30,11 @@ var resp2 = client.post(
     body='{"name": "test"}',
     headers='Content-Type: application/json\r\n'
 )
+
+# Parse a JSON response
+var data = resp.json()        # mutable JsonValue tree
+var doc = resp.json_doc()     # read-only JsonDoc: faster, compact, lookups are views
+print(doc.get_string("name"))
 ```
 
 ## Dependencies
@@ -37,7 +42,7 @@ var resp2 = client.post(
 - [tls](https://github.com/Mosaad-M/tls) — Pure Mojo TLS 1.3 + 1.2
 - [tcp](https://github.com/Mosaad-M/tcp) — TCP socket layer
 - [url](https://github.com/Mosaad-M/url) — URL parser
-- [json](https://github.com/Mosaad-M/json) — JSON parser
+- [json](https://github.com/Mosaad-M/json) — JSON parser (>= 3.0.1)
 
 ## Requirements
 

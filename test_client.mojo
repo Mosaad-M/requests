@@ -177,6 +177,16 @@ def test_chunked_response() raises:
     assert_eq(data["count"].as_int(), 42, "count")
 
 
+def test_json_doc() raises:
+    """json_doc() returns a read-only JsonDoc with the same content as json()."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/chunked")
+    var doc = resp.json_doc()
+    assert_str_eq(doc.get_string("message"), "chunked response", "message")
+    assert_eq(doc["count"].as_int(), 42, "count (view)")
+    assert_str_eq(String(doc), String(resp.json()), "same content as json()")
+
+
 # ============================================================================
 # POST / PUT / DELETE / PATCH Tests
 # ============================================================================
@@ -1425,6 +1435,7 @@ def main() raises:
     run_test[test_query_string]("query string", passed, failed)
     run_test[test_case_insensitive_headers]("case-insensitive headers", passed, failed)
     run_test[test_chunked_response]("chunked response", passed, failed)
+    run_test[test_json_doc]("json_doc() read-only document", passed, failed)
 
     # POST / PUT / DELETE / PATCH tests
     run_test[test_post_json]("POST JSON", passed, failed)
