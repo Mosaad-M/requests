@@ -12,6 +12,7 @@ test-hpack = "bash build_and_run.sh test_hpack.mojo"
 test-h2 = "bash build_and_run.sh test_h2.mojo"
 test-h2-conn = "bash build_and_run.sh test_h2_conn.mojo"
 test-h2-client = "bash build_and_run.sh test_h2_client.mojo"
+test-std-compat = "bash build_and_run.sh test_std_compat.mojo"
 format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]

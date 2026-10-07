@@ -23,6 +23,7 @@ from h2_conn import Http2Conn, h2_preface_and_settings_exchange, h2_request as h
 from hpack import HpackHeader
 from crypto.cert import X509Cert
 from crypto.base64 import base64_encode
+from crypto.random import csprng_bytes
 from url import Url, parse_url
 from json import JsonDoc, JsonValue, parse_json
 from zlib_decompress import zlib_decompress, zlib_decompress_ptr
@@ -30,6 +31,7 @@ from brotli_decompress import brotli_decompress, brotli_decompress_ptr
 from zstd_decompress import zstd_decompress, zstd_decompress_ptr
 from psl import is_public_suffix
 from std.ffi import external_call
+from std.os import getenv
 from std.memory import alloc
 
 
@@ -40,26 +42,7 @@ from std.memory import alloc
 
 def _getenv(name: String) -> String:
     """Read an environment variable by name. Returns empty string if not set."""
-    var nb = name.as_bytes()
-    var nlen = len(nb)
-    var name_buf = alloc[Int8](nlen + 1)
-    for i in range(nlen):
-        (name_buf + i)[] = Int8(nb[i])
-    (name_buf + nlen)[] = Int8(0)
-    var val_ptr = external_call["getenv", Int](Int(name_buf))
-    name_buf.free()
-    if val_ptr == 0:
-        return String("")
-    var length = external_call["strlen", Int](val_ptr)
-    if length == 0:
-        return String("")
-    var out_buf = alloc[UInt8](length)
-    _ = external_call["memcpy", Int](Int(out_buf), val_ptr, length)
-    var out = List[UInt8](capacity=length)
-    for i in range(length):
-        out.append((out_buf + i)[])
-    out_buf.free()
-    return String(unsafe_from_utf8=out^)
+    return getenv(name)
 
 
 def _no_proxy_matches(host: String, no_proxy: String) -> Bool:
@@ -105,15 +88,21 @@ def _no_proxy_matches(host: String, no_proxy: String) -> Bool:
 
 
 def _unix_time_secs() -> Int64:
-    """Return current Unix time in seconds via clock_gettime(CLOCK_REALTIME)."""
-    # struct timespec { int64_t tv_sec; int64_t tv_nsec; }  (16 bytes on 64-bit)
-    var ts = alloc[UInt8](16)
-    for i in range(16):
-        (ts + i)[] = UInt8(0)
-    _ = external_call["clock_gettime", Int32](Int32(0), Int(ts))
-    var t = ts.bitcast[Int64]()[]
-    ts.free()
-    return t
+    """Current Unix time in seconds, from libc time(). Declared exactly as tls
+    declares it (one signature per C function per program); not
+    clock_gettime, which std declares with other types."""
+    return external_call["time", Int64](Int(0))
+
+
+def _hex(data: List[UInt8]) -> String:
+    """Lowercase hex encoding."""
+    comptime DIGITS = "0123456789abcdef"
+    var d = String(DIGITS).as_bytes()
+    var out = List[UInt8](capacity=2 * len(data))
+    for b in data:
+        out.append(d[Int(b >> 4)])
+        out.append(d[Int(b & 0x0F)])
+    return String(unsafe_from_utf8=out^)
 
 
 # ============================================================================
@@ -712,9 +701,9 @@ struct HttpClient(Movable):
         """POST multipart/form-data with string fields.
 
         Each field in `fields` is encoded as a form-data part. The boundary is
-        generated from the current Unix timestamp to ensure uniqueness.
+        random, so it cannot collide with field content.
         """
-        var boundary = "MojoHTTPBoundary" + String(_unix_time_secs())
+        var boundary = "MojoHTTPBoundary" + _hex(csprng_bytes(12))
         var buf = List[UInt8](capacity=512)
         for key in fields.keys():
             var value = fields[key]
