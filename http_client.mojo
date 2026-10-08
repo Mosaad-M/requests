@@ -26,9 +26,10 @@ from crypto.base64 import base64_encode
 from crypto.random import csprng_bytes
 from url import Url, parse_url
 from json import JsonDoc, JsonValue, parse_json
-from zlib_decompress import zlib_decompress, zlib_decompress_ptr
-from brotli_decompress import brotli_decompress, brotli_decompress_ptr
-from zstd_decompress import zstd_decompress, zstd_decompress_ptr
+from zlib_decompress import zlib_decompress, zlib_decompress_ptr, zlib_inflate
+from brotli_decompress import brotli_decompress, brotli_decompress_ptr, brotli_decode
+from zstd_decompress import zstd_decompress, zstd_decompress_ptr, zstd_decode
+from codecs import Codecs, missing_library
 from psl import is_public_suffix
 from std.ffi import external_call
 from std.os import getenv
@@ -408,6 +409,10 @@ struct HttpClient(Movable):
     var _ca_bundle: List[X509Cert]
     var _ca_loaded: Bool
 
+    # Decompression libraries — dlopen'ed once, on the first request
+    var _codecs: Codecs
+    var _codecs_loaded: Bool
+
     # HTTP connection pool — LRU-4
     # Metadata in List[String]/List[Int64] (CollectionElement); sockets as flat fields
     # _http_times[i] == 0 means slot unused; >0 == last-used Unix timestamp
@@ -465,6 +470,8 @@ struct HttpClient(Movable):
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
+        self._codecs = Codecs(zlib=False, brotli=False, zstd=False)
+        self._codecs_loaded = False
         # HTTP pool — 4 slots, all unused
         self._http_keys = List[String]()
         self._http_times = List[Int64]()
@@ -516,6 +523,8 @@ struct HttpClient(Movable):
         self._timeout_secs = move._timeout_secs
         self._ca_bundle = move._ca_bundle^
         self._ca_loaded = move._ca_loaded
+        self._codecs = move._codecs^
+        self._codecs_loaded = move._codecs_loaded
         self._http_keys = move._http_keys^
         self._http_times = move._http_times^
         self._http_sock0 = move._http_sock0^
@@ -789,6 +798,34 @@ struct HttpClient(Movable):
 
     # === Internal ===
 
+    def _accept_encoding(mut self) -> String:
+        """Accept-Encoding for the decoders this process could load. An absent
+        header would allow any coding (RFC 9110 §12.5.3): with no decoder at
+        all, ask for identity."""
+        if not self._codecs_loaded:
+            self._codecs = Codecs()
+            self._codecs_loaded = True
+        var ae = self._codecs.accept_encoding()
+        return ae if ae.byte_length() > 0 else String("identity")
+
+    def _decode_body(mut self, ce: String, addr: Int, n: Int) raises -> Optional[List[UInt8]]:
+        """Decompress a body with Content-Encoding `ce`; None if `ce` is not a
+        compression we handle (the body is then kept as is)."""
+        _ = self._accept_encoding()  # make sure the libraries were probed
+        if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip") or _eq_ignore_case(ce, "deflate"):
+            if not self._codecs.zlib:
+                raise missing_library("gzip" if not _eq_ignore_case(ce, "deflate") else "deflate")
+            return zlib_inflate(self._codecs.zlib.value(), addr, n, not _eq_ignore_case(ce, "deflate"))
+        if _eq_ignore_case(ce, "br"):
+            if not self._codecs.brotli:
+                raise missing_library("br")
+            return brotli_decode(self._codecs.brotli.value(), addr, n)
+        if _eq_ignore_case(ce, "zstd"):
+            if not self._codecs.zstd:
+                raise missing_library("zstd")
+            return zstd_decode(self._codecs.zstd.value(), addr, n)
+        return None
+
     def _follow_redirects(
         mut self,
         method: String,
@@ -903,7 +940,7 @@ struct HttpClient(Movable):
         if not extra_headers.has("Accept"):
             _append_str(req_buf, "Accept: */*\r\n")
         if not extra_headers.has("Accept-Encoding"):
-            _append_str(req_buf, "Accept-Encoding: gzip, deflate, br, zstd\r\n")
+            _append_str(req_buf, "Accept-Encoding: " + self._accept_encoding() + "\r\n")
         _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
@@ -1146,30 +1183,11 @@ struct HttpClient(Movable):
         # Phase 14: use _ptr variants — decompress directly from the body's
         # internal byte buffer without an intermediate List[UInt8] copy.
         var ce = parsed.headers.get("Content-Encoding")
-        if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip"):
+        if ce.byte_length() > 0:
             var body_bytes = parsed.body.as_bytes()
-            var decompressed = zlib_decompress_ptr(
-                Int(body_bytes.unsafe_ptr()), len(body_bytes), True
-            )
-            parsed.body = String(unsafe_from_utf8=decompressed^)
-        elif _eq_ignore_case(ce, "deflate"):
-            var body_bytes = parsed.body.as_bytes()
-            var decompressed = zlib_decompress_ptr(
-                Int(body_bytes.unsafe_ptr()), len(body_bytes), False
-            )
-            parsed.body = String(unsafe_from_utf8=decompressed^)
-        elif _eq_ignore_case(ce, "br"):
-            var body_bytes = parsed.body.as_bytes()
-            var decompressed = brotli_decompress_ptr(
-                Int(body_bytes.unsafe_ptr()), len(body_bytes)
-            )
-            parsed.body = String(unsafe_from_utf8=decompressed^)
-        elif _eq_ignore_case(ce, "zstd"):
-            var body_bytes = parsed.body.as_bytes()
-            var decompressed = zstd_decompress_ptr(
-                Int(body_bytes.unsafe_ptr()), len(body_bytes)
-            )
-            parsed.body = String(unsafe_from_utf8=decompressed^)
+            var decoded = self._decode_body(ce, Int(body_bytes.unsafe_ptr()), len(body_bytes))
+            if decoded:
+                parsed.body = String(unsafe_from_utf8=decoded.take())
 
         # Store Set-Cookie headers in the cookie jar
         var set_cookie = parsed.headers.get("Set-Cookie")
@@ -1376,7 +1394,7 @@ struct HttpClient(Movable):
 
         # accept-encoding (unless caller overrides)
         if not extra_headers.has("Accept-Encoding"):
-            h2_hdrs.append(HpackHeader("accept-encoding", "gzip, deflate, br, zstd"))
+            h2_hdrs.append(HpackHeader("accept-encoding", self._accept_encoding()))
 
         # content-length and content-type for non-empty bodies
         var body_bytes = List[UInt8]()
@@ -1444,18 +1462,9 @@ struct HttpClient(Movable):
         if ce.byte_length() > 0:
             var body_str   = String(unsafe_from_utf8=resp_body^)
             var body_bytes = body_str.as_bytes()
-            if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip"):
-                resp.body = String(unsafe_from_utf8=
-                    zlib_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes), True)^)
-            elif _eq_ignore_case(ce, "deflate"):
-                resp.body = String(unsafe_from_utf8=
-                    zlib_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes), False)^)
-            elif _eq_ignore_case(ce, "br"):
-                resp.body = String(unsafe_from_utf8=
-                    brotli_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes))^)
-            elif _eq_ignore_case(ce, "zstd"):
-                resp.body = String(unsafe_from_utf8=
-                    zstd_decompress_ptr(Int(body_bytes.unsafe_ptr()), len(body_bytes))^)
+            var decoded = self._decode_body(ce, Int(body_bytes.unsafe_ptr()), len(body_bytes))
+            if decoded:
+                resp.body = String(unsafe_from_utf8=decoded.take())
             else:
                 resp.body = body_str
         else:
@@ -2864,8 +2873,10 @@ def _decode_chunked(body: String) raises -> String:
     final decoded body string.
     """
     var result = List[UInt8](capacity=body.byte_length())
-    var body_copy = body
-    var ptr = body_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
+    # body is borrowed, so it stays alive while ptr is read. (A local copy
+    # whose last use is taking its pointer is freed right after it: that
+    # corrupted chunked gzip bodies.)
+    var ptr = body.unsafe_ptr()
     var body_len = body.byte_length()
     var pos = 0
     var total_decoded = 0
@@ -2923,8 +2934,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
     response.url = url
 
     # Convert to pointer once — all parsing uses pointer arithmetic
-    var raw_copy = raw
-    var ptr = raw_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
+    var ptr = raw.unsafe_ptr()  # raw is borrowed: alive while ptr is read
     var raw_len = raw.byte_length()
 
     # Find header/body separator (\r\n\r\n)

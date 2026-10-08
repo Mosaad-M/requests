@@ -44,10 +44,25 @@ print(doc.get_string("name"))
 - [url](https://github.com/Mosaad-M/url) — URL parser
 - [json](https://github.com/Mosaad-M/json) — JSON parser (>= 3.0.1)
 
+## Compression
+
+Responses in gzip, deflate, zstd and brotli are decompressed transparently. The
+libraries are opened at runtime, so a program using requests needs **no linker
+flags**:
+
+- gzip / deflate: the system zlib
+- zstd: libzstd from the Mojo environment (or the system)
+- brotli: libbrotlidec, used only when installed (`pixi add brotli`,
+  `apt install libbrotli1` or `brew install brotli`)
+
+`Accept-Encoding` lists only the encodings whose library loaded, so a server
+never sends one the client cannot decode.
+
 ## Requirements
 
-- Mojo `>=0.26.1`
-- GCC or Clang (for `errno_helper.c` from the `tcp` dependency)
+- Mojo `>=1.0.0`
+- No C compiler or linker flags: every dependency is pure Mojo, and the
+  compression libraries are opened at runtime (see Compression)
 
 ## Testing
 

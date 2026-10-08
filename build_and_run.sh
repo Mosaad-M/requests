@@ -26,15 +26,9 @@ if [ -d "$TLS_PURE_ABS" ]; then
     FLAGS="-I $TLS_PURE_ABS $FLAGS"
 fi
 
-# Add pixi env lib to linker search path and rpath so brotli/zstd are found in
-# both local conda env (dev) and system install (CI).
-PIXI_LIB="$SCRIPT_DIR/.pixi/envs/default/lib"
-if [ -d "$PIXI_LIB" ]; then
-    COMPRESSION_FLAGS="-Xlinker -L$PIXI_LIB -Xlinker -lbrotlidec -Xlinker -lzstd -Xlinker -rpath -Xlinker $PIXI_LIB"
-else
-    COMPRESSION_FLAGS="-Xlinker -lbrotlidec -Xlinker -lzstd"
-fi
-
-mojo build "$MOJO_FILE" -o "$BUILD_DIR/$BASENAME" $FLAGS -Xlinker -lz $COMPRESSION_FLAGS
+# No -Xlinker flags: zlib, libzstd and libbrotlidec are opened at runtime
+# (codecs.mojo). Mojo's rpath to the env's lib dir lets dlopen find the env's
+# libzstd and (if the brotli package is installed) libbrotlidec.
+mojo build "$MOJO_FILE" -o "$BUILD_DIR/$BASENAME" $FLAGS
 
 "$BUILD_DIR/$BASENAME" "$@"

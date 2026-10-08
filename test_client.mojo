@@ -9,6 +9,7 @@
 
 from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
+from codecs import Codecs, accept_encoding
 
 
 # ============================================================================
@@ -1074,6 +1075,52 @@ def test_accept_encoding_br() raises:
     assert_contains(resp.body, "br", "br in Accept-Encoding")
 
 
+def test_accept_encoding_combinations() raises:
+    """Accept-Encoding lists exactly the decoders that loaded."""
+    assert_str_eq(accept_encoding(True, True, True), "gzip, deflate, br, zstd", "all")
+    assert_str_eq(accept_encoding(True, False, True), "gzip, deflate, zstd", "no brotli")
+    assert_str_eq(accept_encoding(True, True, False), "gzip, deflate, br", "no zstd")
+    assert_str_eq(accept_encoding(True, False, False), "gzip, deflate", "zlib only")
+    assert_str_eq(accept_encoding(False, True, True), "br, zstd", "no zlib")
+    assert_str_eq(accept_encoding(False, True, False), "br", "brotli only")
+    assert_str_eq(accept_encoding(False, False, True), "zstd", "zstd only")
+    assert_str_eq(accept_encoding(False, False, False), "", "none")
+
+
+def _client_with(zlib: Bool, brotli: Bool, zstd: Bool) raises -> HttpClient:
+    var client = HttpClient(allow_private_ips=True)
+    client._codecs = Codecs(zlib=zlib, brotli=brotli, zstd=zstd)
+    client._codecs_loaded = True
+    return client^
+
+
+def test_accept_encoding_without_brotli() raises:
+    """Without libbrotlidec, 'br' is not offered to the server."""
+    var client = _client_with(True, False, True)
+    var resp = client.get(BASE + "/accept-encoding")
+    assert_contains(resp.body, "gzip, deflate, zstd", "offered encodings")
+    assert_not_contains(resp.body, "br", "br not offered without libbrotlidec")
+
+
+def test_no_decoders_asks_for_identity() raises:
+    """With no decoder at all the client asks for identity (an absent header
+    would let the server pick any coding)."""
+    var client = _client_with(False, False, False)
+    var resp = client.get(BASE + "/accept-encoding")
+    assert_contains(resp.body, "identity", "identity requested")
+
+
+def test_brotli_body_without_library_is_a_clear_error() raises:
+    """A server that sends br anyway gets a clear error, not garbage."""
+    var client = _client_with(True, False, True)
+    var message = String("")
+    try:
+        _ = client.get(BASE + "/brotli")
+    except e:
+        message = String(e)
+    assert_contains(message, "libbrotlidec could not be loaded", "error names the library")
+
+
 # ============================================================================
 # Multipart Tests
 # ============================================================================
@@ -1542,6 +1589,10 @@ def main() raises:
 
     # Brotli tests
     run_test[test_brotli_decompression]("brotli decompression", passed, failed)
+    run_test[test_accept_encoding_combinations]("Accept-Encoding lists the loaded decoders", passed, failed)
+    run_test[test_accept_encoding_without_brotli]("no libbrotlidec: br not offered", passed, failed)
+    run_test[test_no_decoders_asks_for_identity]("no decoders: Accept-Encoding identity", passed, failed)
+    run_test[test_brotli_body_without_library_is_a_clear_error]("br body without libbrotlidec: clear error", passed, failed)
     run_test[test_accept_encoding_br]("Accept-Encoding includes br", passed, failed)
 
     # Multipart tests
