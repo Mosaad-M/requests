@@ -628,7 +628,7 @@ struct HttpClient(Movable):
                 reject_private_ips=not self.allow_private_ips,
                 timeout_secs=self._timeout_secs,
             )
-            tls_sock = TlsSocket(http_sock.fd)
+            tls_sock = TlsSocket(http_sock.detach())
             tls_sock.connect(url.host, self._ca_bundle)
             _ = tls_sock.send(req_buf)
             while header_end < 0:
@@ -993,7 +993,7 @@ struct HttpClient(Movable):
                 alpn.append("h2")
                 alpn.append("http/1.1")
                 var tcp_sock = self._tcp_connect(url.host, url.port, "https")
-                var new_tls  = TlsSocket(tcp_sock.fd)
+                var new_tls  = TlsSocket(tcp_sock.detach())
                 new_tls.connect(url.host, self._ca_bundle, alpn_protocols=alpn)
                 var proto = new_tls.negotiated_protocol()
 
@@ -1056,7 +1056,7 @@ struct HttpClient(Movable):
                     else:
                         # H2 probe failed — open fresh TCP+TLS (no ALPN) for H1
                         var fb_tcp = self._tcp_connect(url.host, url.port, "https")
-                        var fb_tls = TlsSocket(fb_tcp.fd)
+                        var fb_tls = TlsSocket(fb_tcp.detach())
                         fb_tls.connect(url.host, self._ca_bundle)
                         _ = fb_tls.send(req_buf)
                         raw_bytes = _recv_tls_keepalive(fb_tls, skip_body)
