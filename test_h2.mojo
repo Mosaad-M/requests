@@ -32,7 +32,7 @@ from h2 import (
     h2_make_ping_frame, h2_parse_ping_payload,
     # HEADERS, CONTINUATION, DATA
     h2_make_headers_frame, h2_make_continuation_frame, h2_make_data_frame,
-    h2_get_hpack_block,
+    h2_get_hpack_block, h2_content_bounds,
     h2_encode_request_headers, h2_encode_response_headers,
     # RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY
     h2_make_rst_stream, h2_parse_rst_stream,
@@ -807,6 +807,43 @@ def test_goaway_roundtrip() raises:
     assert_eq_u8(r[2][0], 0xCA, "debug[0]")
 
 
+def test_data_padding_stripped() raises:
+    """PADDED DATA: Pad Length byte and padding are not data (RFC 9113 §6.1)."""
+    var payload: List[UInt8] = [3, 0x41, 0x42, 0x43, 0x44, 0, 0, 0]  # pad 3, "ABCD"
+    var f = Http2Frame(H2_DATA, H2_FLAG_PADDED | H2_FLAG_END_STREAM, 1, payload)
+    var b = h2_content_bounds(f)
+    assert_eq_int(b[0], 1, "data start")
+    assert_eq_int(b[1], 5, "data end")
+    # unpadded DATA: the whole payload
+    var g = Http2Frame(H2_DATA, H2_FLAG_END_STREAM, 1, payload)
+    var c = h2_content_bounds(g)
+    assert_eq_int(c[0], 0, "start")
+    assert_eq_int(c[1], 8, "end")
+
+
+def test_data_padding_too_long_rejected() raises:
+    """Pad Length >= payload is a PROTOCOL_ERROR."""
+    var payload: List[UInt8] = [9, 0x41, 0x42]
+    var f = Http2Frame(H2_DATA, H2_FLAG_PADDED, 1, payload)
+    var raised = False
+    try:
+        _ = h2_content_bounds(f)
+    except:
+        raised = True
+    if not raised:
+        raise Error("oversized padding accepted")
+
+
+def test_headers_padded_and_priority() raises:
+    """PADDED + PRIORITY HEADERS: pad length, 5 priority bytes, block, padding."""
+    var payload: List[UInt8] = [2, 0, 0, 0, 0, 15, 0x82, 0x86, 0, 0]
+    var f = Http2Frame(H2_HEADERS, H2_FLAG_END_HEADERS | H2_FLAG_PADDED | H2_FLAG_PRIORITY, 1, payload)
+    var b = h2_get_hpack_block(f)
+    assert_eq_int(len(b), 2, "block len")
+    assert_eq_u8(b[0], 0x82, "b[0]")
+    assert_eq_u8(b[1], 0x86, "b[1]")
+
+
 def test_priority_frame_exclusive() raises:
     """PRIORITY frame with exclusive bit set."""
     var f = h2_make_priority_frame(3, 1, True, 16)
@@ -1029,6 +1066,9 @@ def main() raises:
     run_test[test_data_frame_empty_payload]("make_data_frame: empty payload valid", passed, failed)
     run_test[test_get_hpack_block_no_priority]("get_hpack_block: no PRIORITY flag → full payload", passed, failed)
     run_test[test_get_hpack_block_with_priority]("get_hpack_block: PRIORITY flag → skip 5 bytes", passed, failed)
+    run_test[test_data_padding_stripped]("DATA PADDED: padding is not body data", passed, failed)
+    run_test[test_data_padding_too_long_rejected]("DATA PADDED: oversized padding rejected", passed, failed)
+    run_test[test_headers_padded_and_priority]("HEADERS PADDED + PRIORITY: block extracted", passed, failed)
     run_test[test_encode_request_headers_basic]("encode_request_headers: 4 pseudo-headers decode correctly", passed, failed)
     run_test[test_encode_request_headers_extra]("encode_request_headers: extra headers included", passed, failed)
     run_test[test_encode_response_headers_200]("encode_response_headers: :status=200", passed, failed)

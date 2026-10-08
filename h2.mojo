@@ -367,12 +367,41 @@ def h2_make_data_frame(
     return Http2Frame(H2_DATA, flags, stream_id, data.copy())
 
 
+def h2_content_bounds(frame: Http2Frame) raises -> Tuple[Int, Int]:
+    """[start, end) of the content of a DATA or HEADERS frame payload: past
+    the Pad Length byte (PADDED) and, for HEADERS, the 5-byte priority prefix
+    (PRIORITY), and before the padding (RFC 9113 §6.1, §6.2). Other frames:
+    the whole payload.
+
+    Raises:
+        Error (PROTOCOL_ERROR) if the padding or prefix does not fit.
+    """
+    var n = len(frame.payload)
+    var start = 0
+    var end = n
+    if frame.frame_type != H2_DATA and frame.frame_type != H2_HEADERS:
+        return (start, end)
+    if (Int(frame.flags) & Int(H2_FLAG_PADDED)) != 0:
+        if n < 1:
+            raise Error("h2: PADDED frame without a Pad Length byte (PROTOCOL_ERROR)")
+        var pad = Int(frame.payload[0])
+        start = 1
+        end = n - pad
+    if frame.frame_type == H2_HEADERS and (Int(frame.flags) & Int(H2_FLAG_PRIORITY)) != 0:
+        start += 5
+    if end < start:
+        raise Error(
+            "h2: padding/priority longer than the frame payload ("
+            + String(n) + " bytes) (PROTOCOL_ERROR)"
+        )
+    return (start, end)
+
+
 def h2_get_hpack_block(frame: Http2Frame) raises -> List[UInt8]:
     """Extract the HPACK block from a HEADERS or CONTINUATION frame.
 
-    Handles the PRIORITY flag: if set on a HEADERS frame, the first 5 bytes of
-    the payload are a priority prefix (exclusive+dep_stream_id:32, weight:8)
-    and must be skipped.
+    For HEADERS, skips the Pad Length byte and padding (PADDED) and the 5-byte
+    priority prefix (PRIORITY: exclusive+dep_stream_id:32, weight:8).
 
     Args:
         frame: A HEADERS or CONTINUATION frame.
@@ -381,22 +410,13 @@ def h2_get_hpack_block(frame: Http2Frame) raises -> List[UInt8]:
         The HPACK-encoded header block bytes.
 
     Raises:
-        Error if PRIORITY flag is set but payload is shorter than 5 bytes.
+        Error if the padding or priority prefix does not fit in the payload.
     """
-    var has_priority = (Int(frame.flags) & Int(H2_FLAG_PRIORITY)) != 0
-    if has_priority:
-        if len(frame.payload) < 5:
-            raise Error(
-                "h2_get_hpack_block: PRIORITY flag set but payload too short ("
-                + String(len(frame.payload)) + " bytes)"
-            )
-        var skip = 5
-        var n    = len(frame.payload) - skip
-        var out  = List[UInt8](capacity=n)
-        for i in range(n):
-            out.append(frame.payload[skip + i])
-        return out^
-    return frame.payload.copy()
+    var b = h2_content_bounds(frame)
+    var out = List[UInt8](capacity=b[1] - b[0])
+    for i in range(b[0], b[1]):
+        out.append(frame.payload[i])
+    return out^
 
 
 def h2_encode_request_headers(

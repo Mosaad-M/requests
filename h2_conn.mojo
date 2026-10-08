@@ -19,7 +19,7 @@ from h2 import (
     h2_frame_encode, h2_frame_decode,
     h2_client_preface_bytes, h2_make_initial_settings,
     h2_make_settings_ack, h2_settings_decode,
-    h2_make_headers_frame, h2_make_data_frame, h2_get_hpack_block,
+    h2_make_headers_frame, h2_make_data_frame, h2_get_hpack_block, h2_content_bounds,
     h2_make_window_update, h2_parse_window_update,
     h2_make_ping_frame,
     h2_parse_goaway, h2_parse_rst_stream,
@@ -314,8 +314,10 @@ def h2_request(
                         )
 
         elif f.frame_type == H2_DATA and f.stream_id == stream_id:
+            # padding is not data (RFC 9113 §6.1), but counts for flow control
             var data_len = len(f.payload)
-            for i in range(data_len):
+            var b = h2_content_bounds(f)
+            for i in range(b[0], b[1]):
                 resp_body.append(f.payload[i])
             # Restore flow-control windows immediately after consuming DATA
             if data_len > 0:
