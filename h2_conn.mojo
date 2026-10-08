@@ -186,7 +186,7 @@ def h2_connect(host: String, port: Int = 443) raises -> Http2Conn:
     # 3. TLS handshake with ALPN "h2"
     var alpn = List[String]()
     alpn.append("h2")
-    var tls = TlsSocket(tcp.fd)
+    var tls = TlsSocket(tcp.detach())
     tls.connect(host, ca, alpn_protocols=alpn)
 
     # 4. Reject explicit HTTP/1.1 downgrade
