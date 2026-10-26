@@ -16,7 +16,7 @@ test-std-compat = "bash build_and_run.sh test_std_compat.mojo"
 format = "mblack http_client.mojo main.mojo test_client.mojo"
 
 [dependencies]
-mojo = ">=1.0.0"
+mojo = ">=1.2.0"
 brotli = ">=1.0"
 zstd = ">=1.5"
 

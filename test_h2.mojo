@@ -453,7 +453,7 @@ def test_make_ping() raises:
 def test_make_ping_ack() raises:
     """PING frame with ack=True: ACK flag set."""
     var opaque = List[UInt8]()
-    for i in range(8):
+    for _ in range(8):
         opaque.append(UInt8(0xAA))
     var f = h2_make_ping_frame(opaque, True)
     assert_eq_u8(f.flags, H2_FLAG_ACK, "ACK flag set")

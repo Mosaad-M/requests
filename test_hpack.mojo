@@ -460,7 +460,7 @@ def test_huffman_roundtrip_all_printable_ascii() raises:
     for code in range(32, 127):
         var b = List[UInt8]()
         b.append(UInt8(code))
-        var s = String(unsafe_from_utf8=b^)
+        var s = String(unsafe_from_utf8=b)
         var encoded = huffman_encode(s)
         var decoded = huffman_decode(encoded)
         if decoded != s:

@@ -33,7 +33,7 @@ from codecs import Codecs, missing_library
 from psl import is_public_suffix
 from std.ffi import external_call
 from std.os import getenv
-from std.memory import alloc
+from std.memory.alloc import unsafe_alloc
 
 
 # ============================================================================
@@ -76,7 +76,7 @@ def _no_proxy_matches(host: String, no_proxy: String) -> Bool:
                     var entry_bytes = List[UInt8](capacity=hi - lo)
                     for j in range(lo, hi):
                         entry_bytes.append(np_bytes[j])
-                    var entry = String(unsafe_from_utf8=entry_bytes^)
+                    var entry = String(unsafe_from_utf8=entry_bytes)
                     if entry == "*":
                         return True
                     if entry == host:
@@ -103,7 +103,7 @@ def _hex(data: List[UInt8]) -> String:
     for b in data:
         out.append(d[Int(b >> 4)])
         out.append(d[Int(b & 0x0F)])
-    return String(unsafe_from_utf8=out^)
+    return String(unsafe_from_utf8=out)
 
 
 # ============================================================================
@@ -281,7 +281,7 @@ struct HttpResponse(Copyable, Movable, Deinitable):
                 var trimmed = List[UInt8](capacity=i)
                 for j in range(i):
                     trimmed.append(u_bytes[j])
-                return String(unsafe_from_utf8=trimmed^)
+                return String(unsafe_from_utf8=trimmed)
         return u
 
     def error_without_url(self) raises:
@@ -352,7 +352,7 @@ struct BasicAuth(Copyable, Movable):
         var cred_bytes = List[UInt8](capacity=len(span))
         for i in range(len(span)):
             cred_bytes.append(span[i])
-        var encoded = base64_encode(cred_bytes^)
+        var encoded = base64_encode(cred_bytes)
         return "Basic " + encoded
 
 
@@ -652,7 +652,7 @@ struct HttpClient(Movable):
                 reject_private_ips=not self.allow_private_ips,
                 timeout_secs=self._timeout_secs,
             )
-            var request = String(unsafe_from_utf8=req_buf^)
+            var request = String(unsafe_from_utf8=req_buf)
             _ = http_sock.send(request)
             while header_end < 0:
                 var chunk = http_sock.recv_bytes(4096)
@@ -726,7 +726,7 @@ struct HttpClient(Movable):
         _append_str(buf, "--")
         _append_str(buf, boundary)
         _append_str(buf, "--\r\n")
-        var body = String(unsafe_from_utf8=buf^)
+        var body = String(unsafe_from_utf8=buf)
         var headers = HttpHeaders()
         headers.add("Content-Type", "multipart/form-data; boundary=" + boundary)
         return self._do_request("POST", url, body, headers)
@@ -1153,7 +1153,7 @@ struct HttpClient(Movable):
             # Phase 2: new HTTP connection if no reuse
             if http_hit < 0:
                 var new_sock = self._tcp_connect(url.host, url.port)
-                var request = String(unsafe_from_utf8=req_buf^)
+                var request = String(unsafe_from_utf8=req_buf)
                 _ = new_sock.send(request)
                 raw_bytes = _recv_http_keepalive(new_sock, skip_body)
                 var evict = self._http_evict_slot()
@@ -1176,7 +1176,7 @@ struct HttpClient(Movable):
             raise _err_connection("empty response from server")
 
         # Convert to string and parse
-        var raw_response = String(unsafe_from_utf8=raw_bytes^)
+        var raw_response = String(unsafe_from_utf8=raw_bytes)
         var parsed = _parse_response(raw_response, url_str)
 
         # Decompress body if Content-Encoding is set.
@@ -1228,17 +1228,14 @@ struct HttpClient(Movable):
 
     def _http_close_slot(mut self, i: Int):
         """Close socket in HTTP pool slot i and mark slot unused."""
-        try:
-            if i == 0:
-                self._http_sock0.close()
-            elif i == 1:
-                self._http_sock1.close()
-            elif i == 2:
-                self._http_sock2.close()
-            else:
-                self._http_sock3.close()
-        except:
-            pass
+        if i == 0:
+            self._http_sock0.close()
+        elif i == 1:
+            self._http_sock1.close()
+        elif i == 2:
+            self._http_sock2.close()
+        else:
+            self._http_sock3.close()
         self._http_times[i] = Int64(0)
         self._http_keys[i] = String("")
 
@@ -1424,7 +1421,7 @@ struct HttpClient(Movable):
                     low.append(b + 32)
                 else:
                     low.append(b)
-            h2_hdrs.append(HpackHeader(String(unsafe_from_utf8=low^), extra_headers._values[i]))
+            h2_hdrs.append(HpackHeader(String(unsafe_from_utf8=low), extra_headers._values[i]))
 
         # ── Call h2_do_request on the correct pool slot ───────────────────
         var result: Tuple[Int, List[HpackHeader], List[UInt8]]
@@ -1460,7 +1457,7 @@ struct HttpClient(Movable):
         # the proven H1 decompression path exactly.
         var ce = resp.headers.get("content-encoding")
         if ce.byte_length() > 0:
-            var body_str   = String(unsafe_from_utf8=resp_body^)
+            var body_str   = String(unsafe_from_utf8=resp_body)
             var body_bytes = body_str.as_bytes()
             var decoded = self._decode_body(ce, Int(body_bytes.unsafe_ptr()), len(body_bytes))
             if decoded:
@@ -1468,7 +1465,7 @@ struct HttpClient(Movable):
             else:
                 resp.body = body_str
         else:
-            resp.body = String(unsafe_from_utf8=resp_body^)
+            resp.body = String(unsafe_from_utf8=resp_body)
 
         # ── Store Set-Cookie headers in jar ───────────────────────────────
         var set_cookie = resp.headers.get("set-cookie")
@@ -1554,25 +1551,25 @@ struct HttpClient(Movable):
         _ = sock.send(connect_req)
 
         # Read proxy response until "\r\n\r\n"
-        var resp_buf = alloc[UInt8](4096)
+        var resp_buf = unsafe_alloc[UInt8](4096)
         var resp_len = 0
         var found_end = False
         while not found_end and resp_len < 4096:
             var n = external_call["recv", Int](
-                sock.fd, Int(resp_buf + resp_len), 4096 - resp_len, Int32(0)
+                sock.fd, Int(resp_buf.unsafe_offset(resp_len)), 4096 - resp_len, Int32(0)
             )
             if n <= 0:
-                resp_buf.free()
+                resp_buf.unsafe_free()
                 raise _err_connection("proxy CONNECT: connection closed before response")
             resp_len += n
             # Check for end of headers: \r\n\r\n
             if resp_len >= 4:
                 for i in range(resp_len - 3):
                     if (
-                        (resp_buf + i)[] == UInt8(13)       # \r
-                        and (resp_buf + i + 1)[] == UInt8(10)  # \n
-                        and (resp_buf + i + 2)[] == UInt8(13)  # \r
-                        and (resp_buf + i + 3)[] == UInt8(10)  # \n
+                        resp_buf[unsafe_offset=i] == UInt8(13)       # \r
+                        and resp_buf[unsafe_offset=i + 1] == UInt8(10)  # \n
+                        and resp_buf[unsafe_offset=i + 2] == UInt8(13)  # \r
+                        and resp_buf[unsafe_offset=i + 3] == UInt8(10)  # \n
                     ):
                         found_end = True
                         break
@@ -1580,9 +1577,9 @@ struct HttpClient(Movable):
         # Convert response to String and check for 200
         var resp_bytes = List[UInt8](capacity=resp_len)
         for i in range(resp_len):
-            resp_bytes.append((resp_buf + i)[])
-        resp_buf.free()
-        var resp_str = String(unsafe_from_utf8=resp_bytes^)
+            resp_bytes.append(resp_buf[unsafe_offset=i])
+        resp_buf.unsafe_free()
+        var resp_str = String(unsafe_from_utf8=resp_bytes)
 
         # Status line: "HTTP/1.x 200 ..."
         var status_ok = False
@@ -1636,8 +1633,8 @@ struct HttpClient(Movable):
         var val_buf = List[UInt8](capacity=semi - eq - 1)
         for i in range(eq + 1, semi):
             val_buf.append(bytes[i])
-        var name = String(unsafe_from_utf8=name_buf^)
-        var value = String(unsafe_from_utf8=val_buf^)
+        var name = String(unsafe_from_utf8=name_buf)
+        var value = String(unsafe_from_utf8=val_buf)
 
         # Scan attributes
         var expiry = Int64(0)   # 0 = session cookie
@@ -1713,7 +1710,7 @@ struct HttpClient(Movable):
                     for j in range(path_start, attr_end):
                         path_buf.append(bytes[j])
                     if len(path_buf) > 0:
-                        cookie_path = String(unsafe_from_utf8=path_buf^)
+                        cookie_path = String(unsafe_from_utf8=path_buf)
                     else:
                         cookie_path = String("/")
 
@@ -1736,7 +1733,7 @@ struct HttpClient(Movable):
                     for j in range(dom_start, attr_end):
                         dom_buf.append(bytes[j])
                     if len(dom_buf) > 0:
-                        var d = String(unsafe_from_utf8=dom_buf^)
+                        var d = String(unsafe_from_utf8=dom_buf)
                         # Reject single-label domains (e.g. ".com") to prevent
                         # supercookies that match any host under a TLD (S7).
                         # A valid cookie domain must contain at least one embedded dot.
@@ -1923,7 +1920,7 @@ struct HttpClient(Movable):
             _append_str(result, self._jar_values[i])
         if len(result) == 0:
             return String("")
-        return String(unsafe_from_utf8=result^)
+        return String(unsafe_from_utf8=result)
 
 
 # ============================================================================
@@ -2046,7 +2043,7 @@ struct StreamResponse(Movable):
                 break
             for i in range(len(chunk)):
                 buf.append(chunk[i])
-        return String(unsafe_from_utf8=buf^)
+        return String(unsafe_from_utf8=buf)
 
     def close(mut self) raises:
         """Close the underlying socket and mark the stream as done."""
@@ -2057,10 +2054,7 @@ struct StreamResponse(Movable):
             except:
                 pass
         else:
-            try:
-                self._http_sock.close()
-            except:
-                pass
+            self._http_sock.close()
 
 
 # ============================================================================
@@ -2119,7 +2113,7 @@ def _buf_to_string(buf: List[UInt8], header_end: Int) -> String:
     var copy_buf = List[UInt8](capacity=header_end)
     for i in range(header_end):
         copy_buf.append(buf[i])
-    return String(unsafe_from_utf8=copy_buf^)
+    return String(unsafe_from_utf8=copy_buf)
 
 
 def _list_append(mut out: List[UInt8], src: List[UInt8]):
@@ -2531,7 +2525,7 @@ def _percent_encode(s: String) -> String:
             result.append(UInt8(37))  # '%'
             result.append(hex[(Int(c) >> 4) & 0xF])
             result.append(hex[Int(c) & 0xF])
-    return String(unsafe_from_utf8=result^)
+    return String(unsafe_from_utf8=result)
 
 
 def _encode_params(params: Dict[String, String]) raises -> String:
@@ -2550,7 +2544,7 @@ def _encode_params(params: Dict[String, String]) raises -> String:
             _append_str(result, encoded_val)
         except:
             pass
-    return String(unsafe_from_utf8=result^)
+    return String(unsafe_from_utf8=result)
 
 
 def _append_params_to_url(url: String, params: Dict[String, String]) raises -> String:
@@ -2588,7 +2582,7 @@ def _encode_cookie_header(cookies: Dict[String, String]) raises -> String:
             _append_str(result, cookies[key])
         except:
             pass
-    return String(unsafe_from_utf8=result^)
+    return String(unsafe_from_utf8=result)
 
 
 def _resolve_url(base_url: String, location: String) raises -> String:
@@ -2656,7 +2650,7 @@ def _resolve_url(base_url: String, location: String) raises -> String:
     var origin_buf = List[UInt8](capacity=origin_end)
     for k in range(origin_end):
         origin_buf.append(base_bytes[k])
-    var origin = String(unsafe_from_utf8=origin_buf^)
+    var origin = String(unsafe_from_utf8=origin_buf)
 
     # Root-relative path (starts with /)
     if loc_bytes[0] == UInt8(ord("/")):
@@ -2673,7 +2667,7 @@ def _resolve_url(base_url: String, location: String) raises -> String:
     var prefix_buf = List[UInt8](capacity=base_path_end)
     for k in range(base_path_end):
         prefix_buf.append(base_bytes[k])
-    return String(unsafe_from_utf8=prefix_buf^) + location
+    return String(unsafe_from_utf8=prefix_buf) + location
 
 
 # ============================================================================
@@ -2691,7 +2685,7 @@ def _to_lower(s: String) -> String:
             result.append(c + UInt8(32))
         else:
             result.append(c)
-    return String(unsafe_from_utf8=result^)
+    return String(unsafe_from_utf8=result)
 
 
 def _eq_ignore_case(a: String, b: String) -> Bool:
@@ -2774,7 +2768,7 @@ def _append_str(mut buf: List[UInt8], s: String):
 
 
 def _ptr_to_string(
-    data_ptr: UnsafePointer[UInt8, _], start: Int, end: Int
+    data_ptr: Pointer[UInt8, _], start: Int, end: Int
 ) -> String:
     """Materialize a String from a pointer byte range [start, end).
 
@@ -2786,11 +2780,11 @@ def _ptr_to_string(
     var size = end - start
     var result = List[UInt8](capacity=size + 1)
     result.resize(size, 0)
-    _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(data_ptr + start), size)
-    return String(unsafe_from_utf8=result^)
+    _ = external_call["memcpy", Int](Int(result.unsafe_ptr()), Int(data_ptr.unsafe_offset(start)), size)
+    return String(unsafe_from_utf8=result)
 
 
-def _find_crlf_crlf(data_ptr: UnsafePointer[UInt8, _], data_len: Int) -> Int:
+def _find_crlf_crlf(data_ptr: Pointer[UInt8, _], data_len: Int) -> Int:
     """Find \\r\\n\\r\\n (header/body separator) in pointer data.
 
     Returns the index of the first \\r in the separator, or -1 if not found.
@@ -2799,16 +2793,16 @@ def _find_crlf_crlf(data_ptr: UnsafePointer[UInt8, _], data_len: Int) -> Int:
         return -1
     for i in range(data_len - 3):
         if (
-            (data_ptr + i)[] == 13
-            and (data_ptr + i + 1)[] == 10
-            and (data_ptr + i + 2)[] == 13
-            and (data_ptr + i + 3)[] == 10
+            data_ptr[unsafe_offset=i] == 13
+            and data_ptr[unsafe_offset=i + 1] == 10
+            and data_ptr[unsafe_offset=i + 2] == 13
+            and data_ptr[unsafe_offset=i + 3] == 10
         ):
             return i
     return -1
 
 
-def _find_crlf(data_ptr: UnsafePointer[UInt8, _], data_len: Int, start: Int) -> Int:
+def _find_crlf(data_ptr: Pointer[UInt8, _], data_len: Int, start: Int) -> Int:
     """Find \\r\\n starting from start in pointer data.
 
     Returns the index of \\r, or -1 if not found.
@@ -2816,26 +2810,26 @@ def _find_crlf(data_ptr: UnsafePointer[UInt8, _], data_len: Int, start: Int) -> 
     if data_len < 2:
         return -1
     for i in range(start, data_len - 1):
-        if (data_ptr + i)[] == 13 and (data_ptr + i + 1)[] == 10:
+        if data_ptr[unsafe_offset=i] == 13 and data_ptr[unsafe_offset=i + 1] == 10:
             return i
     return -1
 
 
 def _find_char(
-    data_ptr: UnsafePointer[UInt8, _],
+    data_ptr: Pointer[UInt8, _],
     data_len: Int,
     c: UInt8,
     start: Int = 0,
 ) -> Int:
     """Find first occurrence of byte c in pointer data starting at start."""
     for i in range(start, data_len):
-        if (data_ptr + i)[] == c:
+        if data_ptr[unsafe_offset=i] == c:
             return i
     return -1
 
 
 def _hex_to_int(
-    data_ptr: UnsafePointer[UInt8, _], start: Int, end: Int
+    data_ptr: Pointer[UInt8, _], start: Int, end: Int
 ) raises -> Int:
     """Parse a hex string from pointer range [start, end) to integer.
 
@@ -2848,7 +2842,7 @@ def _hex_to_int(
     for i in range(start, end):
         if result > MAX_CHUNK // 16:
             raise _err_chunked("chunk size too large (exceeds 256 MB)")
-        var c = (data_ptr + i)[]
+        var c = data_ptr[unsafe_offset=i]
         result = result * 16
         if c >= UInt8(ord("0")) and c <= UInt8(ord("9")):
             result += Int(c - UInt8(ord("0")))
@@ -2910,10 +2904,10 @@ def _decode_chunked(body: String) raises -> String:
         var current_len = len(result)
         result.resize(current_len + chunk_size, 0)
         _ = external_call["memcpy", Int](
-            Int(result.unsafe_ptr()) + current_len, Int(ptr + data_start), chunk_size
+            Int(result.unsafe_ptr()) + current_len, Int(ptr.unsafe_offset(data_start)), chunk_size
         )
         pos = data_start + chunk_size + 2  # skip data + trailing \r\n
-    return String(unsafe_from_utf8=result^)
+    return String(unsafe_from_utf8=result)
 
 
 def _parse_response(raw: String, url: String) raises -> HttpResponse:
@@ -2951,11 +2945,9 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
     var status_end = first_crlf if first_crlf >= 0 else separator
 
     # Validate HTTP version prefix
-    if status_end < 5 or (ptr + 0)[] != UInt8(ord("H")) or (ptr + 1)[] != UInt8(ord(
+    if status_end < 5 or ptr[unsafe_offset=0] != UInt8(ord("H")) or ptr[unsafe_offset=1] != UInt8(ord(
         "T"
-    )) or (ptr + 2)[] != UInt8(ord("T")) or (ptr + 3)[] != UInt8(ord("P")) or (
-        ptr + 4
-    )[] != UInt8(ord("/")):
+    )) or ptr[unsafe_offset=2] != UInt8(ord("T")) or ptr[unsafe_offset=3] != UInt8(ord("P")) or ptr[unsafe_offset=4] != UInt8(ord("/")):
         raise _err_parse(
             "response is not HTTP: " + _ptr_to_string(ptr, 0, status_end)
         )
@@ -3000,7 +2992,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
                 var key = _ptr_to_string(ptr, pos, colon)
                 var value_start = colon + 1
                 # Skip leading spaces
-                while value_start < line_end and (ptr + value_start)[] == UInt8(ord(
+                while value_start < line_end and ptr[unsafe_offset=value_start] == UInt8(ord(
                     " "
                 )):
                     value_start += 1
@@ -3020,7 +3012,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
 
 
 def _parse_status_code(
-    data_ptr: UnsafePointer[UInt8, _], start: Int, end: Int
+    data_ptr: Pointer[UInt8, _], start: Int, end: Int
 ) raises -> Int:
     """Parse HTTP status code from pointer range [start, end).
 
@@ -3030,7 +3022,7 @@ def _parse_status_code(
         raise _err_parse("status code too long (max 3 digits)")
     var result: Int = 0
     for i in range(start, end):
-        var c = (data_ptr + i)[]
+        var c = data_ptr[unsafe_offset=i]
         if c < UInt8(ord("0")) or c > UInt8(ord("9")):
             raise _err_parse(
                 "invalid status code: " + _ptr_to_string(data_ptr, start, end)
