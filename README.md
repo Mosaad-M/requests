@@ -60,7 +60,7 @@ never sends one the client cannot decode.
 
 ## Requirements
 
-- Mojo `>=1.0.0`
+- Mojo `>=1.2.0` (for Mojo 1.0 / 1.1, use requests 1.5.0)
 - No C compiler or linker flags: every dependency is pure Mojo, and the
   compression libraries are opened at runtime (see Compression)
 

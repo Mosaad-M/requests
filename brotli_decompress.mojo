@@ -20,7 +20,7 @@
 
 from std.ffi import external_call, OwnedDLHandle
 from codecs import open_brotli, missing_library
-from std.memory import alloc
+from std.memory.alloc import unsafe_alloc
 
 # Decompression safety limits (zip-bomb protection)
 comptime _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
@@ -36,8 +36,8 @@ def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raise
     var out_capacity = data_len * 8
     if out_capacity < 4096:
         out_capacity = 4096
-    var out_buf = alloc[UInt8](out_capacity)
-    var out_size_ptr = alloc[Int](1)
+    var out_buf = unsafe_alloc[UInt8](out_capacity)
+    var out_size_ptr = unsafe_alloc[Int](1)
 
     var result = Int32(3)
     while result == Int32(3):
@@ -54,26 +54,26 @@ def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raise
             if cap_limit > _MAX_DECOMP_BYTES:
                 cap_limit = _MAX_DECOMP_BYTES
             if new_cap > cap_limit:
-                out_buf.free()
-                out_size_ptr.free()
+                out_buf.unsafe_free()
+                out_size_ptr.unsafe_free()
                 raise Error("brotli decompression ratio limit exceeded")
-            var new_buf = alloc[UInt8](new_cap)
+            var new_buf = unsafe_alloc[UInt8](new_cap)
             _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_capacity)
-            out_buf.free()
+            out_buf.unsafe_free()
             out_buf = new_buf
             out_capacity = new_cap
 
     if result != Int32(1):
-        out_size_ptr.free()
-        out_buf.free()
+        out_size_ptr.unsafe_free()
+        out_buf.unsafe_free()
         raise Error("BrotliDecodeError: result=" + String(Int(result)))
 
     var written = out_size_ptr[]
-    out_size_ptr.free()
+    out_size_ptr.unsafe_free()
     var out = List[UInt8](capacity=written + 1)
     out.resize(written, 0)
     _ = external_call["memcpy", Int](Int(out.unsafe_ptr()), Int(out_buf), written)
-    out_buf.free()
+    out_buf.unsafe_free()
     return out^
 
 

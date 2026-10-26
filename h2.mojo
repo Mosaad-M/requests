@@ -176,7 +176,7 @@ def h2_frame_decode(data: List[UInt8], off: Int) raises -> Tuple[Http2Frame, Int
     var payload = List[UInt8](capacity=length)
     for i in range(length):
         payload.append(data[payload_start + i])
-    return (Http2Frame(ftype, flags, sid, payload^), payload_start + length)
+    return (Http2Frame(ftype, flags, sid, payload), payload_start + length)
 
 
 # ── 15C-2: SETTINGS + PING frames (RFC 7540 §6.4, §6.7) ────────────────────
@@ -498,7 +498,7 @@ def h2_make_rst_stream(stream_id: Int, error_code: Int) -> Http2Frame:
     payload.append(UInt8((error_code >> 16) & 0xFF))
     payload.append(UInt8((error_code >> 8)  & 0xFF))
     payload.append(UInt8( error_code        & 0xFF))
-    return Http2Frame(H2_RST_STREAM, UInt8(0), stream_id, payload^)
+    return Http2Frame(H2_RST_STREAM, UInt8(0), stream_id, payload)
 
 
 def h2_parse_rst_stream(frame: Http2Frame) raises -> Int:
@@ -550,7 +550,7 @@ def h2_make_window_update(stream_id: Int, increment: Int) raises -> Http2Frame:
     payload.append(UInt8((increment >> 16) & 0xFF))
     payload.append(UInt8((increment >> 8)  & 0xFF))
     payload.append(UInt8( increment        & 0xFF))
-    return Http2Frame(H2_WINDOW_UPDATE, UInt8(0), stream_id, payload^)
+    return Http2Frame(H2_WINDOW_UPDATE, UInt8(0), stream_id, payload)
 
 
 def h2_parse_window_update(frame: Http2Frame) raises -> Int:
@@ -605,7 +605,7 @@ def h2_make_goaway(
     payload.append(UInt8( error_code        & 0xFF))
     for i in range(len(debug_data)):
         payload.append(debug_data[i])
-    return Http2Frame(H2_GOAWAY, UInt8(0), 0, payload^)
+    return Http2Frame(H2_GOAWAY, UInt8(0), 0, payload)
 
 
 def h2_parse_goaway(frame: Http2Frame) raises -> Tuple[Int, Int, List[UInt8]]:
@@ -667,7 +667,7 @@ def h2_make_priority_frame(
     payload.append(UInt8((dep_stream_id >> 8)  & 0xFF))
     payload.append(UInt8( dep_stream_id        & 0xFF))
     payload.append(UInt8((weight - 1) & 0xFF))
-    return Http2Frame(H2_PRIORITY, UInt8(0), stream_id, payload^)
+    return Http2Frame(H2_PRIORITY, UInt8(0), stream_id, payload)
 
 
 def h2_parse_priority_frame(frame: Http2Frame) raises -> Tuple[Int, Bool, Int]:

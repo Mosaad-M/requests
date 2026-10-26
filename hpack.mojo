@@ -121,7 +121,7 @@ def hpack_decode_str(data: List[UInt8], off: Int) raises -> Tuple[String, Int]:
     var bytes = List[UInt8](capacity=str_len + 1)
     for i in range(str_len):
         bytes.append(data[str_off + i])
-    var result = String(unsafe_from_utf8=bytes^)
+    var result = String(unsafe_from_utf8=bytes)
     return (result^, str_off + str_len)
 
 
@@ -505,7 +505,7 @@ def huffman_decode(data: List[UInt8]) raises -> String:
             var sym = NS[node]
             if sym != -1:
                 if sym == 256:  # EOS — stop decoding
-                    return String(unsafe_from_utf8=out^)
+                    return String(unsafe_from_utf8=out)
                 out.append(UInt8(sym))
                 node     = 0
                 pad_bits = 0
@@ -516,7 +516,7 @@ def huffman_decode(data: List[UInt8]) raises -> String:
             raise Error("huffman decode: padding longer than 7 bits")
         if pad_ones == False:
             raise Error("huffman decode: padding not EOS prefix (must be all 1s)")
-    return String(unsafe_from_utf8=out^)
+    return String(unsafe_from_utf8=out)
 
 
 def hpack_encode_str(s: String, huffman: Bool) -> List[UInt8]:
@@ -853,7 +853,7 @@ def hpack_decode_block(
             var nr       = hpack_decode_int(data, off, 6)
             var name_idx = nr[0]
             off          = nr[1]
-            var name     = String("")
+            var name: String
             if name_idx > 0:
                 var p = dyn_table.combined_get(name_idx)
                 name  = p[0]
@@ -879,7 +879,7 @@ def hpack_decode_block(
             var nr       = hpack_decode_int(data, off, 4)
             var name_idx = nr[0]
             off          = nr[1]
-            var name     = String("")
+            var name: String
             if name_idx > 0:
                 var p = dyn_table.combined_get(name_idx)
                 name  = p[0]
@@ -897,7 +897,7 @@ def hpack_decode_block(
             var nr       = hpack_decode_int(data, off, 4)
             var name_idx = nr[0]
             off          = nr[1]
-            var name     = String("")
+            var name: String
             if name_idx > 0:
                 var p = dyn_table.combined_get(name_idx)
                 name  = p[0]

@@ -106,7 +106,7 @@ def _read_one_frame(mut conn: Http2Conn) raises -> Http2Frame:
     var payload = List[UInt8]()
     if length > 0:
         payload = conn._tls.recv_exact(length)
-    return Http2Frame(ftype, flags, sid, payload^)
+    return Http2Frame(ftype, flags, sid, payload)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
