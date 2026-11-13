@@ -1298,6 +1298,35 @@ def test_content_length_over_limit() raises:
         raise Error("expected error for oversized Content-Length")
 
 
+def test_max_response_bytes_is_configurable() raises:
+    """The buffering limit is per client: lower it and a 100 KB body is
+    refused, raise it and the same body is read."""
+    var client = HttpClient(allow_private_ips=True)
+    client.max_response_bytes = 1000
+    var raised = False
+    try:
+        _ = client.get(BASE + "/large")
+    except:
+        raised = True
+    assert_true(raised, "100 KB body over a 1000-byte limit raises")
+    client.max_response_bytes = 200000
+    assert_eq(client.get(BASE + "/large").body.byte_length(), 100000, "under the limit")
+
+
+def test_stream_not_capped_at_100mb() raises:
+    """get_stream does not buffer, so a body over 100 MB can be streamed."""
+    var client = HttpClient(allow_private_ips=True)
+    var stream = client.get_stream(BASE + "/stream/over-100mb")
+    var total = 0
+    while True:
+        var chunk = stream.read_chunk(1 << 20)
+        if len(chunk) == 0:
+            break
+        total += len(chunk)
+    stream.close()
+    assert_eq(total, 101 * 1024 * 1024, "streamed bytes")
+
+
 # ============================================================================
 # Phase 11 Tests — Security Parity
 # ============================================================================
@@ -1472,6 +1501,8 @@ def main() raises:
     print()
 
     run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_max_response_bytes_is_configurable]("max_response_bytes configurable", passed, failed)
+    run_test[test_stream_not_capped_at_100mb]("stream over 100 MB", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)

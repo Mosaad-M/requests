@@ -61,6 +61,14 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._respond(200, "OK", {"query": query})
         elif self.path == "/method":
             self._respond(200, "OK", {"method": "GET"})
+        elif self.path == "/stream/over-100mb":
+            size = 101 * 1024 * 1024
+            self.send_response(200)
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            chunk = b"z" * (1 << 20)
+            for _ in range(101):
+                self.wfile.write(chunk)
         elif self.path == "/redirect/301":
             self.send_response(301, "Moved Permanently")
             self.send_header("Location", "/redirect/target")
