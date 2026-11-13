@@ -1340,6 +1340,14 @@ def test_interim_100_continue_skipped() raises:
     assert_eq(resp.status_code, 200, "final status")
     assert_str_eq(resp.body, "ok", "final body")
 
+def test_connections_opened_counts_connects() raises:
+    """test_server.py closes every connection, so each request opens one."""
+    var client = HttpClient(allow_private_ips=True)
+    assert_eq(client.connections_opened, 0, "fresh client")
+    for _ in range(3):
+        _ = client.get(BASE + "/status/200")
+    assert_eq(client.connections_opened, 3, "one per closed connection")
+
 
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
@@ -1542,6 +1550,7 @@ def main() raises:
 
     run_test[test_no_content_does_not_wait_for_a_body]("204/304 without Content-Length", passed, failed)
     run_test[test_interim_100_continue_skipped]("100 Continue skipped", passed, failed)
+    run_test[test_connections_opened_counts_connects]("connections_opened counter", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)

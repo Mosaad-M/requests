@@ -495,6 +495,7 @@ struct HttpClient(Movable):
     var max_response_bytes: Int         # largest response body accepted (HTTP/1.1 and HTTP/2)
     var max_header_bytes: Int           # largest response header block accepted
     var max_batch_bytes: Int            # most body bytes held at once by one get_many batch
+    var connections_opened: Int         # TCP connections this client has opened (pool reuse = fewer)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
     var _deadline_ns: Int               # active deadline (perf_counter_ns instant; 0 = none)
     var _deadline_depth: Int            # nesting of calls sharing the active deadline
@@ -568,6 +569,7 @@ struct HttpClient(Movable):
         self.max_response_bytes = MAX_RESPONSE_BYTES
         self.max_header_bytes = MAX_HEADER_BYTES
         self.max_batch_bytes = MAX_BATCH_BYTES
+        self.connections_opened = 0
         self._timeout_secs = timeout_secs
         self._deadline_ns = 0
         self._deadline_depth = 0
@@ -630,6 +632,7 @@ struct HttpClient(Movable):
         self.max_response_bytes = move.max_response_bytes
         self.max_header_bytes = move.max_header_bytes
         self.max_batch_bytes = move.max_batch_bytes
+        self.connections_opened = move.connections_opened
         self._timeout_secs = move._timeout_secs
         self._deadline_ns = move._deadline_ns
         self._deadline_depth = move._deadline_depth
@@ -892,6 +895,7 @@ struct HttpClient(Movable):
 
         var header_end = -1
 
+        self.connections_opened += 1
         if is_tls:
             if not self._ca_loaded:
                 self._ca_bundle = load_system_ca_bundle()
@@ -1946,7 +1950,7 @@ struct HttpClient(Movable):
     # -------------------------------------------------------------------------
 
     def _tcp_connect(
-        self, target_host: String, target_port: Int, scheme: String = "http"
+        mut self, target_host: String, target_port: Int, scheme: String = "http"
     ) raises -> TcpSocket:
         """Return a TcpSocket connected to target_host:target_port.
 
@@ -1956,6 +1960,7 @@ struct HttpClient(Movable):
 
         If no proxy is configured, connects directly (normal behaviour).
         """
+        self.connections_opened += 1
         # Determine effective proxy URL: field takes priority over env vars
         var effective_proxy = self.proxy_url
         if effective_proxy.byte_length() == 0:
