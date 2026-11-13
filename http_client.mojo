@@ -1995,8 +1995,9 @@ struct StreamResponse(Movable):
         var leftover_avail = len(self._leftover) - self._leftover_pos
         if leftover_avail > 0:
             var take_n = min(size, leftover_avail)
-            for i in range(take_n):
-                result.append(self._leftover[self._leftover_pos + i])
+            result.extend(
+                Span(self._leftover)[self._leftover_pos : self._leftover_pos + take_n]
+            )
             self._leftover_pos += take_n
 
         # Fetch more from the socket if we still need bytes
@@ -2024,8 +2025,7 @@ struct StreamResponse(Movable):
                 if len(chunk) == 0:
                     self._done = True
                 else:
-                    for i in range(len(chunk)):
-                        result.append(chunk[i])
+                    result.extend(Span(chunk))
 
         self._body_read += len(result)
         if len(result) == 0:
@@ -2041,8 +2041,7 @@ struct StreamResponse(Movable):
             var chunk = self.read_chunk(65536)
             if len(chunk) == 0:
                 break
-            for i in range(len(chunk)):
-                buf.append(chunk[i])
+            buf.extend(Span(chunk))
         return String(unsafe_from_utf8=buf)
 
     def close(mut self) raises:
@@ -2103,24 +2102,21 @@ def _buf_leftover(buf: List[UInt8], start: Int) -> List[UInt8]:
     if start >= n:
         return List[UInt8]()
     var result = List[UInt8](capacity=n - start)
-    for i in range(start, n):
-        result.append(buf[i])
+    result.extend(Span(buf)[start:n])
     return result^
 
 
 def _buf_to_string(buf: List[UInt8], header_end: Int) -> String:
     """Build a String from buf[0..header_end] — used to pass headers-only to _parse_response."""
     var copy_buf = List[UInt8](capacity=header_end)
-    for i in range(header_end):
-        copy_buf.append(buf[i])
+    copy_buf.extend(Span(buf)[0:header_end])
     return String(unsafe_from_utf8=copy_buf)
 
 
 def _list_append(mut out: List[UInt8], src: List[UInt8]):
-    """Append src bytes to out with pre-reservation."""
-    out.reserve(len(out) + len(src))
-    for i in range(len(src)):
-        out.append(src[i])
+    """Append src bytes to out (one memcpy, not a loop of appends: this
+    carries every response body)."""
+    out.extend(Span(src))
 
 
 def _buf_find_crlf_crlf(buf: List[UInt8]) -> Int:
@@ -2337,8 +2333,7 @@ def _recv_tls_keepalive(
     # HEAD response: no body — return headers only
     if skip_body:
         var headers_only = List[UInt8](capacity=header_end + 4)
-        for i in range(header_end + 4):
-            headers_only.append(buf[i])
+        headers_only.extend(Span(buf)[0 : header_end + 4])
         return headers_only^
 
     # Phase 2: read body based on transfer mode
@@ -2413,8 +2408,7 @@ def _recv_http_keepalive(
     # HEAD response: no body — return headers only
     if skip_body:
         var headers_only = List[UInt8](capacity=header_end + 4)
-        for i in range(header_end + 4):
-            headers_only.append(buf[i])
+        headers_only.extend(Span(buf)[0 : header_end + 4])
         return headers_only^
 
     # Phase 2: read body based on transfer mode
