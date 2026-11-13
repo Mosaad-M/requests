@@ -57,12 +57,12 @@ def main() raises:
     var post_resp = client.post("http://httpbin.org/post", post_body)
     print("Status:", post_resp.status_code, post_resp.status_text)
     print("Body (first 200 chars):")
-    if len(post_resp.body) > 200:
+    if post_resp.body.byte_length() > 200:
         var truncated = List[UInt8](capacity=200)
         var b = post_resp.body.as_bytes()
         for i in range(200):
             truncated.append(b[i])
-        print(String(unsafe_from_utf8=truncated^) + "...")
+        print(String(unsafe_from_utf8=truncated) + "...")
     else:
         print(post_resp.body)
 

@@ -17,9 +17,12 @@
 #
 # ============================================================================
 
-from tcp import TcpSocket
+from tcp import TcpSocket, _set_socket_timeouts
 from tls.socket import TlsSocket, load_system_ca_bundle
-from h2_conn import Http2Conn, h2_preface_and_settings_exchange, h2_request as h2_do_request
+from h2_conn import (
+    Http2Conn, H2Request, H2Response, h2_preface_and_settings_exchange,
+    h2_request as h2_do_request, h2_request_many,
+)
 from hpack import HpackHeader
 from crypto.cert import X509Cert
 from crypto.base64 import base64_encode
@@ -32,6 +35,7 @@ from zstd_decompress import zstd_decompress, zstd_decompress_ptr, zstd_decode
 from codecs import Codecs, missing_library
 from psl import is_public_suffix
 from std.ffi import external_call
+from std.time import perf_counter_ns, sleep
 from std.os import getenv
 from std.memory.alloc import unsafe_alloc
 
@@ -120,6 +124,7 @@ def _hex(data: List[UInt8]) -> String:
 #   ValidationError  — bad input (header keys/values, method, port, host)
 #   ParseError       — malformed HTTP response
 #   ChunkedBodyError — chunked encoding protocol violation
+#   TimeoutError     — total_timeout_secs deadline exceeded
 
 
 comptime ERR_HTTP = "HTTPError"
@@ -128,10 +133,20 @@ comptime ERR_REDIRECT = "TooManyRedirects"
 comptime ERR_VALIDATION = "ValidationError"
 comptime ERR_PARSE = "ParseError"
 comptime ERR_CHUNKED = "ChunkedBodyError"
+comptime ERR_TIMEOUT = "TimeoutError"
 
-# Maximum bytes allowed in a single response (headers + body).
-# Prevents memory exhaustion from malicious or runaway servers.
+# Default maximum bytes allowed in a response body; HttpClient.max_response_bytes
+# overrides it. Prevents memory exhaustion from malicious or runaway servers.
 comptime MAX_RESPONSE_BYTES = 100 * 1024 * 1024  # 100 MB
+
+# Default maximum bytes allowed in a response header block;
+# HttpClient.max_header_bytes overrides it.
+comptime MAX_HEADER_BYTES = 1024 * 1024  # 1 MB
+
+# Default cap on body bytes buffered at once by one get_many batch;
+# HttpClient.max_batch_bytes overrides it. A stream that would push the batch
+# past it fails and is fetched again on its own.
+comptime MAX_BATCH_BYTES = 1024 * 1024 * 1024  # 1 GB
 
 
 def _err_http(status: Int, text: String) -> Error:
@@ -156,6 +171,76 @@ def _err_parse(msg: String) -> Error:
 
 def _err_chunked(msg: String) -> Error:
     return Error(ERR_CHUNKED + ": " + msg)
+
+
+def _err_timeout(msg: String) -> Error:
+    return Error(ERR_TIMEOUT + ": " + msg)
+
+
+# ============================================================================
+# Per-request receive limits and deadline
+# ============================================================================
+
+
+struct _Limits(Copyable, Movable):
+    """Size caps and the optional total deadline for one response read.
+
+    deadline_ns is a perf_counter_ns() instant (0 = no deadline). It is checked
+    between reads; on TLS the socket timeout is also shrunk to the time left
+    (whole seconds), so a stalled peer cannot outlast the deadline by more than
+    a second. Plain TCP has no timeout setter after connect, so a stall there
+    overshoots by at most timeout_secs.
+    """
+
+    var max_body: Int
+    var max_header: Int
+    var deadline_ns: Int
+    var timeout_secs: Int
+
+    def __init__(out self, max_body: Int, max_header: Int, deadline_ns: Int, timeout_secs: Int):
+        self.max_body = max_body
+        self.max_header = max_header
+        self.deadline_ns = deadline_ns
+        self.timeout_secs = timeout_secs
+
+    def __init__(out self, *, copy: Self):
+        self.max_body = copy.max_body
+        self.max_header = copy.max_header
+        self.deadline_ns = copy.deadline_ns
+        self.timeout_secs = copy.timeout_secs
+
+    def __init__(out self, *, deinit move: Self):
+        self.max_body = move.max_body
+        self.max_header = move.max_header
+        self.deadline_ns = move.deadline_ns
+        self.timeout_secs = move.timeout_secs
+
+
+def _secs_left(deadline_ns: Int) raises -> Int:
+    """Whole seconds (rounded up, >= 1) until deadline_ns; raises once it passed."""
+    var left = deadline_ns - Int(perf_counter_ns())
+    if left <= 0:
+        raise _err_timeout("total timeout exceeded")
+    return (left + 999_999_999) // 1_000_000_000
+
+
+def _check_deadline(lim: _Limits) raises:
+    if lim.deadline_ns != 0:
+        _ = _secs_left(lim.deadline_ns)
+
+
+def _arm_tcp(sock: TcpSocket, lim: _Limits) raises:
+    """Before a plain-TCP read: enforce the deadline and cap the read timeout to it.
+    shortcut: uses tcp's private _set_socket_timeouts (no public setter after
+    connect); switch to a public tcp API when one exists."""
+    if lim.deadline_ns != 0:
+        _set_socket_timeouts(sock.fd, min(lim.timeout_secs, _secs_left(lim.deadline_ns)))
+
+
+def _arm_tls(mut sock: TlsSocket, lim: _Limits) raises:
+    """Before a TLS read: enforce the deadline and cap the read timeout to it."""
+    if lim.deadline_ns != 0:
+        sock.set_timeout(min(lim.timeout_secs, _secs_left(lim.deadline_ns)))
 
 
 # ============================================================================
@@ -403,7 +488,16 @@ struct HttpClient(Movable):
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
+    var total_timeout_secs: Int         # deadline for a whole request incl. redirects and retries (0 = none)
+    var max_retries: Int                # extra attempts after a retryable failure (0 = never retry)
+    var retry_backoff_ms: Int           # base delay; doubles per attempt, jittered, capped at 30 s
+    var retry_non_idempotent: Bool      # also retry POST/PATCH (may repeat side effects)
+    var max_response_bytes: Int         # largest response body accepted (HTTP/1.1 and HTTP/2)
+    var max_header_bytes: Int           # largest response header block accepted
+    var max_batch_bytes: Int            # most body bytes held at once by one get_many batch
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
+    var _deadline_ns: Int               # active deadline (perf_counter_ns instant; 0 = none)
+    var _deadline_depth: Int            # nesting of calls sharing the active deadline
 
     # CA bundle cache — loaded once on first HTTPS request
     var _ca_bundle: List[X509Cert]
@@ -467,7 +561,16 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
         self.proxy_url = String("")
+        self.total_timeout_secs = 0
+        self.max_retries = 0
+        self.retry_backoff_ms = 200
+        self.retry_non_idempotent = False
+        self.max_response_bytes = MAX_RESPONSE_BYTES
+        self.max_header_bytes = MAX_HEADER_BYTES
+        self.max_batch_bytes = MAX_BATCH_BYTES
         self._timeout_secs = timeout_secs
+        self._deadline_ns = 0
+        self._deadline_depth = 0
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
         self._codecs = Codecs(zlib=False, brotli=False, zstd=False)
@@ -520,7 +623,16 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = move.redirect_same_host_only
         self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
         self.proxy_url = move.proxy_url^
+        self.total_timeout_secs = move.total_timeout_secs
+        self.max_retries = move.max_retries
+        self.retry_backoff_ms = move.retry_backoff_ms
+        self.retry_non_idempotent = move.retry_non_idempotent
+        self.max_response_bytes = move.max_response_bytes
+        self.max_header_bytes = move.max_header_bytes
+        self.max_batch_bytes = move.max_batch_bytes
         self._timeout_secs = move._timeout_secs
+        self._deadline_ns = move._deadline_ns
+        self._deadline_depth = move._deadline_depth
         self._ca_bundle = move._ca_bundle^
         self._ca_loaded = move._ca_loaded
         self._codecs = move._codecs^
@@ -598,6 +710,158 @@ struct HttpClient(Movable):
         """Return the number of cookies stored in the cookie jar."""
         return len(self._jar_names)
 
+    # === GET MANY (HTTP/2 multiplexing) ===
+
+    def get_many(
+        mut self, urls: List[String], headers: HttpHeaders = HttpHeaders()
+    ) raises -> List[HttpResponse]:
+        """GET several URLs and return their responses in the same order.
+
+        URLs on the same HTTPS host that speaks HTTP/2 share one connection and
+        their requests are in flight together (up to the server's concurrent-
+        stream limit), so N requests cost about one round trip instead of N.
+        Everything else (plain HTTP, HTTP/1.1-only hosts) is fetched one by
+        one, exactly like get().
+
+        The first URL of each host goes out alone: it opens (or reuses) the
+        connection and shows whether the host speaks HTTP/2; the rest follow
+        as a batch. A URL whose stream fails, or that answers with a redirect,
+        is fetched again with get(), so redirects, retries and the total
+        timeout behave as they do there. Raises on the first URL that still
+        fails; responses fetched before it are discarded.
+        """
+        self._deadline_begin()
+        try:
+            var r = self._get_many(urls, headers)
+            self._deadline_end()
+            return r^
+        except e:
+            self._deadline_end()
+            raise e^
+
+    def _get_many(
+        mut self, urls: List[String], headers: HttpHeaders
+    ) raises -> List[HttpResponse]:
+        var n = len(urls)
+        var results = List[HttpResponse]()
+        var have = List[Bool]()
+        var keys = List[String]()  # "host:port" for HTTPS URLs, "" for the rest
+        for i in range(n):
+            results.append(HttpResponse())
+            have.append(False)
+            var u = parse_url(urls[i])
+            if u.scheme == "https":
+                keys.append(u.host + ":" + String(u.port))
+            else:
+                keys.append(String(""))
+
+        for i in range(n):
+            if have[i]:
+                continue
+            results[i] = self._follow_redirects(
+                "GET", urls[i], String(""), headers, True, self.max_redirects
+            )
+            have[i] = True
+            if keys[i].byte_length() == 0:
+                continue
+            var group = List[Int]()
+            for j in range(i + 1, n):
+                if not have[j] and keys[j] == keys[i]:
+                    group.append(j)
+            if len(group) == 0:
+                continue
+            var slot = self._h2_find_slot(keys[i])
+            if slot >= 0:
+                self._get_batch(slot, urls, group, headers, results)
+            else:
+                for k in range(len(group)):
+                    results[group[k]] = self._follow_redirects(
+                        "GET", urls[group[k]], String(""), headers, True, self.max_redirects
+                    )
+            for k in range(len(group)):
+                have[group[k]] = True
+        return results^
+
+    def _get_batch(
+        mut self,
+        slot: Int,
+        urls: List[String],
+        group: List[Int],
+        headers: HttpHeaders,
+        mut results: List[HttpResponse],
+    ) raises:
+        """Fetch urls[group[k]] together on H2 slot `slot` into results."""
+        var reqs = List[H2Request]()
+        var parsed = List[Url]()
+        for k in range(len(group)):
+            var u = parse_url(urls[group[k]])
+            _validate_path(u.request_path())
+            reqs.append(
+                H2Request(
+                    "GET",
+                    u.request_path(),
+                    self._h2_build_headers(u, String(""), headers),
+                    List[UInt8](),
+                )
+            )
+            parsed.append(u^)
+        var res = List[H2Response]()
+        var ok = True
+        try:
+            res = self._h2_many_slot(slot, reqs)
+        except e:
+            self._h2_close_slot(slot)
+            if _is_fatal_reuse_error(String(e)):
+                raise e^
+            ok = False
+        if ok:
+            self._h2_touch(slot)
+        for k in range(len(group)):
+            var g = group[k]
+            var again = not ok or res[k].error.byte_length() > 0
+            if not again:
+                var r = self._h2_response(parsed[k], res[k].status, res[k].headers, res[k].body)
+                again = r.status_code in (301, 302, 303, 307, 308) or (
+                    self.max_retries > 0 and _is_retryable_status(r.status_code)
+                )
+                if not again:
+                    results[g] = r^
+            if again:
+                results[g] = self._follow_redirects(
+                    "GET", urls[g], String(""), headers, True, self.max_redirects
+                )
+
+    def _h2_find_slot(mut self, key: String) -> Int:
+        """H2 pool slot holding a live connection for host:port `key`, or -1."""
+        var now = _unix_time_secs()
+        for i in range(4):
+            if self._h2_keys[i] == key and self._h2_times[i] > Int64(0):
+                if Int(now - self._h2_times[i]) > self.pool_idle_timeout_secs:
+                    self._h2_close_slot(i)
+                    continue
+                return i
+        return -1
+
+    def _h2_many_slot(
+        mut self, slot: Int, reqs: List[H2Request]
+    ) raises -> List[H2Response]:
+        var mb = self.max_response_bytes
+        var mh = self.max_header_bytes
+        var dl = self._deadline_ns
+        var ts = self._timeout_secs
+        if slot == 0:
+            self._h2_conn0._timeout_secs = ts
+            return h2_request_many(self._h2_conn0, reqs, mb, mh, dl, self.max_batch_bytes)
+        elif slot == 1:
+            self._h2_conn1._timeout_secs = ts
+            return h2_request_many(self._h2_conn1, reqs, mb, mh, dl, self.max_batch_bytes)
+        elif slot == 2:
+            self._h2_conn2._timeout_secs = ts
+            return h2_request_many(self._h2_conn2, reqs, mb, mh, dl, self.max_batch_bytes)
+        else:
+            self._h2_conn3._timeout_secs = ts
+            return h2_request_many(self._h2_conn3, reqs, mb, mh, dl, self.max_batch_bytes)
+
     # === STREAM ===
 
     def get_stream(mut self, url_str: String) raises -> StreamResponse:
@@ -635,7 +899,7 @@ struct HttpClient(Movable):
             http_sock.connect(
                 url.host, url.port,
                 reject_private_ips=not self.allow_private_ips,
-                timeout_secs=self._timeout_secs,
+                timeout_secs=self._connect_timeout(),
             )
             tls_sock = TlsSocket(http_sock.detach())
             tls_sock.connect(url.host, self._ca_bundle)
@@ -650,7 +914,7 @@ struct HttpClient(Movable):
             http_sock.connect(
                 url.host, url.port,
                 reject_private_ips=not self.allow_private_ips,
-                timeout_secs=self._timeout_secs,
+                timeout_secs=self._connect_timeout(),
             )
             var request = String(unsafe_from_utf8=req_buf)
             _ = http_sock.send(request)
@@ -835,6 +1099,27 @@ struct HttpClient(Movable):
         allow_redirects: Bool,
         max_redirects: Int,
     ) raises -> HttpResponse:
+        """Run the redirect chain under one total_timeout_secs deadline."""
+        self._deadline_begin()
+        try:
+            var r = self._follow_redirects_inner(
+                method, url, body, headers, allow_redirects, max_redirects
+            )
+            self._deadline_end()
+            return r^
+        except e:
+            self._deadline_end()
+            raise e^
+
+    def _follow_redirects_inner(
+        mut self,
+        method: String,
+        url: String,
+        body: String,
+        headers: HttpHeaders,
+        allow_redirects: Bool,
+        max_redirects: Int,
+    ) raises -> HttpResponse:
         """Perform a request and follow HTTP redirects up to max_redirects hops.
 
         Redirect semantics:
@@ -906,6 +1191,48 @@ struct HttpClient(Movable):
 
         raise _err_redirect(max_redirects)
 
+    # -------------------------------------------------------------------------
+    # Deadline, limits and retries
+    # -------------------------------------------------------------------------
+
+    def _deadline_begin(mut self) raises:
+        """Start the total-timeout clock for the outermost call; nested calls
+        (redirect hops, retries) share it."""
+        if self._deadline_depth == 0:
+            if self.total_timeout_secs < 0:
+                raise _err_validation("total_timeout_secs must be >= 0")
+            if self.max_retries < 0 or self.retry_backoff_ms < 0:
+                raise _err_validation("max_retries and retry_backoff_ms must be >= 0")
+            if self.max_response_bytes <= 0 or self.max_header_bytes <= 0 or self.max_batch_bytes <= 0:
+                raise _err_validation("max_response_bytes, max_header_bytes and max_batch_bytes must be > 0")
+            if self.total_timeout_secs > 0:
+                self._deadline_ns = Int(perf_counter_ns()) + self.total_timeout_secs * 1_000_000_000
+            else:
+                self._deadline_ns = 0
+        self._deadline_depth += 1
+
+    def _may_replay(self, method: String) -> Bool:
+        """Whether a request that failed on a pooled connection may be sent again
+        on a new one. The server may already have processed it, so POST/PATCH
+        are only replayed with retry_non_idempotent (as Go's net/http does)."""
+        return self.retry_non_idempotent or _is_idempotent(method)
+
+    def _deadline_end(mut self):
+        self._deadline_depth -= 1
+        if self._deadline_depth == 0:
+            self._deadline_ns = 0
+
+    def _limits(self) -> _Limits:
+        return _Limits(
+            self.max_response_bytes, self.max_header_bytes, self._deadline_ns, self._timeout_secs
+        )
+
+    def _connect_timeout(self) raises -> Int:
+        """Socket timeout for a new connection: timeout_secs, capped to the time left."""
+        if self._deadline_ns == 0:
+            return self._timeout_secs
+        return min(self._timeout_secs, _secs_left(self._deadline_ns))
+
     def _do_request(
         mut self,
         method: String,
@@ -913,7 +1240,69 @@ struct HttpClient(Movable):
         body: String,
         extra_headers: HttpHeaders,
     ) raises -> HttpResponse:
-        """Internal implementation for all HTTP methods."""
+        """Perform one request: retries (max_retries) inside the total deadline."""
+        self._deadline_begin()
+        try:
+            var r = self._request_with_retries(method, url_str, body, extra_headers)
+            self._deadline_end()
+            return r^
+        except e:
+            var es = String(e)
+            var now = Int(perf_counter_ns())
+            # Reads time out in whole seconds, so one can end just before the instant.
+            var expired = self._deadline_ns != 0 and (
+                now >= self._deadline_ns
+                or (now + 1_000_000_000 >= self._deadline_ns and _str_contains(es, "timed out"))
+            )
+            self._deadline_end()
+            if expired and not es.startswith(ERR_TIMEOUT):
+                # A socket timeout capped to the deadline surfaces as a raw
+                # "timed out" error: report it as the deadline it was.
+                raise _err_timeout("total timeout exceeded (" + es + ")")
+            raise e^
+
+    def _request_with_retries(
+        mut self,
+        method: String,
+        url_str: String,
+        body: String,
+        extra_headers: HttpHeaders,
+    ) raises -> HttpResponse:
+        var may_retry = self.max_retries > 0 and (
+            self.retry_non_idempotent or _is_idempotent(method)
+        )
+        var attempt = 0
+        while True:
+            var wait_ms = -1
+            try:
+                var resp = self._do_request_once(method, url_str, body, extra_headers)
+                if not may_retry or attempt >= self.max_retries or not _is_retryable_status(
+                    resp.status_code
+                ):
+                    return resp^
+                wait_ms = _retry_after_ms(resp.headers.get("Retry-After"))
+                var d = wait_ms if wait_ms >= 0 else _backoff_ms(self.retry_backoff_ms, attempt)
+                if self._deadline_ns != 0 and Int(perf_counter_ns()) + d * 1_000_000 >= self._deadline_ns:
+                    return resp^  # no time to wait: the caller still gets the status
+                wait_ms = d
+            except e:
+                if not may_retry or attempt >= self.max_retries or not _is_transient(String(e)):
+                    raise e^
+            var delay = wait_ms if wait_ms >= 0 else _backoff_ms(self.retry_backoff_ms, attempt)
+            if self._deadline_ns != 0:
+                if Int(perf_counter_ns()) + delay * 1_000_000 >= self._deadline_ns:
+                    raise _err_timeout("total timeout exceeded before retry " + String(attempt + 1))
+            sleep(Float64(delay) / 1000.0)
+            attempt += 1
+
+    def _do_request_once(
+        mut self,
+        method: String,
+        url_str: String,
+        body: String,
+        extra_headers: HttpHeaders,
+    ) raises -> HttpResponse:
+        """One attempt of a request (no retries)."""
 
         # Step 0: Validate inputs to prevent injection attacks
         _validate_method(method)
@@ -1000,11 +1389,13 @@ struct HttpClient(Movable):
             if h2_hit >= 0:
                 try:
                     var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
-                    self._h2_times[h2_hit] = _unix_time_secs()
+                    self._h2_touch(h2_hit)
                     return h2_resp^
-                except:
+                except e:
                     self._h2_close_slot(h2_hit)
                     h2_hit = -1
+                    if _is_fatal_reuse_error(String(e)) or not self._may_replay(method):
+                        raise e^
 
             # Phase 2: try to reuse a cached H1 TLS slot
             var now_tls = _unix_time_secs()
@@ -1020,9 +1411,11 @@ struct HttpClient(Movable):
                 try:
                     raw_bytes = self._tls_try_reuse(tls_hit, req_buf, skip_body)
                     self._tls_times[tls_hit] = _unix_time_secs()
-                except:
+                except e:
                     self._tls_close_slot(tls_hit)
                     tls_hit = -1
+                    if _is_fatal_reuse_error(String(e)) or not self._may_replay(method):
+                        raise e^
 
             # Phase 3: new connection with ALPN ["h2", "http/1.1"]
             if h2_hit < 0 and tls_hit < 0:
@@ -1054,7 +1447,7 @@ struct HttpClient(Movable):
                         self._h2_conn3 = new_h2^
                     h2_hit = evict
                     var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
-                    self._h2_times[h2_hit] = _unix_time_secs()
+                    self._h2_touch(h2_hit)
                     return h2_resp^
                 elif proto.byte_length() == 0:
                     # Server did not echo ALPN (TLS 1.2 fallback or silent h2).
@@ -1088,7 +1481,7 @@ struct HttpClient(Movable):
                             self._h2_conn3 = new_h2^
                         h2_hit = evict
                         var h2_resp = self._h2_do_request(h2_hit, method, url, body, extra_headers)
-                        self._h2_times[h2_hit] = _unix_time_secs()
+                        self._h2_touch(h2_hit)
                         return h2_resp^
                     else:
                         # H2 probe failed — open fresh TCP+TLS (no ALPN) for H1
@@ -1096,7 +1489,7 @@ struct HttpClient(Movable):
                         var fb_tls = TlsSocket(fb_tcp.detach())
                         fb_tls.connect(url.host, self._ca_bundle)
                         _ = fb_tls.send(req_buf)
-                        raw_bytes = _recv_tls_keepalive(fb_tls, skip_body)
+                        raw_bytes = _recv_tls_keepalive(fb_tls, skip_body, self._limits())
                         var evict = self._tls_evict_slot()
                         if self._tls_times[evict] > Int64(0):
                             self._tls_close_slot(evict)
@@ -1114,7 +1507,7 @@ struct HttpClient(Movable):
                 else:
                     # proto == "http/1.1": server explicitly chose H1 via ALPN
                     _ = new_tls.send(req_buf)
-                    raw_bytes = _recv_tls_keepalive(new_tls, skip_body)
+                    raw_bytes = _recv_tls_keepalive(new_tls, skip_body, self._limits())
                     var evict = self._tls_evict_slot()
                     if self._tls_times[evict] > Int64(0):
                         self._tls_close_slot(evict)
@@ -1146,16 +1539,18 @@ struct HttpClient(Movable):
                     var request = String(unsafe_from_utf8=req_buf.copy())
                     raw_bytes = self._http_try_reuse(http_hit, request, skip_body)
                     self._http_times[http_hit] = _unix_time_secs()
-                except:
+                except e:
                     self._http_close_slot(http_hit)
                     http_hit = -1
+                    if _is_fatal_reuse_error(String(e)) or not self._may_replay(method):
+                        raise e^
 
             # Phase 2: new HTTP connection if no reuse
             if http_hit < 0:
                 var new_sock = self._tcp_connect(url.host, url.port)
                 var request = String(unsafe_from_utf8=req_buf)
                 _ = new_sock.send(request)
-                raw_bytes = _recv_http_keepalive(new_sock, skip_body)
+                raw_bytes = _recv_http_keepalive(new_sock, skip_body, self._limits())
                 var evict = self._http_evict_slot()
                 if self._http_times[evict] > Int64(0):
                     self._http_close_slot(evict)
@@ -1243,18 +1638,19 @@ struct HttpClient(Movable):
         mut self, i: Int, request: String, skip_body: Bool
     ) raises -> List[UInt8]:
         """Send request and recv response on HTTP pool slot i (raises on failure)."""
+        var lim = self._limits()
         if i == 0:
             _ = self._http_sock0.send(request)
-            return _recv_http_keepalive(self._http_sock0, skip_body)
+            return _recv_http_keepalive(self._http_sock0, skip_body, lim)
         elif i == 1:
             _ = self._http_sock1.send(request)
-            return _recv_http_keepalive(self._http_sock1, skip_body)
+            return _recv_http_keepalive(self._http_sock1, skip_body, lim)
         elif i == 2:
             _ = self._http_sock2.send(request)
-            return _recv_http_keepalive(self._http_sock2, skip_body)
+            return _recv_http_keepalive(self._http_sock2, skip_body, lim)
         else:
             _ = self._http_sock3.send(request)
-            return _recv_http_keepalive(self._http_sock3, skip_body)
+            return _recv_http_keepalive(self._http_sock3, skip_body, lim)
 
     # -------------------------------------------------------------------------
     # LRU-4 Pool Helpers — TLS
@@ -1298,18 +1694,19 @@ struct HttpClient(Movable):
         mut self, i: Int, req_buf: List[UInt8], skip_body: Bool
     ) raises -> List[UInt8]:
         """Send request and recv response on TLS pool slot i (raises on failure)."""
+        var lim = self._limits()
         if i == 0:
             _ = self._tls_sock0.send(req_buf)
-            return _recv_tls_keepalive(self._tls_sock0, skip_body)
+            return _recv_tls_keepalive(self._tls_sock0, skip_body, lim)
         elif i == 1:
             _ = self._tls_sock1.send(req_buf)
-            return _recv_tls_keepalive(self._tls_sock1, skip_body)
+            return _recv_tls_keepalive(self._tls_sock1, skip_body, lim)
         elif i == 2:
             _ = self._tls_sock2.send(req_buf)
-            return _recv_tls_keepalive(self._tls_sock2, skip_body)
+            return _recv_tls_keepalive(self._tls_sock2, skip_body, lim)
         else:
             _ = self._tls_sock3.send(req_buf)
-            return _recv_tls_keepalive(self._tls_sock3, skip_body)
+            return _recv_tls_keepalive(self._tls_sock3, skip_body, lim)
 
     # -------------------------------------------------------------------------
     # LRU-4 Pool Helpers — H2
@@ -1332,6 +1729,8 @@ struct HttpClient(Movable):
 
     def _h2_close_slot(mut self, i: Int):
         """Close H2 conn in pool slot i and mark slot unused."""
+        if self._h2_times[i] == Int64(0) and self._h2_keys[i].byte_length() == 0:
+            return  # already closed
         try:
             if i == 0:
                 self._h2_conn0.close()
@@ -1345,6 +1744,23 @@ struct HttpClient(Movable):
             pass
         self._h2_times[i] = Int64(0)
         self._h2_keys[i]  = String("")
+
+    def _h2_touch(mut self, slot: Int):
+        """After a request on H2 slot `slot`: mark it fresh, or drop it if the
+        server sent GOAWAY (it takes no new streams)."""
+        var goaway: Bool
+        if slot == 0:
+            goaway = self._h2_conn0._goaway
+        elif slot == 1:
+            goaway = self._h2_conn1._goaway
+        elif slot == 2:
+            goaway = self._h2_conn2._goaway
+        else:
+            goaway = self._h2_conn3._goaway
+        if goaway:
+            self._h2_close_slot(slot)
+        else:
+            self._h2_times[slot] = _unix_time_secs()
 
     def _h2_do_request(
         mut self,
@@ -1375,6 +1791,65 @@ struct HttpClient(Movable):
         Raises:
             Error on GOAWAY, RST_STREAM, TLS failure, or decompression error.
         """
+        var h2_hdrs = self._h2_build_headers(url, body, extra_headers)
+        var body_bytes = List[UInt8]()
+        if body.byte_length() > 0:
+            var bb = body.as_bytes()
+            for i in range(len(bb)):
+                body_bytes.append(bb[i])
+
+        # ── Call h2_do_request on the correct pool slot ───────────────────
+        var result: Tuple[Int, List[HpackHeader], List[UInt8]]
+        var mb = self.max_response_bytes
+        var mh = self.max_header_bytes
+        var dl = self._deadline_ns
+        var ts = self._timeout_secs
+        try:
+            result = self._h2_run(slot, method, url, h2_hdrs, body_bytes, mb, mh, dl, ts)
+        except e:
+            # A failed exchange can leave the connection half-read: never reuse it.
+            self._h2_close_slot(slot)
+            raise e^
+
+        return self._h2_response(url, result[0], result[1], result[2])
+
+    def _h2_run(
+        mut self,
+        slot: Int,
+        method: String,
+        url: Url,
+        h2_hdrs: List[HpackHeader],
+        body_bytes: List[UInt8],
+        mb: Int,
+        mh: Int,
+        dl: Int,
+        ts: Int,
+    ) raises -> Tuple[Int, List[HpackHeader], List[UInt8]]:
+        var result: Tuple[Int, List[HpackHeader], List[UInt8]]
+        if slot == 0:
+            self._h2_conn0._timeout_secs = ts
+            result = h2_do_request(self._h2_conn0, method, url.request_path(),
+                                   h2_hdrs, body_bytes, mb, mh, dl)
+        elif slot == 1:
+            self._h2_conn1._timeout_secs = ts
+            result = h2_do_request(self._h2_conn1, method, url.request_path(),
+                                   h2_hdrs, body_bytes, mb, mh, dl)
+        elif slot == 2:
+            self._h2_conn2._timeout_secs = ts
+            result = h2_do_request(self._h2_conn2, method, url.request_path(),
+                                   h2_hdrs, body_bytes, mb, mh, dl)
+        else:
+            self._h2_conn3._timeout_secs = ts
+            result = h2_do_request(self._h2_conn3, method, url.request_path(),
+                                   h2_hdrs, body_bytes, mb, mh, dl)
+        return result^
+
+    def _h2_build_headers(
+        mut self, url: Url, body: String, extra_headers: HttpHeaders
+    ) -> List[HpackHeader]:
+        """HPACK header list for one request: authority, user-agent, accept,
+        accept-encoding, content-length/type, cookies, extra headers. The
+        :method, :path and :scheme pseudo-headers are added by h2_request."""
         # ── Build HPACK header list ───────────────────────────────────────
         # :method, :path, :scheme are prepended by h2_do_request itself.
         var h2_hdrs = List[HpackHeader]()
@@ -1394,12 +1869,8 @@ struct HttpClient(Movable):
             h2_hdrs.append(HpackHeader("accept-encoding", self._accept_encoding()))
 
         # content-length and content-type for non-empty bodies
-        var body_bytes = List[UInt8]()
         if body.byte_length() > 0:
-            var bb = body.as_bytes()
-            for i in range(len(bb)):
-                body_bytes.append(bb[i])
-            h2_hdrs.append(HpackHeader("content-length", String(len(body_bytes))))
+            h2_hdrs.append(HpackHeader("content-length", String(body.byte_length())))
             if not extra_headers.has("Content-Type"):
                 h2_hdrs.append(HpackHeader("content-type", "application/json"))
 
@@ -1423,25 +1894,17 @@ struct HttpClient(Movable):
                     low.append(b)
             h2_hdrs.append(HpackHeader(String(unsafe_from_utf8=low), extra_headers._values[i]))
 
-        # ── Call h2_do_request on the correct pool slot ───────────────────
-        var result: Tuple[Int, List[HpackHeader], List[UInt8]]
-        if slot == 0:
-            result = h2_do_request(self._h2_conn0, method, url.request_path(),
-                                   h2_hdrs, body_bytes)
-        elif slot == 1:
-            result = h2_do_request(self._h2_conn1, method, url.request_path(),
-                                   h2_hdrs, body_bytes)
-        elif slot == 2:
-            result = h2_do_request(self._h2_conn2, method, url.request_path(),
-                                   h2_hdrs, body_bytes)
-        else:
-            result = h2_do_request(self._h2_conn3, method, url.request_path(),
-                                   h2_hdrs, body_bytes)
+        return h2_hdrs^
 
-        var status       = result[0]
-        var resp_headers = result[1].copy()
-        var resp_body    = result[2].copy()
-
+    def _h2_response(
+        mut self,
+        url: Url,
+        status: Int,
+        resp_headers: List[HpackHeader],
+        resp_body: List[UInt8],
+    ) raises -> HttpResponse:
+        """Turn a raw HTTP/2 result into an HttpResponse: headers, body
+        decompression, Set-Cookie into the jar."""
         # ── Build HttpResponse ────────────────────────────────────────────
         var resp = HttpResponse()
         resp.status_code = status
@@ -1518,7 +1981,7 @@ struct HttpClient(Movable):
                 target_host,
                 target_port,
                 reject_private_ips=not self.allow_private_ips,
-                timeout_secs=self._timeout_secs,
+                timeout_secs=self._connect_timeout(),
             )
             return sock^
 
@@ -1533,7 +1996,7 @@ struct HttpClient(Movable):
             proxy_host,
             proxy_port,
             reject_private_ips=False,
-            timeout_secs=self._timeout_secs,
+            timeout_secs=self._connect_timeout(),
         )
 
         # Send CONNECT request
@@ -2308,7 +2771,7 @@ def _str_contains(haystack: String, needle: String) -> Bool:
 
 
 def _recv_tls_keepalive(
-    mut sock: TlsSocket, skip_body: Bool = False
+    mut sock: TlsSocket, skip_body: Bool, lim: _Limits
 ) raises -> List[UInt8]:
     """Read exactly one complete HTTP response from a TLS keep-alive connection.
 
@@ -2320,19 +2783,31 @@ def _recv_tls_keepalive(
 
     Args:
         skip_body: If True, stop after headers (used for HEAD responses).
+        lim: Header/body size caps and the optional total deadline.
     """
+    var out = _recv_tls_response(sock, skip_body, lim)
+    if lim.deadline_ns != 0:
+        # The socket goes back to the pool: undo the deadline-shrunk timeout.
+        sock.set_timeout(lim.timeout_secs)
+    return out^
+
+
+def _recv_tls_response(
+    mut sock: TlsSocket, skip_body: Bool, lim: _Limits
+) raises -> List[UInt8]:
     var buf = List[UInt8]()
 
     # Phase 1: read until headers complete
     var header_end = -1
     while header_end < 0:
+        _arm_tls(sock, lim)
         var chunk = sock.recv(4096)
         if len(chunk) == 0:
             raise _err_connection("connection closed before response headers")
         _list_append(buf, chunk)
-        if len(buf) > MAX_RESPONSE_BYTES:
-            raise _err_connection("response headers exceed size limit")
         header_end = _buf_find_crlf_crlf(buf)
+        if (header_end < 0 and len(buf) > lim.max_header) or header_end + 4 > lim.max_header:
+            raise _err_connection("response headers exceed size limit")
 
     # HEAD response: no body — return headers only
     if skip_body:
@@ -2342,53 +2817,84 @@ def _recv_tls_keepalive(
         return headers_only^
 
     # Phase 2: read body based on transfer mode
+    var body_start = header_end + 4
     var cl = _buf_content_length(buf, header_end)
     if cl >= 0:
-        if cl > MAX_RESPONSE_BYTES:
+        if cl > lim.max_body:
             raise _err_connection("Content-Length exceeds response size limit")
         # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
-        buf.reserve(header_end + 4 + cl)
-        var body_start = header_end + 4
+        buf.reserve(body_start + cl)
         var have = len(buf) - body_start
         if cl > have:
-            var more = sock.recv_exact(cl - have)
-            _list_append(buf, more)
+            if lim.deadline_ns == 0:
+                var more = sock.recv_exact(cl - have)
+                _list_append(buf, more)
+            else:
+                # recv_exact would block past the deadline: read in pieces.
+                while len(buf) - body_start < cl:
+                    _arm_tls(sock, lim)
+                    var piece = len(buf) - body_start
+                    var chunk = sock.recv(min(cl - piece, 65536))
+                    if len(chunk) == 0:
+                        raise _err_connection("connection closed before body complete")
+                    _list_append(buf, chunk)
         return buf^
     elif _buf_has_chunked(buf, header_end):
-        while not _buf_chunked_complete(buf, header_end + 4):
+        while not _buf_chunked_complete(buf, body_start):
             try:
+                _arm_tls(sock, lim)
                 var chunk = sock.recv(4096)
                 if len(chunk) == 0:
                     break
                 _list_append(buf, chunk)
             except e:
                 var es = String(e)
+                if es.startswith(ERR_TIMEOUT):
+                    raise e^
                 if _str_contains(es, "close_notify") or _str_contains(
                     es, "connection closed"
                 ):
                     break
                 raise _err_connection(es)
+            if len(buf) - body_start > lim.max_body:
+                raise _err_connection("chunked body exceeds response size limit")
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes
         while True:
             try:
+                _arm_tls(sock, lim)
                 var chunk = sock.recv(4096)
                 if len(chunk) == 0:
                     break
                 _list_append(buf, chunk)
             except e:
                 var es = String(e)
+                if es.startswith(ERR_TIMEOUT):
+                    raise e^
                 if _str_contains(es, "close_notify") or _str_contains(
                     es, "connection closed"
                 ):
                     break
                 raise _err_connection(es)
+            if len(buf) - body_start > lim.max_body:
+                raise _err_connection("response body exceeds size limit")
         return buf^
 
 
 def _recv_http_keepalive(
-    mut sock: TcpSocket, skip_body: Bool = False
+    mut sock: TcpSocket, skip_body: Bool, lim: _Limits
+) raises -> List[UInt8]:
+    """Read exactly one complete HTTP response from a TCP keep-alive connection
+    (see _recv_http_response); restores the pooled socket's normal timeout."""
+    var out = _recv_http_response(sock, skip_body, lim)
+    if lim.deadline_ns != 0:
+        _set_socket_timeouts(sock.fd, lim.timeout_secs)
+    return out^
+
+
+def _recv_http_response(
+    mut sock: TcpSocket, skip_body: Bool, lim: _Limits
 ) raises -> List[UInt8]:
     """Read exactly one complete HTTP response from a TCP keep-alive connection.
 
@@ -2396,19 +2902,21 @@ def _recv_http_keepalive(
 
     Args:
         skip_body: If True, stop after headers (used for HEAD responses).
+        lim: Header/body size caps and the optional total deadline.
     """
     var buf = List[UInt8]()
 
     # Phase 1: read until headers complete
     var header_end = -1
     while header_end < 0:
+        _arm_tcp(sock, lim)
         var chunk = sock.recv_bytes(4096)
         if len(chunk) == 0:
             raise _err_connection("connection closed before response headers")
         _list_append(buf, chunk)
-        if len(buf) > MAX_RESPONSE_BYTES:
-            raise _err_connection("response headers exceed size limit")
         header_end = _buf_find_crlf_crlf(buf)
+        if (header_end < 0 and len(buf) > lim.max_header) or header_end + 4 > lim.max_header:
+            raise _err_connection("response headers exceed size limit")
 
     # HEAD response: no body — return headers only
     if skip_body:
@@ -2418,33 +2926,116 @@ def _recv_http_keepalive(
         return headers_only^
 
     # Phase 2: read body based on transfer mode
+    var body_start = header_end + 4
     var cl = _buf_content_length(buf, header_end)
     if cl >= 0:
-        if cl > MAX_RESPONSE_BYTES:
+        if cl > lim.max_body:
             raise _err_connection("Content-Length exceeds response size limit")
         # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
-        buf.reserve(header_end + 4 + cl)
-        var body_start = header_end + 4
+        buf.reserve(body_start + cl)
         var have = len(buf) - body_start
         if cl > have:
-            var more = sock.recv_bytes_exact(cl - have)
-            _list_append(buf, more)
+            if lim.deadline_ns == 0:
+                var more = sock.recv_bytes_exact(cl - have)
+                _list_append(buf, more)
+            else:
+                while len(buf) - body_start < cl:
+                    _arm_tcp(sock, lim)
+                    var piece = len(buf) - body_start
+                    var chunk = sock.recv_bytes(min(cl - piece, 65536))
+                    if len(chunk) == 0:
+                        raise _err_connection("connection closed before body complete")
+                    _list_append(buf, chunk)
         return buf^
     elif _buf_has_chunked(buf, header_end):
-        while not _buf_chunked_complete(buf, header_end + 4):
+        while not _buf_chunked_complete(buf, body_start):
+            _arm_tcp(sock, lim)
             var chunk = sock.recv_bytes(4096)
             if len(chunk) == 0:
                 break
             _list_append(buf, chunk)
+            if len(buf) - body_start > lim.max_body:
+                raise _err_connection("chunked body exceeds response size limit")
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes
         while True:
+            _arm_tcp(sock, lim)
             var chunk = sock.recv_bytes(4096)
             if len(chunk) == 0:
                 break
             _list_append(buf, chunk)
+            if len(buf) - body_start > lim.max_body:
+                raise _err_connection("response body exceeds size limit")
         return buf^
+
+
+def _is_fatal_reuse_error(msg: String) -> Bool:
+    """A pooled-connection failure that a fresh connection cannot fix: the
+    deadline passed or the response broke a size limit."""
+    return msg.startswith(ERR_TIMEOUT) or _str_contains(msg, "size limit")
+
+
+def _is_idempotent(method: String) -> Bool:
+    return (
+        method == "GET" or method == "HEAD" or method == "OPTIONS"
+        or method == "PUT" or method == "DELETE" or method == "TRACE"
+    )
+
+
+def _is_retryable_status(status: Int) -> Bool:
+    return status == 429 or status == 502 or status == 503 or status == 504
+
+
+def _is_transient(msg: String) -> Bool:
+    """Whether a failure is a network hiccup worth retrying. Certificate and
+    validation errors, size-limit violations and the deadline itself are not."""
+    if msg.startswith(ERR_TIMEOUT) or _str_contains(msg, "size limit"):
+        return False
+    if msg.startswith(ERR_CONNECTION):
+        return True
+    return (
+        _str_contains(msg, "timed out")
+        or _str_contains(msg, "connection reset")
+        or _str_contains(msg, "connection closed")
+        or _str_contains(msg, "tcp: cannot connect")
+        or _str_contains(msg, "truncated")
+    ) and not _str_contains(msg, "private")
+
+
+def _retry_after_ms(value: String) -> Int:
+    """Retry-After as delta-seconds in ms, clamped to 60 s; -1 when absent or
+    not a plain number (HTTP-date form falls back to the backoff schedule)."""
+    var b = value.as_bytes()
+    if len(b) == 0 or len(b) > 6:
+        return -1
+    var n = 0
+    for i in range(len(b)):
+        var c = Int(b[i])
+        if c < 48 or c > 57:
+            return -1
+        n = n * 10 + (c - 48)
+    return min(n, 60) * 1000
+
+
+def _backoff_ms(base_ms: Int, attempt: Int) -> Int:
+    """base * 2^attempt capped at 30 s, jittered to [50%, 100%] so clients
+    that failed together do not retry together."""
+    var d = base_ms
+    for _ in range(attempt):
+        d *= 2
+        if d >= 30_000:
+            d = 30_000
+            break
+    if d > 30_000:
+        d = 30_000
+    var j: Int
+    try:
+        var r = csprng_bytes(2)
+        j = (Int(r[0]) << 8) | Int(r[1])
+    except:
+        j = 0xFFFF
+    return d // 2 + (d // 2) * j // 0xFFFF
 
 
 # ============================================================================
