@@ -403,6 +403,7 @@ struct HttpClient(Movable):
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
+    var default_content_type: String    # Content-Type for a body sent without one ("" = send none)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
@@ -467,6 +468,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
         self.proxy_url = String("")
+        self.default_content_type = String("application/json")
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
@@ -520,6 +522,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = move.redirect_same_host_only
         self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
         self.proxy_url = move.proxy_url^
+        self.default_content_type = move.default_content_type^
         self._timeout_secs = move._timeout_secs
         self._ca_bundle = move._ca_bundle^
         self._ca_loaded = move._ca_loaded
@@ -948,8 +951,16 @@ struct HttpClient(Movable):
             _append_str(req_buf, "Content-Length: ")
             _append_str(req_buf, String(body.byte_length()))
             _append_str(req_buf, "\r\n")
-            if not extra_headers.has("Content-Type"):
-                _append_str(req_buf, "Content-Type: application/json\r\n")
+            if (
+                not extra_headers.has("Content-Type")
+                and self.default_content_type.byte_length() > 0
+            ):
+                _append_str(req_buf, "Content-Type: " + self.default_content_type + "\r\n")
+        elif method == "POST" or method == "PUT" or method == "PATCH":
+            # These methods define a meaning for a body, so an empty one is
+            # still announced (RFC 9110 8.6); S3 and others answer a PUT
+            # without Content-Length with 411 Length Required.
+            _append_str(req_buf, "Content-Length: 0\r\n")
 
         # Auto-send cookies from jar for this host
         var jar_cookie = self._jar_cookie_for(url.host, url.request_path(), url.scheme == "https")
@@ -1400,8 +1411,11 @@ struct HttpClient(Movable):
             for i in range(len(bb)):
                 body_bytes.append(bb[i])
             h2_hdrs.append(HpackHeader("content-length", String(len(body_bytes))))
-            if not extra_headers.has("Content-Type"):
-                h2_hdrs.append(HpackHeader("content-type", "application/json"))
+            if (
+                not extra_headers.has("Content-Type")
+                and self.default_content_type.byte_length() > 0
+            ):
+                h2_hdrs.append(HpackHeader("content-type", self.default_content_type))
 
         # cookies from jar
         var jar_cookie = self._jar_cookie_for(

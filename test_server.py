@@ -366,6 +366,7 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             "method": self.command,
             "body": body,
             "content_type": content_type,
+            "content_length": self.headers.get("Content-Length", ""),
         })
 
     def _handle_method(self):
