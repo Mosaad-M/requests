@@ -1371,6 +1371,46 @@ def test_empty_put_sends_content_length_zero() raises:
     var dele = client.delete(BASE + "/echo").json()
     assert_str_eq(dele["content_length"].as_string(), "", "DELETE sends none")
 
+def _count_header(lines: JsonValue, name: String) raises -> Int:
+    var n = 0
+    for i in range(len(lines)):
+        var line = lines[i].as_string()
+        if line.lower().startswith(name.lower() + ":"):
+            n += 1
+    return n
+
+
+def test_caller_headers_replace_defaults() raises:
+    """A caller's Host or User-Agent replaces the client's, not doubles it."""
+    var client = HttpClient(allow_private_ips=True)
+    var headers = HttpHeaders()
+    headers.add("Host", "127.0.0.1:18080")
+    headers.add("User-Agent", "custom-agent/1.0")
+    headers.add("Connection", "keep-alive")
+    var data = client.get(BASE + "/headers-raw", headers).json()
+    var lines = data["lines"].copy()
+    assert_eq(_count_header(lines, "Host"), 1, "one Host")
+    assert_eq(_count_header(lines, "User-Agent"), 1, "one User-Agent")
+    assert_eq(_count_header(lines, "Connection"), 1, "one Connection")
+    var found = False
+    for i in range(len(lines)):
+        if lines[i].as_string() == "User-Agent: custom-agent/1.0":
+            found = True
+    assert_true(found, "the caller's User-Agent was sent")
+
+
+def test_decompress_off() raises:
+    """decompress=False: no Accept-Encoding, and an encoded body is left as
+    sent (byte ranges and Content-Length then describe the same bytes)."""
+    var client = HttpClient(allow_private_ips=True)
+    client.decompress = False
+    var lines = client.get(BASE + "/headers-raw").json()["lines"].copy()
+    assert_eq(_count_header(lines, "Accept-Encoding"), 0, "no Accept-Encoding")
+    var resp = client.get(BASE + "/gzip")
+    assert_str_eq(resp.headers.get("Content-Encoding"), "gzip", "still encoded")
+    var raw = resp.body.as_bytes()
+    assert_true(len(raw) > 2 and raw[0] == 0x1F and raw[1] == 0x8B, "gzip magic kept")
+
 
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
@@ -1576,6 +1616,8 @@ def main() raises:
     run_test[test_connections_opened_counts_connects]("connections_opened counter", passed, failed)
     run_test[test_default_content_type_can_be_turned_off]("default Content-Type can be turned off", passed, failed)
     run_test[test_empty_put_sends_content_length_zero]("empty PUT/POST sends Content-Length: 0", passed, failed)
+    run_test[test_caller_headers_replace_defaults]("caller headers replace defaults", passed, failed)
+    run_test[test_decompress_off]("decompress off", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
