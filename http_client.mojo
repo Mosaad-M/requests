@@ -2264,8 +2264,10 @@ def _buf_has_chunked(buf: List[UInt8], header_end: Int) -> Bool:
             var pos = i + 18
             while pos < header_end and buf[pos] == 32:
                 pos += 1
+            # The value runs to the line's CRLF; on the last header line
+            # that is the CRLF at header_end itself.
             var line_end = pos
-            while line_end < header_end - 1:
+            while line_end < header_end:
                 if buf[line_end] == 13 and buf[line_end + 1] == 10:
                     break
                 line_end += 1

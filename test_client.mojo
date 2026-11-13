@@ -10,6 +10,7 @@
 from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
 from codecs import Codecs, accept_encoding
+from http_client import _unix_time_secs
 
 
 # ============================================================================
@@ -1277,6 +1278,16 @@ def test_redirect_private_ip_blocked() raises:
 # ============================================================================
 
 
+def test_chunked_when_transfer_encoding_is_the_last_header() raises:
+    """A chunked body ends at its last chunk even when Transfer-Encoding is
+    the last header line and the server keeps the connection open."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=10)
+    var t0 = _unix_time_secs()
+    var resp = client.get(BASE + "/chunked-te-last")
+    assert_str_eq(resp.body, "hello world", "decoded body")
+    assert_true(_unix_time_secs() - t0 < 3, "did not wait for the server to close")
+
+
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
 
@@ -1472,6 +1483,7 @@ def main() raises:
     print()
 
     run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_chunked_when_transfer_encoding_is_the_last_header]("chunked with Transfer-Encoding last", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
