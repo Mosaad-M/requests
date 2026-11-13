@@ -9,11 +9,169 @@ Usage: python test_server.py
 import http.server
 import json
 import sys
+import threading
+import time
+import urllib.parse
+
+# Resilience endpoints (test_resilience.mojo): per-id hit counters.
+_HITS = {}
+_HITS_LOCK = threading.Lock()
+_RESILIENCE_PATHS = (
+    "/flaky", "/hits", "/slowdrip", "/delay", "/reset", "/bigbody",
+    "/bigchunked", "/bigclose", "/bighdr", "/slow-redirect",
+)
+
+
+def _stale_keepalive_server(port=18082):
+    """Raw HTTP/1.1 listener for pooled-connection tests (test_resilience.mojo).
+    Most paths: answer one request, claim keep-alive, then close, so the client
+    pools a dead connection. Paths starting /live keep the connection open;
+    /live-stall then holds each reply for 6 s.
+    Each request received bumps hit counter "ka" + path."""
+    import socket
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(16)
+
+    def one(conn):
+        try:
+            buf = b""
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    buf += chunk
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                lines = head.split(b"\r\n")
+                path = lines[0].split(b" ")[1].decode()
+                need = 0
+                for ln in lines[1:]:
+                    if ln.lower().startswith(b"content-length:"):
+                        need = int(ln.split(b":")[1])
+                while len(rest) < need:
+                    rest += conn.recv(4096)
+                buf = rest[need:]
+                _hit("ka" + path)
+                if path.startswith("/live-stall"):
+                    time.sleep(6)  # a pooled connection that stalls mid-request
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                if not path.startswith("/live"):
+                    return  # claimed keep-alive, but closes: the next request finds a dead socket
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=one, args=(c,), daemon=True).start()
+
+
+def _hit(key):
+    with _HITS_LOCK:
+        _HITS[key] = _HITS.get(key, 0) + 1
+        return _HITS[key]
 
 
 class TestHandler(http.server.BaseHTTPRequestHandler):
+    def _resilience(self):
+        """Endpoints for retry / deadline / size-limit tests. Query: id, n, ms, ..."""
+        url = urllib.parse.urlparse(self.path)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+        path = url.path
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+        ident = q.get("id", "default")
+
+        def reply(code, body=b"{}", headers=()):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            for k, v in headers:
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+
+        if path == "/hits":
+            with _HITS_LOCK:
+                reply(200, json.dumps({"hits": _HITS.get(ident, 0)}).encode())
+        elif path == "/flaky":
+            # First n requests with this id fail with `code` (default 503), then 200.
+            hit = _hit(ident)
+            if hit <= int(q.get("n", 1)):
+                extra = [("Retry-After", q["retry_after"])] if "retry_after" in q else []
+                reply(int(q.get("code", 503)), b'{"flaky":true}', extra)
+            else:
+                reply(200, json.dumps({"attempts": hit}).encode())
+        elif path == "/reset":
+            # Promise a body, send part of it, then drop the connection.
+            hit = _hit(ident)
+            if hit <= int(q.get("n", 1)):
+                self.send_response(200)
+                self.send_header("Content-Length", "100")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(b"partial")
+                self.wfile.flush()
+                self.connection.shutdown(2)
+            else:
+                reply(200, b'{"recovered":true}')
+        elif path == "/delay":
+            time.sleep(int(q.get("ms", 0)) / 1000.0)
+            reply(200, b'{"delayed":true}')
+        elif path == "/slowdrip":
+            # Chunked body, one chunk every gap_ms: it never stalls, so only a
+            # total deadline (not a socket timeout) can stop the client.
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                for _ in range(int(q.get("chunks", 10))):
+                    self.wfile.write(b"1\r\nx\r\n")
+                    self.wfile.flush()
+                    time.sleep(int(q.get("gap_ms", 100)) / 1000.0)
+                self.wfile.write(b"0\r\n\r\n")
+            except OSError:
+                pass
+        elif path == "/slow-redirect":
+            time.sleep(int(q.get("ms", 0)) / 1000.0)
+            hops = int(q.get("hops", 0))
+            if hops > 0:
+                nxt = "/slow-redirect?hops=%d&ms=%s" % (hops - 1, q.get("ms", 0))
+                reply(302, b"", [("Location", nxt)])
+            else:
+                reply(200, b'{"arrived":true}')
+        elif path == "/bigbody":
+            reply(200, b"x" * (int(q.get("kb", 1)) * 1024))
+        elif path == "/bigchunked":
+            kb = int(q.get("kb", 1))
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for _ in range(kb):
+                self.wfile.write(b"400\r\n" + b"x" * 1024 + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        elif path == "/bigclose":
+            # No Content-Length, not chunked: the body ends when the socket closes.
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"x" * (int(q.get("kb", 1)) * 1024))
+        elif path == "/bighdr":
+            reply(200, b"{}", [("X-Big", "a" * (int(q.get("kb", 1)) * 1024))])
+        else:
+            reply(404)
+
     def do_GET(self):
-        if self.path == "/":
+        if self.path.startswith(_RESILIENCE_PATHS):
+            self._resilience()
+        elif self.path == "/":
             self._respond(200, "OK", {"message": "hello from test server"})
         elif self.path == "/status/200":
             self._respond(200, "OK", {"status": 200})
@@ -374,7 +532,9 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
 
     def _route_non_get(self):
         """Route POST/PUT/DELETE/PATCH requests."""
-        if self.path == "/echo":
+        if self.path.startswith(_RESILIENCE_PATHS):
+            self._resilience()
+        elif self.path == "/echo":
             self._handle_echo()
         elif self.path == "/method":
             self._handle_method()
@@ -447,7 +607,8 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
 
 def main():
     port = 18080
-    server = http.server.HTTPServer(("127.0.0.1", port), TestHandler)
+    threading.Thread(target=_stale_keepalive_server, daemon=True).start()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), TestHandler)
     print(f"Test server running on http://127.0.0.1:{port}")
     print("Press Ctrl+C to stop, or GET /shutdown to stop programmatically")
     try:

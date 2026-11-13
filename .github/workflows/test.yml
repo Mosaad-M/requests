@@ -39,6 +39,14 @@ jobs:
       - name: Run tests
         run: pixi run test
 
+      - name: HTTP/2 unit tests
+        run: |
+          pixi run test-hpack
+          pixi run test-h2
+
+      - name: HTTP/2 local-server tests
+        run: pixi run test-h2-local
+
       - name: Std compatibility
         run: pixi run test-std-compat
 
@@ -64,6 +72,14 @@ jobs:
 
       - name: Run tests
         run: pixi run test
+
+      - name: HTTP/2 unit tests
+        run: |
+          pixi run test-hpack
+          pixi run test-h2
+
+      - name: HTTP/2 local-server tests
+        run: pixi run test-h2-local
 
       - name: Std compatibility
         run: pixi run test-std-compat

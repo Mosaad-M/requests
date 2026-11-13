@@ -522,7 +522,7 @@ def bench_full_pipeline_local() raises:
     print("\n=== Full HTTP Pipeline (localhost) ===")
     print("  (Requires test_server.py on localhost:18080)")
 
-    var client = HttpClient()
+    var client = HttpClient(allow_private_ips=True)
 
     try:
         var test_resp = client.get("http://127.0.0.1:18080/")

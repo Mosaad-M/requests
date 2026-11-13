@@ -4,149 +4,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A **native Mojo HTTP/HTTPS client** — no Python interop. Built from scratch using POSIX socket FFI calls and OpenSSL FFI for TLS. Supports HTTP and HTTPS requests (GET, POST, PUT, DELETE, PATCH) with JSON response parsing.
+A **pure-Mojo HTTP client** with no Python interop, no C wrappers and no OpenSSL. HTTP/1.1 and HTTP/2 (negotiated by ALPN over TLS), GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS, JSON responses, cookies, redirects, an HTTP CONNECT proxy, transparent gzip/deflate/zstd/brotli decompression.
 
-Uses **pixi** for dependency/environment management with Mojo 0.25.7 from the `max-nightly` channel.
+Mojo `>=1.2.0` (stable channel `https://conda.modular.com/max`), managed with **pixi**. Packages are published as `requests` in the [mojo-pkg](https://github.com/Mosaad-M/mojo-pkg) registry (`mojoproject.toml` is the package manifest; `pixi.toml` is the dev environment). Releases are git tags `vX.Y.Z`; the registry entry lives in `mojo-pkg-index`.
 
-## Modular Architecture
+## Ecosystem
 
-This project uses a **modular monorepo** layout. Core modules live as sibling repos under `~/mojo_pg/` and are linked into `requests/` via symlinks:
+Sibling repos under `Mosaad-M/` (cloned next to this one in `~/Documents/github/`), consumed through `mojo-pkg`, **not** symlinks:
 
 ```
-~/mojo_pg/
-├── url/          ← URL parser (standalone)
-├── json/         ← JSON parser (standalone)
-├── tcp/          ← TCP socket wrapper (standalone)
-├── tls/          ← TLS/SSL + OpenSSL FFI + build tools (depends on tcp)
-├── websocket/    ← WebSocket protocol (depends on url, tcp, tls)
-└── requests/     ← HTTP client (this repo, depends on all above)
-    ├── http_client.mojo    (HTTP protocol + HttpClient API)
-    ├── main.mojo           (demo)
-    ├── test_client.mojo    (integration tests)
-    ├── test_server.py      (Python HTTP test server)
-    ├── bench_profile.mojo  (benchmarks)
-    ├── build_and_run.sh    (build helper)
-    ├── url.mojo → ../url/url.mojo           (symlink)
-    ├── json.mojo → ../json/json.mojo        (symlink)
-    ├── tcp.mojo → ../tcp/tcp.mojo           (symlink)
-    ├── tls.mojo → ../tls/tls.mojo           (symlink)
-    ├── ssl_wrapper.c → ../tls/ssl_wrapper.c (symlink)
-    └── .build_tools → ../tls/.build_tools   (symlink)
+tcp ──► tls ──► requests        url, json ──► requests
+tcp + tls + url ──► websocket ──► cdp      tcp + tls ──► pg
+flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 ```
+
+- `mojoproject.toml` declares `tls`, `tcp`, `url`, `json` with minimum versions; `mojo.lock` pins them.
+- `mojo-pkg install` downloads them to `~/.mojo/packages/<name>/<version>` and writes `.mojo_flags` (git-ignored, machine-local `-I` paths). `build_and_run.sh` passes `.mojo_flags` to `mojo build`.
+- A change that needs new upstream behaviour means a new tcp/tls release first, then bump the floor here.
+- Only `requests` and `websocket`/`pg`/`cdp` share tcp/tls: a tls/tcp API change affects them all.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `http_client.mojo` | HTTP/1.1 protocol + high-level `HttpClient` API (GET/POST/PUT/DELETE/PATCH) + `response.json()` |
-| `main.mojo` | Demo: fetch HTTP and HTTPS URLs |
-| `test_client.mojo` | HTTP + HTTPS integration tests (82 tests) |
-| `test_server.py` | Python HTTP test server for HTTP integration tests |
-| `bench_profile.mojo` | Comprehensive performance benchmarks |
-| `build_and_run.sh` | Build helper — `mojo build` with SSL linking, then run |
-| `tcp.mojo` | Symlink → `../tcp/tcp.mojo` — TCP socket wrapper via C FFI |
-| `tls.mojo` | Symlink → `../tls/tls.mojo` — TLS/SSL wrapper via OpenSSL FFI |
-| `url.mojo` | Symlink → `../url/url.mojo` — URL parser |
-| `json.mojo` | Symlink → `../json/json.mojo` — JSON parser |
-| `ssl_wrapper.c` | Symlink → `../tls/ssl_wrapper.c` — C wrapper for OpenSSL |
-| `.build_tools/` | Symlink → `../tls/.build_tools` — Linker wrapper |
+| `http_client.mojo` | `HttpClient` (+ `Session`, `StreamResponse`, `HttpResponse`, `HttpHeaders`, auth helpers), HTTP/1.1 protocol, pools, cookies, redirects, deadline/retries, `get_many` |
+| `h2.mojo` | HTTP/2 framing (RFC 9113) |
+| `h2_conn.mojo` | HTTP/2 connection: preface/SETTINGS, `h2_request`, `h2_request_many` (multiplexing), flow control |
+| `hpack.mojo` | HPACK (RFC 7541) encode/decode, `hpack_decode_block(..., max_list)` |
+| `codecs.mojo`, `zlib_decompress.mojo`, `zstd_decompress.mojo`, `brotli_decompress.mojo` | Compression libraries opened at runtime with `dlopen` (no linker flags) |
+| `psl.mojo` | Curated public-suffix list for cookie domain checks |
+| `main.mojo` | Demo (needs internet) |
+| `bench_profile.mojo`, `bench_h2.mojo` | Benchmarks (`bench_h2` needs the local test servers) |
+| `test_*.mojo`, `test_*server.py`, `certs/` | Tests and their servers; `certs/` are public self-signed **test** fixtures copied from the tls repo |
 
-## Build & Run Commands
+## Build & Test
 
 ```bash
-pixi run run             # Run the demo (fetches HTTP + HTTPS URLs)
-pixi run test            # Run HTTP + HTTPS integration tests
-pixi run format          # Format Mojo files
-pixi run compile-ssl     # Compile libssl_wrapper.so (auto dependency of run/test)
-# Benchmarks (needs mojo build for SSL):
-pixi run bash build_and_run.sh bench_profile.mojo
+pixi run run               # demo
+pixi run test              # test_resilience (38) + test_client (114 HTTP + 4 HTTPS) against test_server.py
+pixi run test-h2-local     # 28 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18445)
+pixi run test-hpack        # 128
+pixi run test-h2           # 70 (framing)
+pixi run test-h2-conn      # 4  (public internet)
+pixi run test-h2-client    # 3  (public internet)
+pixi run test-std-compat   # 1
+pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 ```
 
-Module-specific tests live in their own repos:
-```bash
-cd ~/mojo_pg/url  && pixi run test-url    # 19 URL parser tests
-cd ~/mojo_pg/json && pixi run test-json   # 39 JSON parser tests
-cd ~/mojo_pg/tcp  && pixi run test-tcp    # 3 TCP socket tests
-cd ~/mojo_pg/tls  && pixi run test        # 2 TLS connectivity tests
-```
+- `mojo run` (JIT) is not used; everything goes through `mojo build` via `build_and_run.sh`.
+- `test_client` ends by calling `/shutdown` on `test_server.py`, so `test_resilience` runs first in the `test` task.
+- Tests that must prove a *negative* (flow control, deadlines) are verified by mutation: break the code, confirm the test fails. The h2 server credits uploaded data back 30 ms late on purpose, so a client that ignores flow control gets dropped. HttpClient silently retries a failed pooled request on a fresh connection, so a test that must see a protocol failure should use the raw `h2_request` on a hand-made `Http2Conn` (see `test_raw_upload_obeys_peer_windows`).
+- `test-h2-conn`/`test-h2-client`/HTTPS tests use the public internet and can flake.
+
+## Public settings on `HttpClient` (all default to the previous behaviour)
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `allow_private_ips` (ctor) | `False` | Block loopback/private/link-local/CGNAT targets, checked on the **resolved** address at connect time (rebinding-safe) |
+| `timeout_secs` (ctor) | 30 | Per-socket send/recv timeout |
+| `total_timeout_secs` | 0 (off) | Deadline for a whole call incl. redirects, retries and body reads. Raises `TimeoutError`. Every read (HTTP, HTTPS, h2, pooled or fresh) is capped to the time left, 1 s granularity. If a retry's wait would pass the deadline, the last response is returned instead |
+| `max_retries` / `retry_backoff_ms` / `retry_non_idempotent` | 0 / 200 / False | Retry connect/read failures and 429/502/503/504; idempotent methods only unless opted in; exponential backoff with jitter capped at 30 s; `Retry-After` (seconds) honoured up to 60 s |
+| `max_response_bytes` | 100 MB | Body cap, HTTP/1.1 (Content-Length, chunked, close-delimited) and HTTP/2 |
+| `max_header_bytes` | 1 MB | Header block cap (HTTP/1.1 and HTTP/2, compressed, decoded, and cumulative with trailers) |
+| `max_batch_bytes` | 1 GB | Body bytes one `get_many` batch may hold; a stream past it is re-fetched alone |
+| `max_redirects`, `follow_redirects`, `redirect_same_host_only`, `pool_idle_timeout_secs`, `proxy_url` | | as before |
+
+`get_many(urls, headers)` multiplexes URLs on the same HTTPS host that speaks HTTP/2 (first URL of a host goes alone to open the connection). It does not need threads. Streams that fail or redirect are re-fetched with `get()`.
 
 ## Key Design Decisions
 
-- **Connection: close** — simplifies response reading (read until EOF, no chunked encoding)
-- **getaddrinfo for DNS** — handles both hostnames and IP addresses
-- **String(unsafe_from_utf8=list^)** — NO null terminator; `String(bytes=...)` renamed in 0.26+
-- **UnsafePointer-based parsing** — all parsers (HTTP, JSON, URL) convert input to `UnsafePointer[UInt8]` once at the top, use pointer arithmetic throughout (`(ptr + i)[]`), and only materialize Strings via `_ptr_to_string()` when storing final values
-- **Alias byte constants** — frequently used byte values (e.g. `_QUOTE`, `_LBRACE`, `_ZERO`) are `alias` constants to avoid repeated `ord()` calls
-- **Zero-copy send** — `send()` passes the string's internal pointer directly to C `send()`/`SSL_write()` via `unsafe_cstr_ptr()`
-- **64KB growing recv buffer** — `recv_all()` uses a 64KB heap-allocated buffer that doubles on overflow, recv directly into it, single conversion at end
-- **`_eq_ignore_case`** — allocation-free case-insensitive compare for HTTP headers (5x faster than `_to_lower()` pairs)
-- **Buffer-based request building** — `List[UInt8]` append (linear) instead of `String +=` (quadratic)
-- **C wrapper for OpenSSL** — Mojo's `external_call` resolves symbols at link/JIT time; since `mojo build` has no `-l` flags, a thin C shared library (`ssl_wrapper.c` → `libssl_wrapper.so`) re-exports OpenSSL functions under `mojo_ssl_*` names, linked via a PATH-based `c++` wrapper (`.build_tools/c++`)
-- **SNI via SSL_set_tlsext_host_name** — required by most HTTPS servers; the C macro is wrapped directly in `ssl_wrapper.c`
-- **CA cert bundle** — uses pixi's bundled certs at `.pixi/envs/default/ssl/cert.pem`
-- **mojo build, not mojo run** — `mojo run` (JIT) cannot resolve SSL symbols; all tasks that use TLS go through `build_and_run.sh`
-- **JSON parser — recursive descent** — `JsonValue` tagged union (kind field: NULL/BOOL/NUMBER/STRING/ARRAY/OBJECT) with `UnsafePointer` for recursive types (array, object) to break circular dependency. `JsonObject` uses parallel lists pattern (same as `HttpHeaders`). Parser dispatches on first non-whitespace byte. String parsing handles all JSON escape sequences (`\"`, `\\`, `\n`, `\t`, etc.); `\uXXXX` emits `?` placeholder. Integer fast path via multiply-accumulate; float path via inline mantissa/exponent parser (no `atof`)
-- **Leaf accessors** — `get_string(key)`, `get_int(key)`, `get_number(key)`, `get_bool(key)` extract primitives without deep-copying the entire JsonValue tree
-- **`response.json()`** — `HttpResponse.json()` calls `parse_json(self.body)`, returning a `JsonValue` tree. Access nested data via `val.get_string("name")` (no copy) or `val.get("key").get("nested").as_string()` (full tree copy)
-
-## Performance
-
-Benchmarked on Linux x86_64 (WSL2), Mojo 0.25.7:
-
-| Operation | Throughput |
-|-----------|-----------|
-| URL parsing | 128-178 ns per URL |
-| JSON parsing (small, 44B) | 241 ns (183 MB/s) |
-| JSON parsing (medium, 297B) | 1.7 us (175 MB/s) |
-| JSON parsing (large, 16KB) | 59 us (284 MB/s) |
-| JSON parsing (float-heavy) | 6.7 us (379 MB/s) |
-| JSON serialization (16KB) | 67 us (250 MB/s) |
-| HTTP response parsing (100KB) | 40 us (2,528 MB/s) |
-| Chunked transfer decode | 561 ns |
+- **Pure Mojo stack**: TLS is the `tls` package (no OpenSSL); sockets are the `tcp` package. Compression libs are loaded with `dlopen` at runtime, so programs need no linker flags.
+- **UnsafePointer-based parsing** for HTTP/URL/JSON hot paths, materialising `String` once. `String(unsafe_from_utf8=list^)` (no NUL terminator).
+- **Keep-alive pools**: LRU-4 per scheme (HTTP, TLS/HTTP1, HTTP/2). A request that fails on a pooled connection is replayed on a fresh one only if it is idempotent (or `retry_non_idempotent`), as in Go; deadline expiry and size-limit violations are never replayed.
+- **HTTP/2**: one connection per host:port, up to 4 pooled. `h2_request` is `h2_request_many` with one request. Stream state lives in parallel lists indexed by request; stream id of request `i` is `first_id + 2*i`. Header blocks are always HPACK-decoded, even for finished streams, to keep the dynamic table in sync. DATA frames are split into TLS records of at most 16384 bytes (a full 16384-byte frame plus its 9-byte header exceeds the TLS record limit).
+- **Conn-level send window** is changed only by WINDOW_UPDATE on stream 0, never by SETTINGS_INITIAL_WINDOW_SIZE (that only moves stream windows).
+- **Error categories** (`String(e).startswith(...)`): `HTTPError`, `ConnectionError`, `TooManyRedirects`, `ValidationError`, `ParseError`, `ChunkedBodyError`, `TimeoutError`. Raw `tcp:`/`tls:` errors can also surface from lower layers.
+- **Mojo 1.2 gotchas**: `def` not `fn`; `len(String)` is an error (use `byte_length()`); methods that mutate the client (`_accept_encoding`, `_jar_cookie_for`) need `mut self`; do not pass `self.field` and `self.method()` as two arguments of one call.
 
 ## Security
 
-The client implements defense-in-depth across all layers:
-
-### Input Validation
-- **CRLF injection prevention** — header keys/values and request paths are validated to reject `\r`/`\n` characters
-- **HTTP method validation** — only uppercase ASCII letters (A-Z) allowed
-- **Port range validation** — enforces 1-65535 with max 5 digit limit
-- **Host validation** — rejects null bytes, CR/LF, spaces, and slashes in hostnames
-
-### Response Parsing Hardening
-- **Chunk size overflow protection** — 256 MB cap, max 16 hex digits
-- **Chunked body truncation detection** — raises error instead of silently truncating
-- **Status code validation** — max 3 digits
-- **HTTP version validation** — verifies `HTTP/` prefix in response
-- **Pointer bounds safety** — `_ptr_to_string()` guards against negative start indices
-
-### Network Layer
-- **Socket timeouts** — 30-second SO_RCVTIMEO/SO_SNDTIMEO on all connections
-- **Response size limit** — 100 MB cap on `recv_all()` (configurable)
-- **TLS certificate verification** — `SSL_CTX_set_verify(SSL_VERIFY_PEER)` + `SSL_set1_host()` for hostname verification
-- **SSRF protection** — opt-in private IP blocking via `allow_private_ips = False` on `HttpClient`. Blocks 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 0.0.0.0/8
-
-### Usage
-```mojo
-# Default: allows private IPs (backward compatible)
-var client = HttpClient()
-
-# SSRF-safe: blocks connections to private/reserved IPs
-var safe_client = HttpClient()
-safe_client.allow_private_ips = False
-```
-
-## Exception Hierarchy
-
-All 24 raise sites use structured prefix helpers so callers can distinguish error categories:
-
-```mojo
-# Categories (check with String(e).startswith("HTTPError:") etc.)
-alias ERR_HTTP       = "HTTPError"        # non-2xx status (raise_for_status)
-alias ERR_CONNECTION = "ConnectionError"  # socket / DNS / TLS failure
-alias ERR_REDIRECT   = "TooManyRedirects" # redirect limit exceeded
-alias ERR_VALIDATION = "ValidationError"  # bad input (header, method, port, host)
-alias ERR_PARSE      = "ParseError"       # malformed HTTP response
-alias ERR_CHUNKED    = "ChunkedBodyError" # chunked encoding protocol violation
-```
+- **Input validation**: CRLF injection rejected in header keys/values and paths; method must be A-Z; port 1-65535; hosts reject NUL/CR/LF/space/slash.
+- **Response hardening**: chunk-size caps, truncation detection, status/version validation, header and body caps (above), HPACK decoded-list cap (`max_list`), decompression ratio (256x) and absolute (512 MB) caps, h2 frames above 16384 bytes rejected, PUSH_PROMISE refused (we send ENABLE_PUSH=0).
+- **Network**: SSRF filter on resolved addresses, TLS certificate and hostname verification (tls package), `Authorization` stripped on cross-host redirects, cookie jar checks the public-suffix list.
+- Known gaps: no revocation checking and no session resumption (tls package); decompression caps are constants; `Retry-After` HTTP-date form is not parsed; h2 request header blocks larger than the peer's max frame size are rejected (no CONTINUATION on send); plain-TCP deadline capping uses tcp's private `_set_socket_timeouts` (no public setter yet).

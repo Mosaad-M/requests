@@ -812,6 +812,7 @@ struct HpackHeader(Copyable, Movable):
 def hpack_decode_block(
     data: List[UInt8],
     mut dyn_table: HpackDynTable,
+    max_list: Int = 0,
 ) raises -> List[HpackHeader]:
     """Decode an HPACK header block (RFC 7541 §6).
 
@@ -826,6 +827,11 @@ def hpack_decode_block(
         data:      Raw HPACK block bytes (from one HEADERS / PUSH_PROMISE frame).
         dyn_table: Per-connection dynamic table — mutated for incremental
                    indexing entries and size-update frames.
+        max_list:  Stop with an error once the decoded header list (name +
+                   value + 32 bytes per entry, RFC 7541 §4.1) exceeds this many
+                   bytes (0 = no limit). Indexed fields can expand a tiny
+                   block into a large list, so the compressed size alone does
+                   not bound memory.
 
     Returns:
         List of HpackHeader pairs in wire order.
@@ -836,8 +842,15 @@ def hpack_decode_block(
     var headers = List[HpackHeader]()
     var off     = 0
     var n       = len(data)
+    var counted = 0
+    var listed  = 0
 
     while off < n:
+        while counted < len(headers):
+            listed += headers[counted].name.byte_length() + headers[counted].value.byte_length() + 32
+            counted += 1
+        if max_list > 0 and listed > max_list:
+            raise Error("hpack: header list exceeds size limit")
         var b = Int(data[off])
 
         if b & 0x80 != 0:
@@ -910,6 +923,11 @@ def hpack_decode_block(
             off       = vr[1]
             headers.append(HpackHeader(name, value))
 
+    while counted < len(headers):
+        listed += headers[counted].name.byte_length() + headers[counted].value.byte_length() + 32
+        counted += 1
+    if max_list > 0 and listed > max_list:
+        raise Error("hpack: header list exceeds size limit")
     return headers^
 
 

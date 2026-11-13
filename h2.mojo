@@ -758,6 +758,7 @@ def h2_make_initial_settings() -> Http2Frame:
 
     Parameters:
         HEADER_TABLE_SIZE    = 65536  (larger dynamic table)
+        ENABLE_PUSH          = 0      (server push refused)
         INITIAL_WINDOW_SIZE  = 65535  (max initial window)
         MAX_FRAME_SIZE       = 16384  (minimum allowed per RFC)
 
@@ -767,6 +768,7 @@ def h2_make_initial_settings() -> Http2Frame:
     var ids  = List[Int]()
     var vals = List[Int]()
     ids.append(H2_SETTING_HEADER_TABLE_SIZE);   vals.append(65536)
+    ids.append(H2_SETTING_ENABLE_PUSH);         vals.append(0)
     ids.append(H2_SETTING_INITIAL_WINDOW_SIZE); vals.append(65535)
     ids.append(H2_SETTING_MAX_FRAME_SIZE);      vals.append(16384)
     return h2_make_settings_frame(ids, vals)

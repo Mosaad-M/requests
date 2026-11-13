@@ -2,18 +2,19 @@
 channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "requests"
 platforms = ["linux-64", "osx-arm64"]
-version = "2.0.0"
+version = "1.7.0"
 
 
 [tasks]
 run = "bash build_and_run.sh main.mojo"
-test = "bash -c 'python test_server.py & python test_proxy_server.py & sleep 1 && bash build_and_run.sh test_client.mojo; RET=$?; kill %1 %2 2>/dev/null; exit $RET'"
+test = "bash -c 'python test_server.py & python test_proxy_server.py & sleep 1 && bash build_and_run.sh test_resilience.mojo; R1=$?; bash build_and_run.sh test_client.mojo; RET=$?; kill %1 %2 2>/dev/null; [ $R1 -ne 0 ] && exit $R1; exit $RET'"
+test-h2-local = "bash -c 'python test_h2_server.py & sleep 2; bash build_and_run.sh test_h2_local.mojo; RET=$?; kill %1 2>/dev/null; exit $RET'"
 test-hpack = "bash build_and_run.sh test_hpack.mojo"
 test-h2 = "bash build_and_run.sh test_h2.mojo"
 test-h2-conn = "bash build_and_run.sh test_h2_conn.mojo"
 test-h2-client = "bash build_and_run.sh test_h2_client.mojo"
 test-std-compat = "bash build_and_run.sh test_std_compat.mojo"
-format = "mblack http_client.mojo main.mojo test_client.mojo"
+format = "mblack http_client.mojo h2_conn.mojo main.mojo test_client.mojo test_resilience.mojo test_h2_local.mojo"
 
 [dependencies]
 mojo = ">=1.2.0"
@@ -23,3 +24,4 @@ zstd = ">=1.5"
 [pypi-dependencies]
 brotli = ">=1.0"
 zstandard = ">=0.22"
+h2 = ">=4.1"
