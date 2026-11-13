@@ -10,6 +10,7 @@
 from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
 from codecs import Codecs, accept_encoding
+from http_client import _unix_time_secs
 
 
 # ============================================================================
@@ -1277,6 +1278,28 @@ def test_redirect_private_ip_blocked() raises:
 # ============================================================================
 
 
+def test_no_content_does_not_wait_for_a_body() raises:
+    """204 and 304 have no body even without Content-Length (RFC 9112 6.3)."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=5)
+    var t0 = _unix_time_secs()
+    var r204 = client.get(BASE + "/no-content")
+    assert_eq(r204.status_code, 204, "204 status")
+    assert_eq(r204.body.byte_length(), 0, "204 body")
+    assert_true(_unix_time_secs() - t0 < 3, "answered without waiting for the timeout")
+    # (test_server.py is single-threaded: this one waits for it to finish
+    # holding the first connection, so it is not timed.)
+    var r304 = client.get(BASE + "/not-modified")
+    assert_eq(r304.status_code, 304, "304 status")
+
+
+def test_interim_100_continue_skipped() raises:
+    """A 100 Continue before the final response is not the response."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=5)
+    var resp = client.get(BASE + "/continue-then-ok")
+    assert_eq(resp.status_code, 200, "final status")
+    assert_str_eq(resp.body, "ok", "final body")
+
+
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
 
@@ -1472,6 +1495,8 @@ def main() raises:
     print()
 
     run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_no_content_does_not_wait_for_a_body]("204/304 without Content-Length", passed, failed)
+    run_test[test_interim_100_continue_skipped]("100 Continue skipped", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
