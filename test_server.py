@@ -21,6 +21,9 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._respond(404, "Not Found", {"error": "not found"})
         elif self.path == "/status/500":
             self._respond(500, "Internal Server Error", {"error": "server error"})
+        elif self.path == "/headers-raw":
+            # Every request header line as received, duplicates included.
+            self._respond(200, "OK", {"lines": ["%s: %s" % kv for kv in self.headers.items()]})
         elif self.path == "/headers":
             # Echo back all request headers
             headers = {}
