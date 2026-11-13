@@ -1277,6 +1277,30 @@ def test_redirect_private_ip_blocked() raises:
 # ============================================================================
 
 
+def test_default_content_type_can_be_turned_off() raises:
+    """With default_content_type = "", a body goes out with no Content-Type
+    (an object store would otherwise store "application/json" for it)."""
+    var client = HttpClient(allow_private_ips=True)
+    client.default_content_type = ""
+    var data = client.put(BASE + "/echo", "raw bytes").json()
+    assert_str_eq(data["content_type"].as_string(), "", "no content-type sent")
+    var headers = HttpHeaders()
+    headers.add("Content-Type", "text/plain")
+    var data2 = client.put(BASE + "/echo", "raw bytes", headers).json()
+    assert_str_eq(data2["content_type"].as_string(), "text/plain", "caller's content-type")
+
+
+def test_empty_put_sends_content_length_zero() raises:
+    """An empty PUT/POST still says Content-Length: 0 (RFC 9110 8.6)."""
+    var client = HttpClient(allow_private_ips=True)
+    var put = client.put(BASE + "/echo", "").json()
+    assert_str_eq(put["content_length"].as_string(), "0", "PUT content-length")
+    var post = client.post(BASE + "/echo", "").json()
+    assert_str_eq(post["content_length"].as_string(), "0", "POST content-length")
+    var dele = client.delete(BASE + "/echo").json()
+    assert_str_eq(dele["content_length"].as_string(), "", "DELETE sends none")
+
+
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
 
@@ -1472,6 +1496,8 @@ def main() raises:
     print()
 
     run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_default_content_type_can_be_turned_off]("default Content-Type can be turned off", passed, failed)
+    run_test[test_empty_put_sends_content_length_zero]("empty PUT/POST sends Content-Length: 0", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
