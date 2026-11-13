@@ -2182,6 +2182,20 @@ def _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
         pos = pos + chunk_size + 2  # skip data + \r\n
 
 
+def _buf_status_code(buf: List[UInt8]) -> Int:
+    """The status code of the response at the start of buf ("HTTP/1.1 204 ..."),
+    or 0 if the status line is malformed (the parser reports that later)."""
+    if len(buf) < 12 or buf[8] != 32:
+        return 0
+    var code = 0
+    for i in range(9, 12):
+        var c = buf[i]
+        if c < 48 or c > 57:
+            return 0
+        code = code * 10 + Int(c - 48)
+    return code
+
+
 def _lc(b: UInt8) -> UInt8:
     """Convert a byte to lowercase (ASCII A-Z only)."""
     if b >= 65 and b <= 90:
@@ -2323,19 +2337,30 @@ def _recv_tls_keepalive(
     """
     var buf = List[UInt8]()
 
-    # Phase 1: read until headers complete
+    # Phase 1: read until headers complete. An interim 1xx response (100
+    # Continue, 103 Early Hints) has no body and precedes the real one: drop
+    # it and read on.
     var header_end = -1
-    while header_end < 0:
-        var chunk = sock.recv(4096)
-        if len(chunk) == 0:
-            raise _err_connection("connection closed before response headers")
-        _list_append(buf, chunk)
-        if len(buf) > MAX_RESPONSE_BYTES:
-            raise _err_connection("response headers exceed size limit")
+    var status = 0
+    while True:
+        while header_end < 0:
+            var chunk = sock.recv(4096)
+            if len(chunk) == 0:
+                raise _err_connection("connection closed before response headers")
+            _list_append(buf, chunk)
+            if len(buf) > MAX_RESPONSE_BYTES:
+                raise _err_connection("response headers exceed size limit")
+            header_end = _buf_find_crlf_crlf(buf)
+        status = _buf_status_code(buf)
+        if status < 100 or status >= 200 or status == 101:
+            break
+        buf = _buf_leftover(buf, header_end + 4)
         header_end = _buf_find_crlf_crlf(buf)
 
-    # HEAD response: no body — return headers only
-    if skip_body:
+    # HEAD, 204 and 304 responses never have a body (RFC 9112 §6.3): return
+    # the headers only. Reading on would wait for a body that never comes
+    # and, on a keep-alive connection, hang until the read timeout.
+    if skip_body or status == 204 or status == 304:
         var headers_only = List[UInt8](capacity=header_end + 4)
         for i in range(header_end + 4):
             headers_only.append(buf[i])
@@ -2399,19 +2424,30 @@ def _recv_http_keepalive(
     """
     var buf = List[UInt8]()
 
-    # Phase 1: read until headers complete
+    # Phase 1: read until headers complete. An interim 1xx response (100
+    # Continue, 103 Early Hints) has no body and precedes the real one: drop
+    # it and read on.
     var header_end = -1
-    while header_end < 0:
-        var chunk = sock.recv_bytes(4096)
-        if len(chunk) == 0:
-            raise _err_connection("connection closed before response headers")
-        _list_append(buf, chunk)
-        if len(buf) > MAX_RESPONSE_BYTES:
-            raise _err_connection("response headers exceed size limit")
+    var status = 0
+    while True:
+        while header_end < 0:
+            var chunk = sock.recv_bytes(4096)
+            if len(chunk) == 0:
+                raise _err_connection("connection closed before response headers")
+            _list_append(buf, chunk)
+            if len(buf) > MAX_RESPONSE_BYTES:
+                raise _err_connection("response headers exceed size limit")
+            header_end = _buf_find_crlf_crlf(buf)
+        status = _buf_status_code(buf)
+        if status < 100 or status >= 200 or status == 101:
+            break
+        buf = _buf_leftover(buf, header_end + 4)
         header_end = _buf_find_crlf_crlf(buf)
 
-    # HEAD response: no body — return headers only
-    if skip_body:
+    # HEAD, 204 and 304 responses never have a body (RFC 9112 §6.3): return
+    # the headers only. Reading on would wait for a body that never comes
+    # and, on a keep-alive connection, hang until the read timeout.
+    if skip_body or status == 204 or status == 304:
         var headers_only = List[UInt8](capacity=header_end + 4)
         for i in range(header_end + 4):
             headers_only.append(buf[i])

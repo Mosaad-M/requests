@@ -7,6 +7,7 @@ Usage: python test_server.py
 """
 
 import http.server
+import time
 import json
 import sys
 
@@ -61,6 +62,25 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._respond(200, "OK", {"query": query})
         elif self.path == "/method":
             self._respond(200, "OK", {"method": "GET"})
+        elif self.path in ("/no-content", "/not-modified"):
+            # HTTP/1.1 keep-alive and no Content-Length, as S3 answers a
+            # DELETE: the client must not wait for a body.
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(204 if self.path == "/no-content" else 304)
+            self.send_header("ETag", '"abc"')
+            self.end_headers()
+            self.wfile.flush()
+            # Hold the connection open like a keep-alive server would; a
+            # client waiting for a body sees nothing until this returns.
+            time.sleep(4)
+        elif self.path == "/continue-then-ok":
+            self.protocol_version = "HTTP/1.1"
+            self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"ok")
         elif self.path == "/redirect/301":
             self.send_response(301, "Moved Permanently")
             self.send_header("Location", "/redirect/target")
