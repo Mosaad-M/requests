@@ -1277,6 +1277,15 @@ def test_redirect_private_ip_blocked() raises:
 # ============================================================================
 
 
+def test_connections_opened_counts_connects() raises:
+    """test_server.py closes every connection, so each request opens one."""
+    var client = HttpClient(allow_private_ips=True)
+    assert_eq(client.connections_opened, 0, "fresh client")
+    for _ in range(3):
+        _ = client.get(BASE + "/status/200")
+    assert_eq(client.connections_opened, 3, "one per closed connection")
+
+
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
 
@@ -1472,6 +1481,7 @@ def main() raises:
     print()
 
     run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_connections_opened_counts_connects]("connections_opened counter", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
