@@ -39,8 +39,12 @@ def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raise
     var out_buf = unsafe_alloc[UInt8](out_capacity)
     var out_size_ptr = unsafe_alloc[Int](1)
 
+    # BrotliDecoderDecompress is one-shot: when the output does not fit it
+    # returns BROTLI_DECODER_RESULT_ERROR (0), not NEEDS_MORE_OUTPUT (3), so
+    # both mean "try a larger buffer" until the ratio cap; only an error at
+    # the cap is reported as corrupt input.
     var result = Int32(3)
-    while result == Int32(3):
+    while result != Int32(1):
         out_size_ptr[] = out_capacity
         result = brotlidec.call["BrotliDecoderDecompress", Int32](
             Int(data_len),
@@ -48,15 +52,19 @@ def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raise
             Int(out_size_ptr),
             Int(out_buf),
         )
-        if result == Int32(3):
+        if result == Int32(3) or result == Int32(0):
             var new_cap = out_capacity * 2
             var cap_limit = data_len * _MAX_DECOMP_RATIO
             if cap_limit > _MAX_DECOMP_BYTES:
                 cap_limit = _MAX_DECOMP_BYTES
-            if new_cap > cap_limit:
+            if out_capacity >= cap_limit:
                 out_buf.unsafe_free()
                 out_size_ptr.unsafe_free()
+                if result == Int32(0):
+                    raise Error("BrotliDecodeError: result=0")
                 raise Error("brotli decompression ratio limit exceeded")
+            if new_cap > cap_limit:
+                new_cap = cap_limit
             var new_buf = unsafe_alloc[UInt8](new_cap)
             _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_capacity)
             out_buf.unsafe_free()

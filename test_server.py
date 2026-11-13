@@ -250,6 +250,25 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(compressed)
             except ImportError:
                 self._respond(503, "Service Unavailable", {"error": "brotli not installed"})
+        elif self.path == "/brotli-ratio-20":
+            # Decompresses to ~20x its size: more than the decoder's first
+            # 8x output buffer, well under its 256x cap.
+            try:
+                import brotli as _brotli
+                import random as _random
+                r = _random.Random(7)
+                words = ["".join(r.choice("abcdefghij") for _ in range(5)) for _ in range(8)]
+                body = " ".join(r.choice(words) for _ in range(40000)).encode()
+                compressed = _brotli.compress(body)
+                self.send_response(200, "OK")
+                self.send_header("Content-Encoding", "br")
+                self.send_header("Content-Length", str(len(compressed)))
+                self.send_header("X-Decoded-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(compressed)
+            except ImportError:
+                self._respond(503, "Service Unavailable", {"error": "brotli not installed"})
         elif self.path == "/zstd":
             try:
                 import zstandard as _zstd
