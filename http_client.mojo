@@ -403,6 +403,7 @@ struct HttpClient(Movable):
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
+    var connections_opened: Int         # TCP connections this client has opened (pool reuse = fewer)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
@@ -467,6 +468,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
         self.proxy_url = String("")
+        self.connections_opened = 0
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
@@ -520,6 +522,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = move.redirect_same_host_only
         self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
         self.proxy_url = move.proxy_url^
+        self.connections_opened = move.connections_opened
         self._timeout_secs = move._timeout_secs
         self._ca_bundle = move._ca_bundle^
         self._ca_loaded = move._ca_loaded
@@ -628,6 +631,7 @@ struct HttpClient(Movable):
 
         var header_end = -1
 
+        self.connections_opened += 1
         if is_tls:
             if not self._ca_loaded:
                 self._ca_bundle = load_system_ca_bundle()
@@ -1480,7 +1484,7 @@ struct HttpClient(Movable):
     # -------------------------------------------------------------------------
 
     def _tcp_connect(
-        self, target_host: String, target_port: Int, scheme: String = "http"
+        mut self, target_host: String, target_port: Int, scheme: String = "http"
     ) raises -> TcpSocket:
         """Return a TcpSocket connected to target_host:target_port.
 
@@ -1490,6 +1494,7 @@ struct HttpClient(Movable):
 
         If no proxy is configured, connects directly (normal behaviour).
         """
+        self.connections_opened += 1
         # Determine effective proxy URL: field takes priority over env vars
         var effective_proxy = self.proxy_url
         if effective_proxy.byte_length() == 0:
