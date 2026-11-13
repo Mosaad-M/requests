@@ -35,7 +35,7 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 | `psl.mojo` | Curated public-suffix list for cookie domain checks |
 | `main.mojo` | Demo (needs internet) |
 | `bench_profile.mojo`, `bench_h2.mojo` | Benchmarks (`bench_h2` needs the local test servers) |
-| `test_*.mojo`, `test_*server.py`, `certs/` | Tests and their servers; `certs/` are public self-signed **test** fixtures copied from the tls repo |
+| `test_*.mojo`, `test_*server.py`, `certs/` | Tests and their servers; `certs/` (git-ignored) holds a throwaway test CA and localhost cert that `test_h2_server.py` generates with openssl on first run; never commit it |
 
 ## Build & Test
 

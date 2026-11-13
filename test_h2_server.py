@@ -19,7 +19,7 @@ Paths (all ports; ?ms= delays the response without blocking other streams):
   /trailers          200 with a trailer block
   /status/<code>     that status, empty body
 
-Uses the `h2` package (a test-only pixi dependency). Usage: python test_h2_server.py
+Uses the `h2` package (a test-only pixi dependency). Generates certs/ (git-ignored) with openssl on first run. Usage: python test_h2_server.py
 """
 
 import heapq
@@ -27,7 +27,9 @@ import json
 import os
 import socket
 import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -44,6 +46,32 @@ CERT = os.path.join(HERE, "certs", "server.pem")
 KEY = os.path.join(HERE, "certs", "server.key")
 
 PORT_NORMAL, PORT_LIMITED, PORT_GOAWAY = 18443, 18444, 18445
+
+
+def ensure_certs():
+    """Generate a throwaway CA and a localhost server cert in certs/ (git-ignored) if missing."""
+    if all(os.path.exists(f) for f in (CERT, KEY, os.path.join(HERE, "certs", "ca.pem"))):
+        return
+    d = os.path.join(HERE, "certs")
+    os.makedirs(d, exist_ok=True)
+
+    def ssl_(*args):
+        subprocess.run(["openssl", *args], cwd=d, check=True, stderr=subprocess.DEVNULL)
+
+    ssl_("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "ca.key")
+    ssl_("req", "-new", "-x509", "-key", "ca.key", "-out", "ca.pem", "-days", "1826",
+         "-subj", "/CN=TLS Test CA", "-addext", "basicConstraints=critical,CA:TRUE")
+    ssl_("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "server.key")
+    ssl_("req", "-new", "-key", "server.key", "-out", "server.csr", "-subj", "/CN=localhost")
+    with tempfile.NamedTemporaryFile("w", suffix=".ext", dir=d, delete=False) as ext:
+        ext.write("subjectAltName=DNS:localhost\n")
+    try:
+        ssl_("x509", "-req", "-in", "server.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+             "-CAcreateserial", "-out", "server.pem", "-days", "1826", "-extfile", ext.name)
+    finally:
+        for f in (ext.name, os.path.join(d, "server.csr"), os.path.join(d, "ca.srl")):
+            if os.path.exists(f):
+                os.remove(f)
 
 
 class Connection:
@@ -258,6 +286,7 @@ def run(port, mode):
 
 
 def main():
+    ensure_certs()
     for port, mode in ((PORT_NORMAL, "normal"), (PORT_LIMITED, "limited"), (PORT_GOAWAY, "goaway")):
         threading.Thread(target=run, args=(port, mode), daemon=True).start()
     print("h2 test server on", PORT_NORMAL, PORT_LIMITED, PORT_GOAWAY, flush=True)
