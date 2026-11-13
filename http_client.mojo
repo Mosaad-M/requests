@@ -496,6 +496,7 @@ struct HttpClient(Movable):
     var max_header_bytes: Int           # largest response header block accepted
     var max_batch_bytes: Int            # most body bytes held at once by one get_many batch
     var connections_opened: Int         # TCP connections this client has opened (pool reuse = fewer)
+    var default_content_type: String    # Content-Type for a body sent without one ("" = send none)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
     var _deadline_ns: Int               # active deadline (perf_counter_ns instant; 0 = none)
     var _deadline_depth: Int            # nesting of calls sharing the active deadline
@@ -570,6 +571,7 @@ struct HttpClient(Movable):
         self.max_header_bytes = MAX_HEADER_BYTES
         self.max_batch_bytes = MAX_BATCH_BYTES
         self.connections_opened = 0
+        self.default_content_type = String("application/json")
         self._timeout_secs = timeout_secs
         self._deadline_ns = 0
         self._deadline_depth = 0
@@ -633,6 +635,7 @@ struct HttpClient(Movable):
         self.max_header_bytes = move.max_header_bytes
         self.max_batch_bytes = move.max_batch_bytes
         self.connections_opened = move.connections_opened
+        self.default_content_type = move.default_content_type^
         self._timeout_secs = move._timeout_secs
         self._deadline_ns = move._deadline_ns
         self._deadline_depth = move._deadline_depth
@@ -1342,8 +1345,16 @@ struct HttpClient(Movable):
             _append_str(req_buf, "Content-Length: ")
             _append_str(req_buf, String(body.byte_length()))
             _append_str(req_buf, "\r\n")
-            if not extra_headers.has("Content-Type"):
-                _append_str(req_buf, "Content-Type: application/json\r\n")
+            if (
+                not extra_headers.has("Content-Type")
+                and self.default_content_type.byte_length() > 0
+            ):
+                _append_str(req_buf, "Content-Type: " + self.default_content_type + "\r\n")
+        elif method == "POST" or method == "PUT" or method == "PATCH":
+            # These methods define a meaning for a body, so an empty one is
+            # still announced (RFC 9110 8.6); S3 and others answer a PUT
+            # without Content-Length with 411 Length Required.
+            _append_str(req_buf, "Content-Length: 0\r\n")
 
         # Auto-send cookies from jar for this host
         var jar_cookie = self._jar_cookie_for(url.host, url.request_path(), url.scheme == "https")
@@ -1878,8 +1889,11 @@ struct HttpClient(Movable):
         # content-length and content-type for non-empty bodies
         if body.byte_length() > 0:
             h2_hdrs.append(HpackHeader("content-length", String(body.byte_length())))
-            if not extra_headers.has("Content-Type"):
-                h2_hdrs.append(HpackHeader("content-type", "application/json"))
+            if (
+                not extra_headers.has("Content-Type")
+                and self.default_content_type.byte_length() > 0
+            ):
+                h2_hdrs.append(HpackHeader("content-type", self.default_content_type))
 
         # cookies from jar
         var jar_cookie = self._jar_cookie_for(
