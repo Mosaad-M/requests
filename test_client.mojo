@@ -1277,6 +1277,15 @@ def test_redirect_private_ip_blocked() raises:
 # ============================================================================
 
 
+def test_content_length_header_name_must_match_exactly() raises:
+    """`X-Amz-Meta-Content-Length: 5` must not be taken as the body length."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/meta-content-length")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_eq(resp.body.byte_length(), 100000, "whole body read")
+    assert_str_eq(resp.headers.get("X-Amz-Meta-Content-Length"), "5", "metadata header kept")
+
+
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
 
@@ -1472,6 +1481,7 @@ def main() raises:
     print()
 
     run_test[test_get_root]("GET /", passed, failed)
+    run_test[test_content_length_header_name_must_match_exactly]("Content-Length matched as a header name only", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
