@@ -403,6 +403,7 @@ struct HttpClient(Movable):
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
+    var decompress: Bool                # send Accept-Encoding and decode bodies (default True)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
 
     # CA bundle cache — loaded once on first HTTPS request
@@ -467,6 +468,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
         self.proxy_url = String("")
+        self.decompress = True
         self._timeout_secs = timeout_secs
         self._ca_bundle = List[X509Cert]()
         self._ca_loaded = False
@@ -520,6 +522,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = move.redirect_same_host_only
         self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
         self.proxy_url = move.proxy_url^
+        self.decompress = move.decompress
         self._timeout_secs = move._timeout_secs
         self._ca_bundle = move._ca_bundle^
         self._ca_loaded = move._ca_loaded
@@ -931,17 +934,23 @@ struct HttpClient(Movable):
         _append_str(req_buf, " ")
         _append_str(req_buf, url.request_path())
         _append_str(req_buf, " HTTP/1.1\r\n")
-        _append_str(req_buf, "Host: ")
-        _append_str(req_buf, url.host_header())
-        _append_str(req_buf, "\r\n")
-        _append_str(req_buf, "User-Agent: ")
-        _append_str(req_buf, self.user_agent)
-        _append_str(req_buf, "\r\n")
+        # A header the caller gives replaces the client's default rather than
+        # adding a second one: two Host headers are a 400 (RFC 9112 3.2), and
+        # a signed request (AWS SigV4) signs the Host it sends itself.
+        if not extra_headers.has("Host"):
+            _append_str(req_buf, "Host: ")
+            _append_str(req_buf, url.host_header())
+            _append_str(req_buf, "\r\n")
+        if not extra_headers.has("User-Agent"):
+            _append_str(req_buf, "User-Agent: ")
+            _append_str(req_buf, self.user_agent)
+            _append_str(req_buf, "\r\n")
         if not extra_headers.has("Accept"):
             _append_str(req_buf, "Accept: */*\r\n")
-        if not extra_headers.has("Accept-Encoding"):
+        if self.decompress and not extra_headers.has("Accept-Encoding"):
             _append_str(req_buf, "Accept-Encoding: " + self._accept_encoding() + "\r\n")
-        _append_str(req_buf, "Connection: keep-alive\r\n")
+        if not extra_headers.has("Connection"):
+            _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
         if body.byte_length() > 0:
@@ -1183,7 +1192,7 @@ struct HttpClient(Movable):
         # Phase 14: use _ptr variants — decompress directly from the body's
         # internal byte buffer without an intermediate List[UInt8] copy.
         var ce = parsed.headers.get("Content-Encoding")
-        if ce.byte_length() > 0:
+        if self.decompress and ce.byte_length() > 0:
             var body_bytes = parsed.body.as_bytes()
             var decoded = self._decode_body(ce, Int(body_bytes.unsafe_ptr()), len(body_bytes))
             if decoded:
@@ -1382,15 +1391,16 @@ struct HttpClient(Movable):
         # :authority — host:port equivalent in HTTP/2
         h2_hdrs.append(HpackHeader(":authority", url.host_header()))
 
-        # user-agent
-        h2_hdrs.append(HpackHeader("user-agent", self.user_agent))
+        # user-agent (unless caller overrides)
+        if not extra_headers.has("User-Agent"):
+            h2_hdrs.append(HpackHeader("user-agent", self.user_agent))
 
         # accept (unless caller overrides)
         if not extra_headers.has("Accept"):
             h2_hdrs.append(HpackHeader("accept", "*/*"))
 
         # accept-encoding (unless caller overrides)
-        if not extra_headers.has("Accept-Encoding"):
+        if self.decompress and not extra_headers.has("Accept-Encoding"):
             h2_hdrs.append(HpackHeader("accept-encoding", self._accept_encoding()))
 
         # content-length and content-type for non-empty bodies
@@ -1421,7 +1431,17 @@ struct HttpClient(Movable):
                     low.append(b + 32)
                 else:
                     low.append(b)
-            h2_hdrs.append(HpackHeader(String(unsafe_from_utf8=low), extra_headers._values[i]))
+            var name = String(unsafe_from_utf8=low)
+            # :authority already says what Host would, and HTTP/2 forbids
+            # connection-specific fields (RFC 9113 8.2.2): a caller's
+            # HTTP/1.1-style headers must not reset the stream.
+            if (
+                name == "host" or name == "connection" or name == "keep-alive"
+                or name == "proxy-connection" or name == "transfer-encoding"
+                or name == "upgrade"
+            ):
+                continue
+            h2_hdrs.append(HpackHeader(name, extra_headers._values[i]))
 
         # ── Call h2_do_request on the correct pool slot ───────────────────
         var result: Tuple[Int, List[HpackHeader], List[UInt8]]
@@ -1455,7 +1475,7 @@ struct HttpClient(Movable):
         # HTTP/2 headers are lowercase; use case-insensitive compare.
         # Convert resp_body → String first so as_bytes().unsafe_ptr() matches
         # the proven H1 decompression path exactly.
-        var ce = resp.headers.get("content-encoding")
+        var ce = resp.headers.get("content-encoding") if self.decompress else String("")
         if ce.byte_length() > 0:
             var body_str   = String(unsafe_from_utf8=resp_body)
             var body_bytes = body_str.as_bytes()
