@@ -7,6 +7,7 @@ Usage: python test_server.py
 """
 
 import http.server
+import time
 import json
 import sys
 import threading
@@ -228,6 +229,18 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/chunked-te-last":
+            # Transfer-Encoding as the *last* header (S3 orders it so), on a
+            # connection the server keeps open: the client must stop at the
+            # last chunk, not wait for the close.
+            self.wfile.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+                b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+            )
+            self.wfile.flush()
+            time.sleep(4)
+            self.close_connection = True
         elif self.path == "/redirect/301":
             self.send_response(301, "Moved Permanently")
             self.send_header("Location", "/redirect/target")
