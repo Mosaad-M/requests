@@ -927,7 +927,8 @@ struct HttpClient(Movable):
 
         var hdr_str = _buf_to_string(raw_buf, header_end + 4)
         var parsed = _parse_response(hdr_str, url_str)
-        var cl = _buf_content_length(raw_buf, header_end)
+        var fr = _frame_from_headers(raw_buf, header_end)
+        var cl = fr.length if fr.kind == FRAME_LENGTH else -1
         var leftover = _buf_leftover(raw_buf, header_end + 4)
 
         var stream = StreamResponse()
@@ -1589,9 +1590,9 @@ struct HttpClient(Movable):
         if set_cookie.byte_length() > 0:
             self._jar_store(url.host, url.request_path(), url.scheme == "https", set_cookie)
 
-        # If server requested connection close, evict the slot we just used
+        # If the server asked to close, or its framing was ambiguous, evict the slot we just used
         var conn_hdr = parsed.headers.get("Connection")
-        if _eq_ignore_case(conn_hdr, "close"):
+        if _eq_ignore_case(conn_hdr, "close") or not _connection_reusable(raw_bytes):
             if url.scheme == "https":
                 self._tls_close_slot(tls_hit)
             else:
@@ -2637,8 +2638,15 @@ def _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
         var chunk_size = _buf_parse_hex(buf, pos, crlf)
         pos = crlf + 2  # skip \r\n after size
         if chunk_size == 0:
-            # Terminal chunk — need trailing \r\n (already at pos)
-            return pos + 2 <= len(buf)
+            # Terminal chunk: a trailer section (zero or more header lines),
+            # then an empty line. Anything less leaves bytes on the connection.
+            while True:
+                var e = _buf_find_crlf(buf, pos)
+                if e < 0:
+                    return False
+                if e == pos:
+                    return True
+                pos = e + 2
         # Need chunk_size data bytes + trailing \r\n
         if pos + chunk_size + 2 > len(buf):
             return False
@@ -2652,112 +2660,165 @@ def _lc(b: UInt8) -> UInt8:
     return b
 
 
-def _buf_content_length(buf: List[UInt8], header_end: Int) raises -> Int:
-    """Scan buf[0..header_end] case-insensitively for 'content-length: N'.
+comptime FRAME_LENGTH = 0  # the body is exactly `length` bytes
+comptime FRAME_CHUNKED = 1  # chunked transfer coding
+comptime FRAME_UNTIL_CLOSE = 2  # no usable framing header: the body ends when the server closes
 
-    Returns N or -1 if not found.
-    "content-length:" is 15 bytes.
+# A Content-Length at or above this is rejected (100 PB: no body is that large),
+# which also keeps digit accumulation from overflowing Int.
+comptime _MAX_FRAME_LENGTH = 100000000000000000
+
+
+struct _Framing(Copyable, Movable):
+    """Where a response body ends, decided once from the header block."""
+
+    var kind: Int
+    var length: Int  # body bytes when kind == FRAME_LENGTH
+    var conflict: Bool  # Content-Length and Transfer-Encoding were both sent
+
+    def __init__(out self, kind: Int, length: Int, conflict: Bool):
+        self.kind = kind
+        self.length = length
+        self.conflict = conflict
+
+    def __init__(out self, *, copy: Self):
+        self.kind = copy.kind
+        self.length = copy.length
+        self.conflict = copy.conflict
+
+
+def _is_ows(b: UInt8) -> Bool:
+    return b == 32 or b == 9
+
+
+def _name_is(buf: List[UInt8], start: Int, end: Int, lower: String) -> Bool:
+    """Whether buf[start..end) equals `lower` (given in lower case), ignoring ASCII case."""
+    var n = lower.byte_length()
+    if end - start != n:
+        return False
+    var l = lower.as_bytes()
+    for i in range(n):
+        if _lc(buf[start + i]) != l[i]:
+            return False
+    return True
+
+
+def _frame_from_headers(buf: List[UInt8], header_end: Int) raises -> _Framing:
+    """Decide where the body ends from buf[0..header_end] (RFC 9112 6.3).
+
+    The one place that reads Content-Length and Transfer-Encoding: the receive
+    loops and _parse_response both use it, so they cannot disagree. Only a
+    header *name* counts (the line starts with it), so a value that contains
+    the text is ignored. Ambiguous framing raises ParseError:
+      - Content-Length: a comma list of digits, all values equal; anything else
+      - whitespace before the colon of Content-Length / Transfer-Encoding
+      - a line continuation inside either of them
+      - a transfer coding other than chunked / identity, or chunked not last
+    Transfer-Encoding wins over Content-Length; `conflict` then tells the
+    caller not to reuse the connection.
     """
-    var i = 0
-    while i <= header_end - 15:
-        # Only a header *name* counts: the match must start a line. Otherwise
-        # `X-Amz-Meta-Content-Length: 5` (S3 user metadata) or a value that
-        # contains the text would be read as the body length.
-        if (
-            i > 0
-            and buf[i - 1] == 10     # \n: start of a header line
-            and _lc(buf[i]) == 99    # c
-            and _lc(buf[i+1]) == 111 # o
-            and _lc(buf[i+2]) == 110 # n
-            and _lc(buf[i+3]) == 116 # t
-            and _lc(buf[i+4]) == 101 # e
-            and _lc(buf[i+5]) == 110 # n
-            and _lc(buf[i+6]) == 116 # t
-            and buf[i+7] == 45       # -
-            and _lc(buf[i+8]) == 108 # l
-            and _lc(buf[i+9]) == 101 # e
-            and _lc(buf[i+10]) == 110 # n
-            and _lc(buf[i+11]) == 103 # g
-            and _lc(buf[i+12]) == 116 # t
-            and _lc(buf[i+13]) == 104 # h
-            and buf[i+14] == 58      # :
-        ):
-            # Found — parse decimal after ':'
-            var pos = i + 15
-            while pos < header_end and buf[pos] == 32:
-                pos += 1
-            var result = 0
-            while pos < header_end:
-                var c = buf[pos]
-                if c < 48 or c > 57:
-                    break
-                var digit = Int(c - 48)
-                if result > (MAX_RESPONSE_BYTES - digit) // 10:
-                    raise _err_parse("Content-Length value overflows response size limit")
-                result = result * 10 + digit
-                pos += 1
-            return result
-        i += 1
-    return -1
+    var have_cl = False
+    var cl = 0
+    var te_chunked = False
+    var prev = String("")  # framing header that the previous line belonged to
+
+    var pos = _buf_find_crlf(buf, 0)  # skip the status line
+    if pos < 0 or pos > header_end:
+        pos = header_end
+    else:
+        pos += 2
+    while pos < header_end:
+        var e = _buf_find_crlf(buf, pos)
+        if e < 0 or e > header_end:
+            e = header_end
+        var ls = pos
+        pos = e + 2
+        if e == ls:
+            continue
+        if _is_ows(buf[ls]):
+            if prev.byte_length() > 0:
+                raise _err_parse("line continuation inside a " + prev + " header")
+            continue
+        var colon = -1
+        for i in range(ls, e):
+            if buf[i] == 58:
+                colon = i
+                break
+        prev = String("")
+        if colon < 0:
+            continue
+        var nend = colon
+        while nend > ls and _is_ows(buf[nend - 1]):
+            nend -= 1
+        var is_cl = _name_is(buf, ls, nend, "content-length")
+        var is_te = _name_is(buf, ls, nend, "transfer-encoding")
+        if not (is_cl or is_te):
+            continue
+        prev = String("Content-Length") if is_cl else String("Transfer-Encoding")
+        if nend < colon:
+            raise _err_parse("whitespace before the colon in " + prev + " header")
+
+        # The value is a comma-separated list; look at each element.
+        var t = colon + 1
+        while True:
+            var u = t
+            while u < e and buf[u] != 44:
+                u += 1
+            var a = t
+            var b = u
+            while a < b and _is_ows(buf[a]):
+                a += 1
+            while b > a and _is_ows(buf[b - 1]):
+                b -= 1
+            if is_cl:
+                if a == b:
+                    raise _err_parse("invalid Content-Length: empty value")
+                var v = 0
+                for i in range(a, b):
+                    var c = buf[i]
+                    if c < 48 or c > 57:
+                        raise _err_parse("invalid Content-Length: not a number")
+                    v = v * 10 + Int(c - 48)
+                    if v >= _MAX_FRAME_LENGTH:
+                        raise _err_parse("invalid Content-Length: too large")
+                if have_cl and v != cl:
+                    raise _err_parse("conflicting Content-Length values")
+                cl = v
+                have_cl = True
+            elif a < b:
+                if te_chunked:
+                    raise _err_parse("Transfer-Encoding: chunked is not the final coding")
+                if _name_is(buf, a, b, "chunked"):
+                    te_chunked = True
+                elif not _name_is(buf, a, b, "identity"):
+                    raise _err_parse("unsupported Transfer-Encoding coding")
+            if u >= e:
+                break
+            t = u + 1
+
+    # identity (or an empty list) is "no coding": Content-Length still applies.
+    if te_chunked:
+        return _Framing(FRAME_CHUNKED, 0, have_cl)
+    if have_cl:
+        return _Framing(FRAME_LENGTH, cl, False)
+    return _Framing(FRAME_UNTIL_CLOSE, 0, False)
 
 
-def _buf_has_chunked(buf: List[UInt8], header_end: Int) -> Bool:
-    """Check if Transfer-Encoding: chunked is present in buf[0..header_end].
-
-    "transfer-encoding:" is 18 bytes; "chunked" is 7 bytes.
-    """
-    var i = 0
-    while i <= header_end - 18:
-        if (
-            i > 0
-            and buf[i - 1] == 10     # \n: a header name, not a substring
-            and _lc(buf[i]) == 116   # t
-            and _lc(buf[i+1]) == 114 # r
-            and _lc(buf[i+2]) == 97  # a
-            and _lc(buf[i+3]) == 110 # n
-            and _lc(buf[i+4]) == 115 # s
-            and _lc(buf[i+5]) == 102 # f
-            and _lc(buf[i+6]) == 101 # e
-            and _lc(buf[i+7]) == 114 # r
-            and buf[i+8] == 45       # -
-            and _lc(buf[i+9]) == 101  # e
-            and _lc(buf[i+10]) == 110 # n
-            and _lc(buf[i+11]) == 99  # c
-            and _lc(buf[i+12]) == 111 # o
-            and _lc(buf[i+13]) == 100 # d
-            and _lc(buf[i+14]) == 105 # i
-            and _lc(buf[i+15]) == 110 # n
-            and _lc(buf[i+16]) == 103 # g
-            and buf[i+17] == 58      # :
-        ):
-            # Found Transfer-Encoding: — skip spaces, find end of line
-            var pos = i + 18
-            while pos < header_end and buf[pos] == 32:
-                pos += 1
-            # The value runs to the line's CRLF; on the last header line
-            # that is the CRLF at header_end itself.
-            var line_end = pos
-            while line_end < header_end:
-                if buf[line_end] == 13 and buf[line_end + 1] == 10:
-                    break
-                line_end += 1
-            # Search "chunked" (7 bytes) case-insensitively in [pos..line_end)
-            var j = pos
-            while j <= line_end - 7:
-                if (
-                    _lc(buf[j]) == 99      # c
-                    and _lc(buf[j+1]) == 104 # h
-                    and _lc(buf[j+2]) == 117 # u
-                    and _lc(buf[j+3]) == 110 # n
-                    and _lc(buf[j+4]) == 107 # k
-                    and _lc(buf[j+5]) == 101 # e
-                    and _lc(buf[j+6]) == 100 # d
-                ):
-                    return True
-                j += 1
-            break
-        i += 1
-    return False
+def _connection_reusable(raw: List[UInt8]) -> Bool:
+    """Whether the connection that carried `raw` (one response) can serve another
+    request. Not when the framing was ambiguous (Content-Length and
+    Transfer-Encoding both sent) or the server sent bytes past the end of a
+    Content-Length body: they would be read as the next response."""
+    var he = _buf_find_crlf_crlf(raw)
+    if he < 0:
+        return False
+    try:
+        var fr = _frame_from_headers(raw, he)
+        if fr.conflict:
+            return False
+        return fr.kind != FRAME_LENGTH or len(raw) <= he + 4 + fr.length
+    except:
+        return False
 
 
 def _str_contains(haystack: String, needle: String) -> Bool:
@@ -2827,8 +2888,9 @@ def _recv_tls_response(
 
     # Phase 2: read body based on transfer mode
     var body_start = header_end + 4
-    var cl = _buf_content_length(buf, header_end)
-    if cl >= 0:
+    var fr = _frame_from_headers(buf, header_end)
+    if fr.kind == FRAME_LENGTH:
+        var cl = fr.length
         if cl > lim.max_body:
             raise _err_connection("Content-Length exceeds response size limit")
         # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
@@ -2848,7 +2910,7 @@ def _recv_tls_response(
                         raise _err_connection("connection closed before body complete")
                     _list_append(buf, chunk)
         return buf^
-    elif _buf_has_chunked(buf, header_end):
+    elif fr.kind == FRAME_CHUNKED:
         while not _buf_chunked_complete(buf, body_start):
             try:
                 _arm_tls(sock, lim)
@@ -2936,8 +2998,9 @@ def _recv_http_response(
 
     # Phase 2: read body based on transfer mode
     var body_start = header_end + 4
-    var cl = _buf_content_length(buf, header_end)
-    if cl >= 0:
+    var fr = _frame_from_headers(buf, header_end)
+    if fr.kind == FRAME_LENGTH:
+        var cl = fr.length
         if cl > lim.max_body:
             raise _err_connection("Content-Length exceeds response size limit")
         # Pre-allocate to avoid reallocs for known body size (Phase 5.1)
@@ -2956,7 +3019,7 @@ def _recv_http_response(
                         raise _err_connection("connection closed before body complete")
                     _list_append(buf, chunk)
         return buf^
-    elif _buf_has_chunked(buf, header_end):
+    elif fr.kind == FRAME_CHUNKED:
         while not _buf_chunked_complete(buf, body_start):
             _arm_tcp(sock, lim)
             var chunk = sock.recv_bytes(4096)
@@ -3536,9 +3599,20 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
     if separator < 0:
         raise _err_parse("malformed HTTP response: no header/body separator found")
 
+    # Where the body ends comes from the same function the receive loops use,
+    # so the two cannot disagree. Bytes past a Content-Length body are not part
+    # of it.
+    var head = List[UInt8](capacity=separator)
+    for i in range(separator):
+        head.append(ptr[unsafe_offset=i])
+    var framing = _frame_from_headers(head, separator)
+
     # Extract body — single String materialization
     var body_start = separator + 4  # skip \r\n\r\n
-    response.body = _ptr_to_string(ptr, body_start, raw_len)
+    var body_end = raw_len
+    if framing.kind == FRAME_LENGTH and body_start + framing.length < raw_len:
+        body_end = body_start + framing.length
+    response.body = _ptr_to_string(ptr, body_start, body_end)
 
     # Parse status line: find first \r\n within headers [0..separator)
     var first_crlf = _find_crlf(ptr, separator, 0)
@@ -3604,8 +3678,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
             pos = line_end + 2  # skip \r\n
 
     # Decode chunked body if needed
-    var te = response.headers.get("Transfer-Encoding")
-    if _eq_ignore_case(te, String("chunked")):
+    if framing.kind == FRAME_CHUNKED:
         response.body = _decode_chunked(response.body)
 
     return response^

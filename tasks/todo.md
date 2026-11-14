@@ -1,3 +1,19 @@
+# requests 1.8.0 — parse the response header block once (issue #52)
+
+Plan: `~/.claude/plans/shimmering-skipping-lobster.md`. Branch `framing-1.8.0`.
+
+- [x] Tests first: raw keep-alive listener (port 18083) + `test_framing.mojo`; on 1.7.1 code 17 of 28 fail
+- [x] `_frame_from_headers` / `_Framing`; receive loops, `get_stream`, `_parse_response` use it; old scanners deleted
+- [x] `_connection_reusable` eviction; trailer-aware `_buf_chunked_complete`
+- [x] Parser unit tests (44 total); mutation-checked trailers, eviction and the 100 MB constant
+- [x] Real servers: S3 listings, chunked/Content-Length sites, redirects, HEAD, keep-alive
+- [ ] Reviewer pass, fix findings
+- [ ] Version 1.8.0, PR, CI, merge, tag, index
+
+Deviation from the plan: `Transfer-Encoding: gzip, chunked` raises `ParseError` (unsupported coding) instead of being decoded, because decoding only the chunking would return still-gzipped bytes silently.
+
+---
+
 # requests 1.7.0 — docs, limits, deadline + retries, HTTP/2 multiplexing, benchmarks
 
 Plan: `~/.claude/plans/shimmering-skipping-lobster.md`. Branch `requests-1.7.0`.
