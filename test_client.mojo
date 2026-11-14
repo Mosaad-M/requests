@@ -1295,6 +1295,17 @@ def test_chunked_when_transfer_encoding_is_the_last_header() raises:
     assert_str_eq(resp.body, "hello world", "decoded body")
     assert_true(_unix_time_secs() - t0 < 3, "did not wait for the server to close")
 
+def test_brotli_body_larger_than_8x() raises:
+    """A brotli body that inflates more than 8x (most HTML does) decodes."""
+    var client = HttpClient(allow_private_ips=True)
+    var resp = client.get(BASE + "/brotli-ratio-20")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_eq(
+        resp.body.byte_length(),
+        Int(atol(resp.headers.get("X-Decoded-Length"))),
+        "decoded length",
+    )
+
 
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
@@ -1655,6 +1666,7 @@ def main() raises:
     run_test[test_streaming_gzip_existing]("streaming gzip existing still works", passed, failed)
 
     # Phase 12 tests
+    run_test[test_brotli_body_larger_than_8x]("brotli body over 8x", passed, failed)
     run_test[test_zstd_decompression]("zstd decompression", passed, failed)
     run_test[test_accept_encoding_zstd]("Accept-Encoding includes zstd", passed, failed)
 
