@@ -1,3 +1,19 @@
+# requests 1.8.1 — brotli output buffer, response copies (PRs #45, #47)
+
+Branch `patch-1.8.1`. Contributor commits kept; merged cleanly except an adjacent-lines test conflict.
+
+- [x] #45: brotli bodies inflating more than 8x failed with `BrotliDecodeError: result=0` (the one-shot decoder returns ERROR, never NEEDS_MORE_OUTPUT, when the buffer is too small); buffer now grows on either result up to the ratio cap
+- [x] Review: PR looped on `while result != 1`, which would spin forever on any other result code; now `while result == 3 or result == 0`
+- [x] Test: corrupt brotli data fails fast (guard test, passes on old code too); over-8x test fails on 1.8.0 code
+- [x] #47: `List.extend(Span)` instead of per-byte appends; 64 MiB GET 982 -> 1475 MiB/s on this machine
+- [x] Security (found by profiling, see below): `_buf_parse_hex` rejects non-hex/oversized chunk sizes (7FFF.. used to abort the process; now `ChunkedBodyError`); `hpack_decode_str` bounds-checks the length (abort on a malicious h2 server's block)
+- [x] Perf: `_buf_chunked_complete` resumes from the last whole chunk (was quadratic: 8 MiB of 1 KB chunks 79 -> 15 ms, 2 MiB of 16-byte chunks 226 -> 8 ms); `_connection_reusable` checked before the String is built (peak RSS of a 64 MiB body 269 -> 214 MB, the 1.8.0 regression)
+- [x] Tests: hostile chunk sizes, resumable scan, hpack string bounds
+- [x] `pixi run test` 38 + 46 + 118 + 4, test-hpack 129
+- [ ] PR, CI, merge, tag `v1.8.1`, mojo-pkg-index
+
+---
+
 # requests 1.8.0 — parse the response header block once (issue #52)
 
 Plan: `~/.claude/plans/shimmering-skipping-lobster.md`. Branch `framing-1.8.0`.

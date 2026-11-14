@@ -44,7 +44,7 @@ def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raise
     # both mean "try a larger buffer" until the ratio cap; only an error at
     # the cap is reported as corrupt input.
     var result = Int32(3)
-    while result != Int32(1):
+    while result == Int32(3) or result == Int32(0):
         out_size_ptr[] = out_capacity
         result = brotlidec.call["BrotliDecoderDecompress", Int32](
             Int(data_len),

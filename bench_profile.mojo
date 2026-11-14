@@ -52,7 +52,7 @@ def report(name: String, total_ns: Int, iters: Int):
 
 def _append(mut buf: List[UInt8], s: String):
     var sb = s.as_bytes()
-    for i in range(len(s)):
+    for i in range(s.byte_length()):
         buf.append(sb[i])
 
 
@@ -214,7 +214,7 @@ def bench_json_parsing() raises:
 
     # Small JSON
     var small = make_small_json()
-    print("  [small: " + String(len(small)) + " bytes]")
+    print("  [small: " + String(small.byte_length()) + " bytes]")
     var total: Int = 0
     comptime N_SMALL = 10000
     for _ in range(N_SMALL):
@@ -225,7 +225,7 @@ def bench_json_parsing() raises:
 
     # Medium JSON
     var medium = make_medium_json()
-    print("  [medium: " + String(len(medium)) + " bytes]")
+    print("  [medium: " + String(medium.byte_length()) + " bytes]")
     total = 0
     comptime N_MED = 5000
     for _ in range(N_MED):
@@ -236,7 +236,7 @@ def bench_json_parsing() raises:
 
     # Large JSON
     var large = make_large_json()
-    print("  [large: " + String(len(large)) + " bytes]")
+    print("  [large: " + String(large.byte_length()) + " bytes]")
     total = 0
     comptime N_LRG = 500
     for _ in range(N_LRG):
@@ -247,7 +247,7 @@ def bench_json_parsing() raises:
 
     # Integer-heavy JSON
     var int_json = make_integer_heavy_json()
-    print("  [integer-heavy: " + String(len(int_json)) + " bytes]")
+    print("  [integer-heavy: " + String(int_json.byte_length()) + " bytes]")
     total = 0
     comptime N_INT = 2000
     for _ in range(N_INT):
@@ -258,7 +258,7 @@ def bench_json_parsing() raises:
 
     # Float-heavy JSON
     var float_json = make_float_heavy_json()
-    print("  [float-heavy: " + String(len(float_json)) + " bytes]")
+    print("  [float-heavy: " + String(float_json.byte_length()) + " bytes]")
     total = 0
     comptime N_FLT = 2000
     for _ in range(N_FLT):
@@ -269,7 +269,7 @@ def bench_json_parsing() raises:
 
     # String-heavy JSON
     var str_json = make_string_heavy_json()
-    print("  [string-heavy: " + String(len(str_json)) + " bytes]")
+    print("  [string-heavy: " + String(str_json.byte_length()) + " bytes]")
     total = 0
     comptime N_STR = 2000
     for _ in range(N_STR):
@@ -342,7 +342,7 @@ def bench_http_parsing() raises:
 
     # Small response (~500 byte body)
     var small_resp = make_raw_http_response(500)
-    print("  [small response: " + String(len(small_resp)) + " bytes]")
+    print("  [small response: " + String(small_resp.byte_length()) + " bytes]")
     var total: Int = 0
     comptime N_SM = 5000
     for _ in range(N_SM):
@@ -353,7 +353,7 @@ def bench_http_parsing() raises:
 
     # Medium response (~10KB body)
     var med_resp = make_raw_http_response(10000)
-    print("  [medium response: " + String(len(med_resp)) + " bytes]")
+    print("  [medium response: " + String(med_resp.byte_length()) + " bytes]")
     total = 0
     comptime N_MD = 2000
     for _ in range(N_MD):
@@ -364,7 +364,7 @@ def bench_http_parsing() raises:
 
     # Large response (~100KB body)
     var large_resp = make_raw_http_response(100000)
-    print("  [large response: " + String(len(large_resp)) + " bytes]")
+    print("  [large response: " + String(large_resp.byte_length()) + " bytes]")
     total = 0
     comptime N_LG = 500
     for _ in range(N_LG):
@@ -379,7 +379,7 @@ def bench_chunked_decoding() raises:
 
     var chunked = make_chunked_body()
     print(
-        "  [chunked body: " + String(len(chunked)) + " bytes -> 896 decoded]"
+        "  [chunked body: " + String(chunked.byte_length()) + " bytes -> 896 decoded]"
     )
     var total: Int = 0
     comptime N = 5000
@@ -492,7 +492,7 @@ def bench_scaling() raises:
             )
         _append(buf, "]")
         var json_str = String(unsafe_from_utf8=buf^)
-        var json_bytes = len(json_str)
+        var json_bytes = json_str.byte_length()
 
         var iters = 10000 // n
         if iters < 10:

@@ -106,11 +106,15 @@ def hpack_decode_str(data: List[UInt8], off: Int) raises -> Tuple[String, Int]:
     Returns:
         (decoded_string, new_offset)
     """
+    if off >= len(data):
+        raise Error("hpack: string starts past the end of the block")
     var huffman = (Int(data[off]) & 0x80) != 0
     # Decode length as 7-bit prefix integer (H bit is not part of the value)
     var len_res = hpack_decode_int(data, off, 7)
     var str_len = len_res[0]
     var str_off = len_res[1]
+    if str_len < 0 or str_len > len(data) - str_off:
+        raise Error("hpack: string length runs past the end of the block")
     if huffman:
         var huff_data = List[UInt8](capacity=str_len)
         for i in range(str_len):

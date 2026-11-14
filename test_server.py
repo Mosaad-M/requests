@@ -523,6 +523,14 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(compressed)
             except ImportError:
                 self._respond(503, "Service Unavailable", {"error": "brotli not installed"})
+        elif self.path == "/brotli-corrupt":
+            body = bytes(range(1, 200))  # not a brotli stream
+            self.send_response(200, "OK")
+            self.send_header("Content-Encoding", "br")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/brotli-ratio-20":
             # Decompresses to ~20x its size: more than the decoder's first
             # 8x output buffer, well under its 256x cap.

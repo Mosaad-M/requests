@@ -1572,6 +1572,8 @@ struct HttpClient(Movable):
             raise _err_connection("empty response from server")
 
         # Convert to string and parse
+        # Decide reuse before the String is built so the raw buffer is not kept alive
+        var reusable = _connection_reusable(raw_bytes)
         var raw_response = String(unsafe_from_utf8=raw_bytes)
         var parsed = _parse_response(raw_response, url_str)
 
@@ -1592,7 +1594,7 @@ struct HttpClient(Movable):
 
         # If the server asked to close, or its framing was ambiguous, evict the slot we just used
         var conn_hdr = parsed.headers.get("Connection")
-        if _eq_ignore_case(conn_hdr, "close") or not _connection_reusable(raw_bytes):
+        if _eq_ignore_case(conn_hdr, "close") or not reusable:
             if url.scheme == "https":
                 self._tls_close_slot(tls_hit)
             else:
@@ -2602,27 +2604,40 @@ def _buf_find_crlf(buf: List[UInt8], start: Int) -> Int:
 
 
 def _buf_parse_hex(buf: List[UInt8], start: Int, end: Int) -> Int:
-    """Parse hex integer from buf[start..end). Stops at non-hex or ';'."""
+    """Parse the hex chunk size in buf[start..end): hex digits, then ';' (chunk
+    extension), SP/HT, or the end. Returns -1 for no digits, a character that is
+    not hex, or a value above 256 MB (the same cap as _hex_to_int)."""
     var result = 0
+    var digits = 0
     for i in range(start, end):
         var c = buf[i]
+        var d: Int
         if c >= 48 and c <= 57:  # 0-9
-            result = result * 16 + Int(c - 48)
+            d = Int(c - 48)
         elif c >= 97 and c <= 102:  # a-f
-            result = result * 16 + Int(c - 97) + 10
+            d = Int(c - 97) + 10
         elif c >= 65 and c <= 70:  # A-F
-            result = result * 16 + Int(c - 65) + 10
+            d = Int(c - 65) + 10
+        elif c == 59 or c == 32 or c == 9:  # ';' or whitespace: extension follows
+            break
         else:
-            break  # chunk extension, whitespace, or CR
+            return -1
+        digits += 1
+        result = result * 16 + d
+        if result > 268435456:
+            return -1
+    if digits == 0:
+        return -1
     return result
 
 
-def _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
-    """Check if buf[start..] contains a complete chunked body.
+def _buf_chunked_complete(buf: List[UInt8], mut pos: Int) raises -> Bool:
+    """Check if buf[pos..] contains a complete chunked body.
 
     Parses chunk boundaries until terminal 0-size chunk is found and confirmed.
+    `pos` is the caller's resume point: it advances only past whole chunks, so
+    each recv scans the new bytes (a rescan from the body start was quadratic).
     """
-    var pos = start
     while True:
         # Need at least "0\r\n" (3 bytes)
         if pos >= len(buf) - 2:
@@ -2632,21 +2647,23 @@ def _buf_chunked_complete(buf: List[UInt8], start: Int) -> Bool:
         if crlf < 0:
             return False  # incomplete line
         var chunk_size = _buf_parse_hex(buf, pos, crlf)
-        pos = crlf + 2  # skip \r\n after size
+        if chunk_size < 0:
+            raise _err_chunked("invalid or oversized chunk size")
+        var p = crlf + 2  # skip \r\n after size
         if chunk_size == 0:
             # Terminal chunk: a trailer section (zero or more header lines),
             # then an empty line. Anything less leaves bytes on the connection.
             while True:
-                var e = _buf_find_crlf(buf, pos)
+                var e = _buf_find_crlf(buf, p)
                 if e < 0:
                     return False
-                if e == pos:
+                if e == p:
                     return True
-                pos = e + 2
+                p = e + 2
         # Need chunk_size data bytes + trailing \r\n
-        if pos + chunk_size + 2 > len(buf):
+        if p + chunk_size + 2 > len(buf):
             return False
-        pos = pos + chunk_size + 2  # skip data + \r\n
+        pos = p + chunk_size + 2  # skip data + \r\n
 
 
 def _lc(b: UInt8) -> UInt8:
@@ -2906,7 +2923,8 @@ def _recv_tls_response(
                     _list_append(buf, chunk)
         return buf^
     elif fr.kind == FRAME_CHUNKED:
-        while not _buf_chunked_complete(buf, body_start):
+        var scan = body_start
+        while not _buf_chunked_complete(buf, scan):
             try:
                 _arm_tls(sock, lim)
                 var chunk = sock.recv(4096)
@@ -3014,7 +3032,8 @@ def _recv_http_response(
                     _list_append(buf, chunk)
         return buf^
     elif fr.kind == FRAME_CHUNKED:
-        while not _buf_chunked_complete(buf, body_start):
+        var scan = body_start
+        while not _buf_chunked_complete(buf, scan):
             _arm_tcp(sock, lim)
             var chunk = sock.recv_bytes(4096)
             if len(chunk) == 0:

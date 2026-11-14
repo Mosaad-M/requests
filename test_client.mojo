@@ -1307,6 +1307,19 @@ def test_brotli_body_larger_than_8x() raises:
     )
 
 
+def test_brotli_corrupt_body_fails_fast() raises:
+    """Corrupt brotli data is an error, not a hang or an ever-growing buffer."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=5)
+    var t0 = _unix_time_secs()
+    var msg = String()
+    try:
+        _ = client.get(BASE + "/brotli-corrupt")
+    except e:
+        msg = String(e)
+    assert_true(msg.startswith("BrotliDecodeError"), "expected BrotliDecodeError, got '" + msg + "'")
+    assert_true(_unix_time_secs() - t0 < 3, "failed promptly")
+
+
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
 
@@ -1667,6 +1680,7 @@ def main() raises:
 
     # Phase 12 tests
     run_test[test_brotli_body_larger_than_8x]("brotli body over 8x", passed, failed)
+    run_test[test_brotli_corrupt_body_fails_fast]("brotli corrupt body fails fast", passed, failed)
     run_test[test_zstd_decompression]("zstd decompression", passed, failed)
     run_test[test_accept_encoding_zstd]("Accept-Encoding includes zstd", passed, failed)
 
