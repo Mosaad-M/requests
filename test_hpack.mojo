@@ -1528,6 +1528,31 @@ def test_encode_rfc_c3_sequential() raises:
     )
 
 
+def _decode_str_raises(data: List[UInt8], off: Int) -> Bool:
+    try:
+        _ = hpack_decode_str(data, off)
+    except:
+        return True
+    return False
+
+
+def test_decode_str_bounds() raises:
+    # Server-controlled bytes must raise, never read past the block.
+    var short = _hex_bytes("056162")  # claims 5 bytes, has 2
+    if not _decode_str_raises(short, 0):
+        raise Error("string longer than the block must raise")
+    var empty = List[UInt8]()
+    if not _decode_str_raises(empty, 0):
+        raise Error("offset at the end of the block must raise")
+    var huge = _hex_bytes("7fffffffffffffffffffffffff7f")
+    if not _decode_str_raises(huge, 0):
+        raise Error("huge length must raise")
+    var ok = _hex_bytes("026162")
+    var r = hpack_decode_str(ok, 0)
+    if r[0] != "ab" or r[1] != 3:
+        raise Error("valid string must still decode")
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -1683,6 +1708,8 @@ def main() raises:
     run_test[test_encode_decode_roundtrip]("encode→decode roundtrip: 4-header block identical", passed, failed)
     run_test[test_encode_rfc_c3_req1]("RFC §C.3.1 first request byte-for-byte", passed, failed)
     run_test[test_encode_rfc_c3_sequential]("RFC §C.3 three requests sequential — byte-for-byte", passed, failed)
+
+    run_test[test_decode_str_bounds]("decode_str: truncated / oversized length raises", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

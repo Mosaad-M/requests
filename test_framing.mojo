@@ -14,6 +14,7 @@
 from http_client import (
     HttpClient,
     _frame_from_headers,
+    _buf_chunked_complete,
     _Framing,
     FRAME_LENGTH,
     FRAME_CHUNKED,
@@ -324,6 +325,49 @@ def test_raised_limit_lets_a_200mb_body_through_the_header_check() raises:
     assert_true(msg.find("size limit") < 0, "raised limit must not trip a size limit, got '" + msg + "'")
 
 
+# ── Chunk-size parsing on hostile input ─────────────────────────────────────
+
+
+def _bytes(s: String) -> List[UInt8]:
+    return List[UInt8](s.as_bytes())
+
+
+def _chunk_size_rejected(body: String) -> Bool:
+    var pos = 0
+    try:
+        _ = _buf_chunked_complete(_bytes(body), pos)
+    except e:
+        return String(e).startswith("ChunkedBodyError")
+    return False
+
+
+def test_unit_chunk_size_overflow_raises() raises:
+    # 7FFF... and 8000... used to abort the process (signed overflow)
+    assert_true(_chunk_size_rejected("7FFFFFFFFFFFFFFF\r\nx"), "7FFFFFFFFFFFFFFF")
+    assert_true(_chunk_size_rejected("8000000000000000\r\nx"), "8000000000000000")
+    assert_true(_chunk_size_rejected("FFFFFFFFFFFFFFFFFF\r\nx"), "18 digits")
+    assert_true(_chunk_size_rejected("10000001\r\nx"), "above the 256 MB cap")
+    assert_true(_chunk_size_rejected("zz\r\nx"), "not hex")
+    assert_true(_chunk_size_rejected("\r\nxxx"), "no digits")
+
+
+def test_unit_chunk_scan_resumes() raises:
+    # Feed the body in pieces: pos must stop at the last whole chunk and the
+    # final answer must match a single scan.
+    var full = String("5\r\nhello\r\n3;ext=1\r\nabc\r\n0\r\nT: v\r\n\r\n")
+    var pos = 0
+    var done = False
+    var n = full.byte_length()
+    for cut in range(1, n + 1):
+        var piece = List[UInt8](_bytes(full)[:cut])
+        done = _buf_chunked_complete(piece, pos)
+        if done and cut != n:
+            raise Error("completed early at " + String(cut))
+    assert_true(done, "complete body")
+    var whole = 0
+    assert_true(_buf_chunked_complete(_bytes(full), whole), "single scan")
+
+
 def main() raises:
     var passed = 0
     var failed = 0
@@ -388,6 +432,9 @@ def main() raises:
     run_test[test_unit_conflicting_values_across_lines]("parser: values across lines", passed, failed)
     run_test[test_default_limit_stops_a_200mb_body]("limit: default stops a 200 MB Content-Length", passed, failed)
     run_test[test_raised_limit_lets_a_200mb_body_through_the_header_check]("limit: raised max_response_bytes is honoured", passed, failed)
+
+    run_test[test_unit_chunk_size_overflow_raises]("parser: hostile chunk sizes raise", passed, failed)
+    run_test[test_unit_chunk_scan_resumes]("parser: chunk scan resumes across reads", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
