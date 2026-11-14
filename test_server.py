@@ -219,6 +219,15 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._respond(200, "OK", {"query": query})
         elif self.path == "/method":
             self._respond(200, "OK", {"method": "GET"})
+        elif self.path == "/meta-content-length":
+            # A header whose name *ends* in Content-Length, sent first, with a
+            # body too large to arrive in the first read.
+            body = b"y" * 100000
+            self.send_response(200)
+            self.send_header("X-Amz-Meta-Content-Length", "5")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/redirect/301":
             self.send_response(301, "Moved Permanently")
             self.send_header("Location", "/redirect/target")

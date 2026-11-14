@@ -2660,8 +2660,13 @@ def _buf_content_length(buf: List[UInt8], header_end: Int) raises -> Int:
     """
     var i = 0
     while i <= header_end - 15:
+        # Only a header *name* counts: the match must start a line. Otherwise
+        # `X-Amz-Meta-Content-Length: 5` (S3 user metadata) or a value that
+        # contains the text would be read as the body length.
         if (
-            _lc(buf[i]) == 99        # c
+            i > 0
+            and buf[i - 1] == 10     # \n: start of a header line
+            and _lc(buf[i]) == 99    # c
             and _lc(buf[i+1]) == 111 # o
             and _lc(buf[i+2]) == 110 # n
             and _lc(buf[i+3]) == 116 # t
@@ -2704,7 +2709,9 @@ def _buf_has_chunked(buf: List[UInt8], header_end: Int) -> Bool:
     var i = 0
     while i <= header_end - 18:
         if (
-            _lc(buf[i]) == 116       # t
+            i > 0
+            and buf[i - 1] == 10     # \n: a header name, not a substring
+            and _lc(buf[i]) == 116   # t
             and _lc(buf[i+1]) == 114 # r
             and _lc(buf[i+2]) == 97  # a
             and _lc(buf[i+3]) == 110 # n
