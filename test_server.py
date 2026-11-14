@@ -70,6 +70,99 @@ def _stale_keepalive_server(port=18082):
         threading.Thread(target=one, args=(c,), daemon=True).start()
 
 
+def _framing_server(port=18083):
+    """Raw keep-alive listener for response-framing tests (test_framing.mojo).
+    Each path sends one crafted response and keeps the connection open. A float
+    in a response is a pause in seconds: the head and the body are then written
+    separately, so a client cannot get the right body by luck (head and body in
+    the same read)."""
+    import socket
+    H = b"HTTP/1.1 200 OK\r\n"
+    CH = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+    Y = b"y" * 100000
+    R = {
+        "/ok": [H + b"Content-Length: 2\r\n\r\nok"],
+        # must keep working
+        "/val-cl": [H + b"X-Note: see content-length: 5\r\nContent-Length: 100000\r\n\r\n" + Y],
+        "/val-te": [H + b"Set-Cookie: a=b; note=transfer-encoding: chunked\r\nContent-Length: 3000\r\n\r\n" + b"a" * 3000],
+        "/fold": [H + b"X-Long: a\r\n content-length: 5\r\nContent-Length: 100000\r\n\r\n" + Y],
+        "/mixed-case": [H + b"X-A: 1\r\nCoNtEnT-LeNgTh: 100000\r\n\r\n" + Y],
+        "/cl-first": [H + b"Content-Length: 100000\r\nX-A: 1\r\n\r\n" + Y],
+        "/te-last": [H + b"X-A: 1\r\nTransfer-Encoding: chunked\r\n\r\n" + CH],
+        "/te-mid": [H + b"Transfer-Encoding: chunked\r\nX-A: 1\r\n\r\n" + CH],
+        "/te-upper": [H + b"TRANSFER-ENCODING: Chunked\r\n\r\n" + CH],
+        "/te-identity-chunked": [H + b"Transfer-Encoding: identity, chunked\r\n\r\n" + CH],
+        "/te-identity-cl": [H + b"Transfer-Encoding: identity\r\nContent-Length: 5\r\n\r\nhello"],
+        "/dup-cl-same": [H + b"Content-Length: 5\r\nContent-Length: 5\r\n\r\nhello"],
+        "/cl-list": [H + b"Content-Length: 5, 5\r\n\r\nhello"],
+        # must now be rejected
+        "/dup-cl-diff": [H + b"Content-Length: 5\r\nContent-Length: 100000\r\n\r\n", 0.2, Y],
+        "/cl-list-diff": [H + b"Content-Length: 5, 6\r\n\r\n", 0.2, b"hello!"],
+        "/cl-abc": [H + b"Content-Length: abc\r\n\r\n", 0.2, b"hello"],
+        "/cl-plus": [H + b"Content-Length: +5\r\n\r\n", 0.2, b"hello"],
+        "/cl-neg": [H + b"Content-Length: -1\r\n\r\n", 0.2, b"hello"],
+        "/cl-empty": [H + b"Content-Length:\r\n\r\n", 0.2, b"hello"],
+        "/cl-space-colon": [H + b"Content-Length : 5\r\n\r\n", 0.2, b"hello"],
+        "/te-space-colon": [H + b"Transfer-Encoding : chunked\r\n\r\n", 0.2, CH],
+        "/fold-in-cl": [H + b"Content-Length: 5\r\n 5\r\n\r\n", 0.2, b"hello"],
+        "/te-gzip-chunked": [H + b"Transfer-Encoding: gzip, chunked\r\n\r\n", 0.2, CH],
+        "/te-notchunked": [H + b"Transfer-Encoding: notchunked\r\n\r\n", 0.2, CH],
+        # accepted, with a safe outcome
+        "/cl-and-te": [H + b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n", 0.2, CH],
+        "/cl-and-te-stray": [H + b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n", 0.2, CH, 0.2, b"zz"],
+        # announces 200 MB, sends 10 bytes: shows which limit stops the client
+        "/cl-huge": [H + b"Content-Length: 200000000\r\n\r\n", 0.2, b"x" * 10],
+        "/extra-after-body": [H + b"Content-Length: 5\r\n\r\nhello\r\n"],
+        # a second response starts inside the first one and ends later
+        "/smuggled": [H + b"Content-Length: 5\r\n\r\nhello" + b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", 0.2, b"ok"],
+        "/trailers": [H + b"Transfer-Encoding: chunked\r\n\r\n", 0.2,
+                      b"5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n"],
+        # the trailer section arrives in two pieces
+        "/trailers-split": [H + b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-", 0.2,
+                            b"Trailer: 1\r\n\r\n"],
+    }
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(16)
+
+    def one(conn):
+        try:
+            buf = b""
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    buf += chunk
+                head, _, buf = buf.partition(b"\r\n\r\n")
+                method = head.split(b"\r\n")[0].split(b" ")[0].decode()
+                path = head.split(b"\r\n")[0].split(b" ")[1].decode()
+                need = 0
+                for ln in head.split(b"\r\n")[1:]:
+                    if ln.lower().startswith(b"content-length:"):
+                        need = int(ln.split(b":")[1])
+                while len(buf) < need:
+                    buf += conn.recv(4096)
+                buf = buf[need:]
+                if method == "HEAD":  # headers only, with the length a GET would have
+                    conn.sendall(H + b"Content-Length: 5\r\nTransfer-Encoding-Test: 1\r\n\r\n")
+                    continue
+                for part in R.get(path, R["/ok"]):
+                    if isinstance(part, float):
+                        time.sleep(part)
+                    else:
+                        conn.sendall(part)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=one, args=(c,), daemon=True).start()
+
+
 def _hit(key):
     with _HITS_LOCK:
         _HITS[key] = _HITS.get(key, 0) + 1
@@ -630,6 +723,7 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
 def main():
     port = 18080
     threading.Thread(target=_stale_keepalive_server, daemon=True).start()
+    threading.Thread(target=_framing_server, daemon=True).start()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), TestHandler)
     print(f"Test server running on http://127.0.0.1:{port}")
     print("Press Ctrl+C to stop, or GET /shutdown to stop programmatically")

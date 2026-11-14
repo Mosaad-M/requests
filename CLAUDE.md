@@ -41,7 +41,7 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (38) + test_client (114 HTTP + 4 HTTPS) against test_server.py
+pixi run test              # test_resilience (38) + test_framing (44) + test_client (116 HTTP + 4 HTTPS) against test_server.py
 pixi run test-h2-local     # 28 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18445)
 pixi run test-hpack        # 128
 pixi run test-h2           # 70 (framing)
@@ -52,7 +52,8 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 ```
 
 - `mojo run` (JIT) is not used; everything goes through `mojo build` via `build_and_run.sh`.
-- `test_client` ends by calling `/shutdown` on `test_server.py`, so `test_resilience` runs first in the `test` task.
+- `test_client` ends by calling `/shutdown` on `test_server.py`, so `test_resilience` and `test_framing` run first in the `test` task.
+- `test_framing` talks to a raw keep-alive listener (port 18083) and follows every case with a **POST** on the same client: HttpClient replays a failed GET on a fresh connection, which would hide bytes left on a pooled connection. A response that must be rejected sends its head and body in separate writes, so it cannot pass by luck.
 - Tests that must prove a *negative* (flow control, deadlines) are verified by mutation: break the code, confirm the test fails. The h2 server credits uploaded data back 30 ms late on purpose, so a client that ignores flow control gets dropped. HttpClient silently retries a failed pooled request on a fresh connection, so a test that must see a protocol failure should use the raw `h2_request` on a hand-made `Http2Conn` (see `test_raw_upload_obeys_peer_windows`).
 - `test-h2-conn`/`test-h2-client`/HTTPS tests use the public internet and can flake.
 
@@ -64,7 +65,7 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 | `timeout_secs` (ctor) | 30 | Per-socket send/recv timeout |
 | `total_timeout_secs` | 0 (off) | Deadline for a whole call incl. redirects, retries and body reads. Raises `TimeoutError`. Every read (HTTP, HTTPS, h2, pooled or fresh) is capped to the time left, 1 s granularity. If a retry's wait would pass the deadline, the last response is returned instead |
 | `max_retries` / `retry_backoff_ms` / `retry_non_idempotent` | 0 / 200 / False | Retry connect/read failures and 429/502/503/504; idempotent methods only unless opted in; exponential backoff with jitter capped at 30 s; `Retry-After` (seconds) honoured up to 60 s |
-| `max_response_bytes` | 100 MB | Body cap, HTTP/1.1 (Content-Length, chunked, close-delimited) and HTTP/2 |
+| `max_response_bytes` | 100 MB | Body cap, HTTP/1.1 (Content-Length, chunked, close-delimited) and HTTP/2; raising it above 100 MB works (the parser has no constant cap). `get_stream` is uncapped |
 | `max_header_bytes` | 1 MB | Header block cap (HTTP/1.1 and HTTP/2, compressed, decoded, and cumulative with trailers) |
 | `max_batch_bytes` | 1 GB | Body bytes one `get_many` batch may hold; a stream past it is re-fetched alone |
 | `max_redirects`, `follow_redirects`, `redirect_same_host_only`, `pool_idle_timeout_secs`, `proxy_url` | | as before |
@@ -78,6 +79,7 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 - **Keep-alive pools**: LRU-4 per scheme (HTTP, TLS/HTTP1, HTTP/2). A request that fails on a pooled connection is replayed on a fresh one only if it is idempotent (or `retry_non_idempotent`), as in Go; deadline expiry and size-limit violations are never replayed.
 - **HTTP/2**: one connection per host:port, up to 4 pooled. `h2_request` is `h2_request_many` with one request. Stream state lives in parallel lists indexed by request; stream id of request `i` is `first_id + 2*i`. Header blocks are always HPACK-decoded, even for finished streams, to keep the dynamic table in sync. DATA frames are split into TLS records of at most 16384 bytes (a full 16384-byte frame plus its 9-byte header exceeds the TLS record limit).
 - **Conn-level send window** is changed only by WINDOW_UPDATE on stream 0, never by SETTINGS_INITIAL_WINDOW_SIZE (that only moves stream windows).
+- **Response framing (HTTP/1.1)**: `_frame_from_headers` is the only code that reads `Content-Length` / `Transfer-Encoding`; the receive loops, `get_stream` and `_parse_response` all use it, so they cannot disagree. Only a header *name* counts. Invalid, non-numeric or conflicting `Content-Length` (a comma list of equal values is fine), whitespace before the colon or a line continuation inside Content-Length/Transfer-Encoding, and a transfer coding other than `chunked`/`identity` (or `chunked` not last) raise `ParseError`. `Transfer-Encoding` wins over `Content-Length`. The connection is not returned to the pool when both were sent or when bytes follow a Content-Length body (`_connection_reusable`). Chunked trailers are consumed.
 - **Error categories** (`String(e).startswith(...)`): `HTTPError`, `ConnectionError`, `TooManyRedirects`, `ValidationError`, `ParseError`, `ChunkedBodyError`, `TimeoutError`. Raw `tcp:`/`tls:` errors can also surface from lower layers.
 - **Mojo 1.2 gotchas**: `def` not `fn`; `len(String)` is an error (use `byte_length()`); methods that mutate the client (`_accept_encoding`, `_jar_cookie_for`) need `mut self`; do not pass `self.field` and `self.method()` as two arguments of one call.
 

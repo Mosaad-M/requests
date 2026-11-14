@@ -97,7 +97,7 @@ never sends one the client cannot decode.
 ## Testing
 
 ```bash
-pixi run test            # resilience (38) + client (114 HTTP, 4 HTTPS)
+pixi run test            # resilience (38) + framing (44) + client (116 HTTP, 4 HTTPS)
 pixi run test-h2-local   # HTTP/2 against a local server (28); needs the python `h2` package (pixi installs it)
 pixi run test-hpack      # 128
 pixi run test-h2         # 70
