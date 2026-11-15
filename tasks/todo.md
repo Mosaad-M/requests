@@ -4,7 +4,8 @@ Branch `release-1.11.0`. #48 cherry-picked (authorship kept) onto 1.10.0 and por
 - [x] tls floor 1.11.0 (TLS 1.2 ALPN reporting), mojo.lock updated
 - [x] test-alpn (PR's test): 4 requests, 1 connection
 - [x] New: test_h2_server.py port 18446 is TLS 1.2 only; a TLS 1.2 server selecting h2 still gets h2 (fails on tls 1.10.0, passes on 1.11.0)
-- [ ] Full profiles, real-host spot checks (sha256.badssl.com connection count)
+- [x] Real hosts: sha256.badssl.com and tls-v1-2.badssl.com 2 requests = 1 connection (v1.10.0: 2); cloudflare, example.com, github.com, httpbin h2 with 1 connection
+- [x] Profiles vs v1.10.0: e2e/h2/profile within noise (h2 4 MB median 15.38 vs 15.09 ms, 12 runs); PoCs unchanged; fuzz 8 runs x 300k clean; reviewer: no bugs, test gaps fixed (TLS 1.2 no-ALPN case, CI step)
 
 ---
 
