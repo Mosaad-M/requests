@@ -106,8 +106,9 @@ def test_single_get_over_h2() raises:
 
 
 def test_tls12_server_that_selects_h2_still_gets_h2() raises:
-    # tls 1.11.0 reports the ALPN result on TLS 1.2; with the HTTP/2 probe gone
-    # that is the only way a TLS 1.2 server gets h2. One connection, h2 framing.
+    # Guards the tls >= 1.11.0 floor: with the probe gone, the ALPN result that
+    # tls reports on TLS 1.2 is the only way such a server gets h2 (tls 1.10.0
+    # returned "" and this fails there).
     var c = local_client()
     var r = c.get(TLS12 + "/n/1")
     assert_eq(r.status_code, 200, "status")
