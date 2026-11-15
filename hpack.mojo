@@ -680,24 +680,28 @@ struct HpackDynTable(Copyable, Movable):
     var _values:      List[String]   # _values[0] = newest (parallel to _names)
     var current_size: Int            # sum of (name_len + value_len + 32) for all entries
     var max_size:     Int            # negotiated max via SETTINGS_HEADER_TABLE_SIZE
+    var limit:        Int            # what we advertised: a size update above it is an error (§6.3)
 
     def __init__(out self, max_size: Int = 4096):
         self._names       = List[String]()
         self._values      = List[String]()
         self.current_size = 0
         self.max_size     = max_size
+        self.limit        = max_size
 
     def __init__(out self, *, copy: Self):
         self._names       = copy._names.copy()
         self._values      = copy._values.copy()
         self.current_size = copy.current_size
         self.max_size     = copy.max_size
+        self.limit        = copy.limit
 
     def __init__(out self, *, deinit move: Self):
         self._names       = move._names^
         self._values      = move._values^
         self.current_size = move.current_size
         self.max_size     = move.max_size
+        self.limit        = move.limit
 
     def len(self) -> Int:
         """Return number of entries currently in the dynamic table."""
@@ -889,6 +893,8 @@ def hpack_decode_block(
             var r       = hpack_decode_int(data, off, 5)
             var new_max = r[0]
             off         = r[1]
+            if new_max > dyn_table.limit:
+                raise Error("hpack: dynamic table size update above the advertised limit")
             dyn_table.update_max_size(new_max)
 
         elif b & 0xF0 == 0x10:
