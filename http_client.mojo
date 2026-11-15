@@ -1143,7 +1143,8 @@ struct HttpClient(Movable):
         Redirect semantics:
         - 301/302/303: follow with GET, discard body
         - 307/308:     follow with original method and body
-        - Authorization header is stripped when the host changes
+        - Authorization, Cookie and Proxy-Authorization are stripped when the
+          scheme, host or port changes
         - response.history contains all intermediate responses
         - response.url is the final URL after all redirects
         """
@@ -1186,20 +1187,13 @@ struct HttpClient(Movable):
                 next_method = "GET"
                 next_body = String("")
 
-            # Strip Authorization when host changes
-            var next_headers = current_headers.copy()
             var base_parsed = parse_url(current_url)
             var next_parsed = parse_url(next_url)
-            if base_parsed.host != next_parsed.host:
+            if base_parsed.host != next_parsed.host and self.redirect_same_host_only:
                 # Phase 11B: redirect_same_host_only — stop on cross-host redirects
-                if self.redirect_same_host_only:
-                    resp.history = history^
-                    return resp^
-                var stripped = HttpHeaders()
-                for i in range(len(next_headers)):
-                    if not _eq_ignore_case(next_headers._keys[i], "Authorization"):
-                        stripped.add(next_headers._keys[i], next_headers._values[i])
-                next_headers = stripped^
+                resp.history = history^
+                return resp^
+            var next_headers = _redirect_headers(current_headers, base_parsed, next_parsed)
 
             history.append(resp^)
             current_method = next_method
@@ -3234,6 +3228,22 @@ def _backoff_ms(base_ms: Int, attempt: Int) -> Int:
 # ============================================================================
 # Input Validation
 # ============================================================================
+
+
+def _redirect_headers(headers: HttpHeaders, base: Url, target: Url) -> HttpHeaders:
+    """Headers for a redirect hop: credentials survive only within one origin."""
+    if base.scheme == target.scheme and base.host == target.host and base.port == target.port:
+        return headers.copy()
+    var out = HttpHeaders()
+    for i in range(len(headers)):
+        var k = headers._keys[i]
+        if not (
+            _eq_ignore_case(k, "Authorization")
+            or _eq_ignore_case(k, "Cookie")
+            or _eq_ignore_case(k, "Proxy-Authorization")
+        ):
+            out.add(k, headers._values[i])
+    return out^
 
 
 def _validate_method(method: String) raises:

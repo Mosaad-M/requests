@@ -11,7 +11,8 @@ from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, Bearer
 from json import JsonValue
 from std.os import setenv
 from codecs import Codecs, accept_encoding
-from http_client import _unix_time_secs
+from http_client import _unix_time_secs, _redirect_headers
+from url import parse_url
 
 
 # ============================================================================
@@ -1525,6 +1526,26 @@ def test_cookie_jar_is_bounded() raises:
         raise Error("a 5000-byte cookie was stored")
 
 
+def test_redirect_credentials_dropped_when_origin_changes() raises:
+    """Authorization, Cookie and Proxy-Authorization must not follow a redirect to
+    another scheme, host or port; other headers stay."""
+    var h = HttpHeaders()
+    h.add("Authorization", "Bearer s")
+    h.add("cookie", "sid=1")
+    h.add("Proxy-Authorization", "Basic x")
+    h.add("Accept", "*/*")
+    var base = parse_url("https://a.example/x")
+    for target in ["http://a.example/x", "https://b.example/x", "https://a.example:8443/x"]:
+        var out = _redirect_headers(h, base, parse_url(target))
+        if out.has("Authorization") or out.has("Cookie") or out.has("Proxy-Authorization"):
+            raise Error("credentials followed a redirect to " + target)
+        if not out.has("Accept"):
+            raise Error("non-credential header was dropped for " + target)
+    var same = _redirect_headers(h, base, parse_url("https://a.example/y?z=1"))
+    if not same.has("Authorization") or not same.has("Cookie") or not same.has("Proxy-Authorization"):
+        raise Error("credentials dropped on a same-origin redirect")
+
+
 def test_follow_redirects_disabled() raises:
     """follow_redirects=False should return 301 without following."""
     var client = HttpClient(allow_private_ips=True)
@@ -1838,6 +1859,7 @@ def main() raises:
     run_test[test_cookie_domain_must_match_request_host]("cookie Domain must match request host", passed, failed)
     run_test[test_cookie_rejects_control_chars]("cookie rejects control chars", passed, failed)
     run_test[test_cookie_jar_is_bounded]("cookie jar is bounded", passed, failed)
+    run_test[test_redirect_credentials_dropped_when_origin_changes]("redirect drops credentials on origin change", passed, failed)
     run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)
     run_test[test_redirect_same_host_only]("redirect same host only", passed, failed)
 
