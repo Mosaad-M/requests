@@ -26,6 +26,7 @@ from http_client import HttpClient, HttpHeaders
 comptime NORMAL = "https://localhost:18443"
 comptime LIMITED = "https://localhost:18444"
 comptime GOAWAY = "https://localhost:18445"
+comptime TLS12 = "https://localhost:18446"
 
 
 def assert_eq(actual: Int, expected: Int, label: String) raises:
@@ -102,6 +103,19 @@ def test_single_get_over_h2() raises:
     assert_eq(r.status_code, 200, "status")
     assert_str(r.body, "resp-1", "body")
     assert_str(r.status_text, "", "HTTP/2 has no reason phrase")
+
+
+def test_tls12_server_that_selects_h2_still_gets_h2() raises:
+    # tls 1.11.0 reports the ALPN result on TLS 1.2; with the HTTP/2 probe gone
+    # that is the only way a TLS 1.2 server gets h2. One connection, h2 framing.
+    var c = local_client()
+    var r = c.get(TLS12 + "/n/1")
+    assert_eq(r.status_code, 200, "status")
+    assert_str(r.body, "resp-1", "body")
+    assert_str(r.status_text, "", "served over h2, not HTTP/1.1")
+    var r2 = c.get(TLS12 + "/n/2")
+    assert_str(r2.body, "resp-2", "second body")
+    assert_eq(c.connections_opened, 1, "one connection for two requests")
 
 
 def test_get_many_in_order() raises:
@@ -500,6 +514,7 @@ def main() raises:
     print()
 
     run_test[test_single_get_over_h2]("single GET over h2", passed, failed)
+    run_test[test_tls12_server_that_selects_h2_still_gets_h2]("TLS 1.2 server selecting h2 gets h2", passed, failed)
     run_test[test_get_many_in_order]("get_many: in order", passed, failed)
     run_test[test_get_many_is_concurrent]("get_many: requests overlap", passed, failed)
     run_test[test_get_many_beyond_concurrent_stream_limit]("get_many: beyond MAX_CONCURRENT_STREAMS", passed, failed)

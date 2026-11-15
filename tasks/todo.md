@@ -1,3 +1,13 @@
+# requests 1.11.0 — no HTTP/2 probe (#48), tls >= 1.11.0
+
+Branch `release-1.11.0`. #48 cherry-picked (authorship kept) onto 1.10.0 and ported: the `proto == ""` branch is gone, so no ALPN answer is HTTP/1.1 on the connection we have.
+- [x] tls floor 1.11.0 (TLS 1.2 ALPN reporting), mojo.lock updated
+- [x] test-alpn (PR's test): 4 requests, 1 connection
+- [x] New: test_h2_server.py port 18446 is TLS 1.2 only; a TLS 1.2 server selecting h2 still gets h2 (fails on tls 1.10.0, passes on 1.11.0)
+- [ ] Full profiles, real-host spot checks (sha256.badssl.com connection count)
+
+---
+
 # requests 1.10.0 — security hardening
 
 Branch `release-1.10.0`; each item a commit with its test (verified failing first).
