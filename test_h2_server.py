@@ -3,6 +3,7 @@
 Three listeners on localhost:
   18443  normal: stream window 16384 (forces many WINDOW_UPDATEs on uploads)
   18444  SETTINGS_MAX_CONCURRENT_STREAMS = 2
+  18446  like 18443 but TLS 1.2 only (ALPN h2 answered in the ServerHello)
   18445  sends GOAWAY (last stream = 3rd) when the 4th request arrives, and never
          answers requests after that
 
@@ -45,7 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CERT = os.path.join(HERE, "certs", "server.pem")
 KEY = os.path.join(HERE, "certs", "server.key")
 
-PORT_NORMAL, PORT_LIMITED, PORT_GOAWAY = 18443, 18444, 18445
+PORT_NORMAL, PORT_LIMITED, PORT_GOAWAY, PORT_TLS12 = 18443, 18444, 18445, 18446
 
 
 def ensure_certs():
@@ -264,8 +265,10 @@ class Connection:
                 self.mid_settings_acked = True
 
 
-def run(port, mode):
+def run(port, mode, tls12=False):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    if tls12:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(CERT, KEY)
     ctx.set_alpn_protocols(["h2"])
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -287,9 +290,9 @@ def run(port, mode):
 
 def main():
     ensure_certs()
-    for port, mode in ((PORT_NORMAL, "normal"), (PORT_LIMITED, "limited"), (PORT_GOAWAY, "goaway")):
-        threading.Thread(target=run, args=(port, mode), daemon=True).start()
-    print("h2 test server on", PORT_NORMAL, PORT_LIMITED, PORT_GOAWAY, flush=True)
+    for port, mode in ((PORT_NORMAL, "normal"), (PORT_LIMITED, "limited"), (PORT_GOAWAY, "goaway"), (PORT_TLS12, "normal")):
+        threading.Thread(target=run, args=(port, mode, port == PORT_TLS12), daemon=True).start()
+    print("h2 test server on", PORT_NORMAL, PORT_LIMITED, PORT_GOAWAY, PORT_TLS12, flush=True)
     try:
         while True:
             time.sleep(3600)

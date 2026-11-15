@@ -42,7 +42,8 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 ```bash
 pixi run run               # demo
 pixi run test              # test_resilience (38) + test_framing (51) + test_client (134 HTTP + 4 HTTPS) against test_server.py
-pixi run test-h2-local     # 28 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18445)
+pixi run test-h2-local     # 29 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
+pixi run test-alpn         # 1: HTTPS server answering no ALPN protocol gets HTTP/1.1 on one connection (test_alpn_fallback.mojo, alpn_test_server.py)
 pixi run test-hpack        # 130
 pixi run test-h2           # 70 (framing)
 pixi run test-h2-conn      # 4  (public internet)
@@ -81,6 +82,7 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 - **Pure Mojo stack**: TLS is the `tls` package (no OpenSSL); sockets are the `tcp` package. Compression libs are loaded with `dlopen` at runtime, so programs need no linker flags.
 - **UnsafePointer-based parsing** for HTTP/URL/JSON hot paths, materialising `String` once. `String(unsafe_from_utf8=list^)` (no NUL terminator).
 - **Keep-alive pools**: LRU-4 per scheme (HTTP, TLS/HTTP1, HTTP/2). A request that fails on a pooled connection is replayed on a fresh one only if it is idempotent (or `retry_non_idempotent`), as in Go; deadline expiry and size-limit violations are never replayed.
+- **ALPN is the only way to h2**: a TLS connection with no ALPN answer is HTTP/1.1 on that same connection (no HTTP/2 preface probe, no second handshake). Needs tls >= 1.11.0, which reports the ALPN result on TLS 1.2 too.
 - **HTTP/2**: one connection per host:port, up to 4 pooled. `h2_request` is `h2_request_many` with one request. Stream state lives in parallel lists indexed by request; stream id of request `i` is `first_id + 2*i`. Header blocks are always HPACK-decoded, even for finished streams, to keep the dynamic table in sync. DATA frames are split into TLS records of at most 16384 bytes (a full 16384-byte frame plus its 9-byte header exceeds the TLS record limit).
 - **Conn-level send window** is changed only by WINDOW_UPDATE on stream 0, never by SETTINGS_INITIAL_WINDOW_SIZE (that only moves stream windows).
 - **Response framing (HTTP/1.1)**: `_frame_from_headers` is the only code that reads `Content-Length` / `Transfer-Encoding`; the receive loops, `get_stream` and `_parse_response` all use it, so they cannot disagree. Only a header *name* counts. Invalid, non-numeric or conflicting `Content-Length` (a comma list of equal values is fine), whitespace before the colon or a line continuation inside Content-Length/Transfer-Encoding, and a transfer coding other than `chunked`/`identity` (or `chunked` not last) raise `ParseError`. `Transfer-Encoding` wins over `Content-Length`. The connection is not returned to the pool when both were sent or when bytes follow a Content-Length body (`_connection_reusable`). Chunked trailers are consumed.

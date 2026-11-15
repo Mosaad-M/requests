@@ -46,6 +46,8 @@ jobs:
 
       - name: HTTP/2 local-server tests
         run: pixi run test-h2-local
+      - name: ALPN fallback
+        run: pixi run test-alpn
 
       - name: Std compatibility
         run: pixi run test-std-compat
@@ -80,6 +82,8 @@ jobs:
 
       - name: HTTP/2 local-server tests
         run: pixi run test-h2-local
+      - name: ALPN fallback
+        run: pixi run test-alpn
 
       - name: Std compatibility
         run: pixi run test-std-compat
