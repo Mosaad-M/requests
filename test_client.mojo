@@ -9,6 +9,7 @@
 
 from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
+from std.os import setenv
 from codecs import Codecs, accept_encoding
 from http_client import _unix_time_secs
 
@@ -1542,6 +1543,28 @@ def test_proxy_env_var() raises:
     assert_eq(resp.status_code, 200, "env proxy detection: direct fallback works")
 
 
+def test_trust_env_false_ignores_proxy_env() raises:
+    """trust_env = False never reads HTTP_PROXY, so a dead proxy in the
+    environment does not matter (e.g. for the cloud metadata service)."""
+    _ = setenv("HTTP_PROXY", "http://127.0.0.1:1", True)
+    var trusting = HttpClient(allow_private_ips=True, timeout_secs=2)
+    var failed_via_proxy = False
+    try:
+        _ = trusting.get(BASE + "/")
+    except:
+        failed_via_proxy = True
+    var direct = HttpClient(allow_private_ips=True, timeout_secs=2)
+    direct.trust_env = False
+    var status = 0
+    try:
+        status = direct.get(BASE + "/").status_code
+    except:
+        pass
+    _ = setenv("HTTP_PROXY", "", True)
+    assert_true(failed_via_proxy, "default client uses the env proxy")
+    assert_eq(status, 200, "trust_env=False goes direct")
+
+
 # ============================================================================
 # Phase 14 Tests — Streaming Decompression
 # ============================================================================
@@ -1773,6 +1796,7 @@ def main() raises:
     run_test[test_proxy_http_post]("proxy HTTP POST", passed, failed)
     run_test[test_no_proxy_when_unset]("no proxy when unset", passed, failed)
     run_test[test_proxy_env_var]("proxy env var auto-detect", passed, failed)
+    run_test[test_trust_env_false_ignores_proxy_env]("trust_env=False ignores the proxy env", passed, failed)
 
     # Phase 14 tests
     run_test[test_streaming_gzip_large]("streaming gzip large", passed, failed)
