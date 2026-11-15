@@ -946,6 +946,8 @@ struct HttpClient(Movable):
         var parsed = _parse_response(hdr_str, url_str)
         var fr = _frame_from_headers(raw_buf, header_end)
         var cl = fr.length if fr.kind == FRAME_LENGTH else -1
+        if parsed.status_code == 204 or parsed.status_code == 304:
+            cl = 0  # no body follows, whatever Content-Length says
         var leftover = _buf_leftover(raw_buf, header_end + 4)
 
         var stream = StreamResponse()
@@ -1097,15 +1099,15 @@ struct HttpClient(Movable):
         if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip") or _eq_ignore_case(ce, "deflate"):
             if not self._codecs.zlib:
                 raise missing_library("gzip" if not _eq_ignore_case(ce, "deflate") else "deflate")
-            return zlib_inflate(self._codecs.zlib.value(), addr, n, not _eq_ignore_case(ce, "deflate"))
+            return zlib_inflate(self._codecs.zlib.value(), addr, n, not _eq_ignore_case(ce, "deflate"), self.max_response_bytes)
         if _eq_ignore_case(ce, "br"):
             if not self._codecs.brotli:
                 raise missing_library("br")
-            return brotli_decode(self._codecs.brotli.value(), addr, n)
+            return brotli_decode(self._codecs.brotli.value(), addr, n, self.max_response_bytes)
         if _eq_ignore_case(ce, "zstd"):
             if not self._codecs.zstd:
                 raise missing_library("zstd")
-            return zstd_decode(self._codecs.zstd.value(), addr, n)
+            return zstd_decode(self._codecs.zstd.value(), addr, n, self.max_response_bytes)
         return None
 
     def _follow_redirects(
@@ -1143,7 +1145,8 @@ struct HttpClient(Movable):
         Redirect semantics:
         - 301/302/303: follow with GET, discard body
         - 307/308:     follow with original method and body
-        - Authorization header is stripped when the host changes
+        - Authorization, Cookie and Proxy-Authorization are stripped when the
+          scheme, host or port changes
         - response.history contains all intermediate responses
         - response.url is the final URL after all redirects
         """
@@ -1186,20 +1189,13 @@ struct HttpClient(Movable):
                 next_method = "GET"
                 next_body = String("")
 
-            # Strip Authorization when host changes
-            var next_headers = current_headers.copy()
             var base_parsed = parse_url(current_url)
             var next_parsed = parse_url(next_url)
-            if base_parsed.host != next_parsed.host:
+            if base_parsed.host != next_parsed.host and self.redirect_same_host_only:
                 # Phase 11B: redirect_same_host_only — stop on cross-host redirects
-                if self.redirect_same_host_only:
-                    resp.history = history^
-                    return resp^
-                var stripped = HttpHeaders()
-                for i in range(len(next_headers)):
-                    if not _eq_ignore_case(next_headers._keys[i], "Authorization"):
-                        stripped.add(next_headers._keys[i], next_headers._values[i])
-                next_headers = stripped^
+                resp.history = history^
+                return resp^
+            var next_headers = _redirect_headers(current_headers, base_parsed, next_parsed)
 
             history.append(resp^)
             current_method = next_method
@@ -2146,6 +2142,16 @@ struct HttpClient(Movable):
         var val_buf = List[UInt8](capacity=semi - eq - 1)
         for i in range(eq + 1, semi):
             val_buf.append(bytes[i])
+        # Bounded and printable only: a control character would be replayed
+        # into the Cookie header, and an oversized pair would bloat every request.
+        if len(name_buf) + len(val_buf) > 4096:
+            return
+        for c in name_buf:
+            if (c < 32 and c != 9) or c == 127:
+                return
+        for c in val_buf:
+            if (c < 32 and c != 9) or c == 127:
+                return
         var name = String(unsafe_from_utf8=name_buf)
         var value = String(unsafe_from_utf8=val_buf)
 
@@ -2156,7 +2162,7 @@ struct HttpClient(Movable):
         var cookie_path = String("/")
         var secure = False
         var httponly = False
-        var cookie_domain = host
+        var cookie_domain = _norm_host(host)
         var host_only = True
         var samesite = String("Lax")  # RFC 6265bis default
 
@@ -2258,11 +2264,24 @@ struct HttpClient(Movable):
                                 break
                         if not has_inner_dot:
                             return  # reject entire cookie — invalid Domain attr
+                        d = _norm_host(d)  # the PSL and the host check are case-sensitive
                         # Reject public suffixes (e.g. .co.uk, .github.io)
                         # to prevent supercookies that match any registrant
                         # under the suffix (Phase 11A — PSL validation).
                         if is_public_suffix(d):
                             return  # reject entire cookie — public suffix Domain
+                        # RFC 6265 §5.3 step 6: the request host must be the
+                        # Domain or a subdomain of it (IP hosts: exact only).
+                        var h = _norm_host(host)
+                        var h_is_ip = True
+                        for hb in h.as_bytes():
+                            if hb != 46 and (hb < 48 or hb > 57):
+                                h_is_ip = False
+                        if h_is_ip or h.find(":") >= 0:
+                            if h != d:
+                                return
+                        elif not _domain_matches(h, d, False):
+                            return
                         cookie_domain = d
                         host_only = False
 
@@ -2390,6 +2409,8 @@ struct HttpClient(Movable):
                 self._jar_samesite[i] = samesite
                 self._jar_httponly[i] = httponly
                 return
+        if len(self._jar_names) >= 3000:
+            return  # shortcut: new cookies are dropped once the jar is full, no eviction
         self._jar_domains.append(cookie_domain)
         self._jar_names.append(name)
         self._jar_values.append(value)
@@ -2409,6 +2430,7 @@ struct HttpClient(Movable):
           - secure: Secure cookies not sent over HTTP
           - domain: exact match (host_only) or suffix match
         """
+        var hn = _norm_host(host)
         var now = _unix_time_secs()
         var result = List[UInt8](capacity=64)
         var first = True
@@ -2420,7 +2442,7 @@ struct HttpClient(Movable):
                 continue  # Secure cookie not sent over HTTP
             if not _path_matches(req_path, self._jar_paths[i]):
                 continue  # path doesn't match
-            if not _domain_matches(host, self._jar_domains[i], self._jar_host_only[i]):
+            if not _domain_matches(hn, self._jar_domains[i], self._jar_host_only[i]):
                 continue  # domain doesn't match
             if self._jar_samesite[i] == "None" and not is_https:
                 continue  # SameSite=None requires Secure (HTTPS)
@@ -2506,6 +2528,8 @@ struct StreamResponse(Movable):
 
         # Drain leftover bytes from initial header recv first
         var leftover_avail = len(self._leftover) - self._leftover_pos
+        if self._content_length >= 0:  # bytes past the announced length are not body
+            leftover_avail = min(leftover_avail, self._content_length - self._body_read)
         if leftover_avail > 0:
             var take_n = min(size, leftover_avail)
             result.extend(
@@ -2532,11 +2556,17 @@ struct StreamResponse(Movable):
                         chunk = self._tls_sock.recv(need)
                     else:
                         chunk = self._http_sock.recv_bytes(need)
-                except:
+                except e:
                     self._done = True
+                    # A read error before the announced length is a truncated
+                    # body (or a timeout), not the end of the stream.
+                    if self._content_length >= 0 or String(e).startswith(ERR_TIMEOUT):
+                        raise e^
                     chunk = List[UInt8]()
                 if len(chunk) == 0:
                     self._done = True
+                    if self._content_length >= 0 and self._body_read + len(result) < self._content_length:
+                        raise _err_connection("stream: connection closed before body complete")
                 else:
                     result.extend(Span(chunk))
 
@@ -3014,6 +3044,8 @@ def _recv_tls_response(
                 raise _err_connection(es)
             if len(buf) - body_start > lim.max_body:
                 raise _err_connection("chunked body exceeds response size limit")
+        if not _buf_chunked_complete(buf, scan):
+            raise _err_chunked("chunked body truncated: connection closed before the final chunk")
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes
@@ -3124,6 +3156,8 @@ def _recv_http_response(
             _list_append(buf, chunk)
             if len(buf) - body_start > lim.max_body:
                 raise _err_connection("chunked body exceeds response size limit")
+        if not _buf_chunked_complete(buf, scan):
+            raise _err_chunked("chunked body truncated: connection closed before the final chunk")
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes
@@ -3211,6 +3245,22 @@ def _backoff_ms(base_ms: Int, attempt: Int) -> Int:
 # ============================================================================
 
 
+def _redirect_headers(headers: HttpHeaders, base: Url, target: Url) -> HttpHeaders:
+    """Headers for a redirect hop: credentials survive only within one origin."""
+    if base.scheme == target.scheme and base.host == target.host and base.port == target.port:
+        return headers.copy()
+    var out = HttpHeaders()
+    for i in range(len(headers)):
+        var k = headers._keys[i]
+        if not (
+            _eq_ignore_case(k, "Authorization")
+            or _eq_ignore_case(k, "Cookie")
+            or _eq_ignore_case(k, "Proxy-Authorization")
+        ):
+            out.add(k, headers._values[i])
+    return out^
+
+
 def _validate_method(method: String) raises:
     """Validate HTTP method contains only uppercase ASCII letters (A-Z)."""
     if method.byte_length() == 0:
@@ -3223,21 +3273,21 @@ def _validate_method(method: String) raises:
 
 
 def _validate_header_key(key: String) raises:
-    """Validate header key contains no CR, LF, or colon characters."""
+    """Validate header key contains no control characters or colon."""
     var bytes = key.as_bytes()
     for i in range(key.byte_length()):
         var b = bytes[i]
-        if b == 13 or b == 10 or b == 58:  # \r, \n, :
-            raise _err_validation("invalid header key: contains CR, LF, or colon")
+        if b < 32 or b == 127 or b == 58:  # control chars (incl. CR, LF, NUL), :
+            raise _err_validation("invalid header key: contains a control character or colon")
 
 
 def _validate_header_value(value: String) raises:
-    """Validate header value contains no CR or LF characters."""
+    """Validate header value contains no control characters (tab is allowed)."""
     var bytes = value.as_bytes()
     for i in range(value.byte_length()):
         var b = bytes[i]
-        if b == 13 or b == 10:  # \r, \n
-            raise _err_validation("invalid header value: contains CR or LF")
+        if (b < 32 and b != 9) or b == 127:  # incl. CR, LF, NUL
+            raise _err_validation("invalid header value: contains a control character")
 
 
 def _validate_path(path: String) raises:
@@ -3245,8 +3295,8 @@ def _validate_path(path: String) raises:
     var bytes = path.as_bytes()
     for i in range(path.byte_length()):
         var b = bytes[i]
-        if b == 13 or b == 10:  # \r, \n
-            raise _err_validation("invalid request path: contains CR or LF")
+        if b < 32 or b == 127:  # control chars, incl. CR, LF, NUL
+            raise _err_validation("invalid request path: contains a control character")
 
 
 # ============================================================================
@@ -3492,6 +3542,14 @@ def _path_matches(req_path: String, cookie_path: String) -> Bool:
     if rp_bytes[cp_len] == UInt8(47):  # next char is '/'
         return True
     return False
+
+
+def _norm_host(h: String) -> String:
+    """Cookie host form: lower case, no trailing dot."""
+    var l = _to_lower(h)
+    if l.byte_length() > 1 and l.as_bytes()[l.byte_length() - 1] == 46:
+        return String(l[byte=0 : l.byte_length() - 1])
+    return l
 
 
 def _domain_matches(host: String, cookie_domain: String, host_only: Bool) -> Bool:

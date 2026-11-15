@@ -46,10 +46,14 @@ comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
 
 
 def zlib_inflate(
-    zlib: OwnedDLHandle, data_addr: Int, data_len: Int, is_gzip: Bool
+    zlib: OwnedDLHandle,
+    data_addr: Int,
+    data_len: Int,
+    is_gzip: Bool,
+    max_out: Int = _MAX_DECOMP_BYTES,
 ) raises -> List[UInt8]:
     """Decompress gzip or deflate data at a raw address+length with an
-    opened zlib (codecs.open_zlib)."""
+    opened zlib (codecs.open_zlib). Output is capped at `max_out` bytes."""
     if data_len == 0:
         return List[UInt8]()
 
@@ -98,13 +102,15 @@ def zlib_inflate(
         if out_used >= out_cap:
             var new_cap = out_cap * 2
             var cap_limit = data_len * _MAX_DECOMP_RATIO
-            if cap_limit > _MAX_DECOMP_BYTES:
-                cap_limit = _MAX_DECOMP_BYTES
-            if new_cap > cap_limit:
+            if cap_limit > max_out:
+                cap_limit = max_out
+            if out_cap >= cap_limit:
                 _ = zlib.call["inflateEnd", Int32](Int(zs))
                 out_buf.unsafe_free()
                 zs.unsafe_free()
                 raise Error("decompression ratio limit exceeded")
+            if new_cap > cap_limit:
+                new_cap = cap_limit
             var new_buf = unsafe_alloc[UInt8](new_cap)
             _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_used)
             out_buf.unsafe_free()

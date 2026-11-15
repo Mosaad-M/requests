@@ -27,7 +27,9 @@ comptime _MAX_DECOMP_RATIO: Int = 256          # max output/input ratio
 comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024  # absolute 512 MB cap
 
 
-def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raises -> List[UInt8]:
+def brotli_decode(
+    brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int, max_out: Int = _MAX_DECOMP_BYTES
+) raises -> List[UInt8]:
     """Decompress Brotli data from a raw address+length (no List copy)
     with an opened libbrotlidec (codecs.open_brotli)."""
     if data_len == 0:
@@ -55,8 +57,8 @@ def brotli_decode(brotlidec: OwnedDLHandle, data_addr: Int, data_len: Int) raise
         if result == Int32(3) or result == Int32(0):
             var new_cap = out_capacity * 2
             var cap_limit = data_len * _MAX_DECOMP_RATIO
-            if cap_limit > _MAX_DECOMP_BYTES:
-                cap_limit = _MAX_DECOMP_BYTES
+            if cap_limit > max_out:
+                cap_limit = max_out
             if out_capacity >= cap_limit:
                 out_buf.unsafe_free()
                 out_size_ptr.unsafe_free()

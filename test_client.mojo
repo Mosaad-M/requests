@@ -11,7 +11,10 @@ from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, Bearer
 from json import JsonValue
 from std.os import setenv
 from codecs import Codecs, accept_encoding
-from http_client import _unix_time_secs
+from http_client import _unix_time_secs, _redirect_headers
+from url import parse_url
+from codecs import open_zlib
+from zlib_decompress import zlib_inflate
 
 
 # ============================================================================
@@ -305,6 +308,31 @@ def test_crlf_header_value_rejected() raises:
         raised = True
     if not raised:
         raise Error("expected error for CRLF in header value")
+
+
+def test_control_chars_in_headers_rejected() raises:
+    """NUL and other control characters are rejected in header names and values
+    (a tab in a value is fine)."""
+    var client = HttpClient(allow_private_ips=True)
+    for bad in ["a\x00b", "a\x01b", "a\x7fb"]:
+        var hv = HttpHeaders()
+        hv.add("X-Test", bad)
+        var hk = HttpHeaders()
+        hk.add("X-" + bad, "v")
+        var n = 0
+        try:
+            _ = client.get(BASE + "/", hv)
+        except:
+            n += 1
+        try:
+            _ = client.get(BASE + "/", hk)
+        except:
+            n += 1
+        if n != 2:
+            raise Error("control character was accepted in a header")
+    var ok = HttpHeaders()
+    ok.add("X-Test", "a\tb")
+    _ = client.get(BASE + "/", ok)
 
 
 def test_crlf_header_key_rejected() raises:
@@ -1465,17 +1493,144 @@ def test_cookie_psl_github_io_rejected() raises:
         raise Error("PSL suffix .github.io cookie was stored, expected rejection")
 
 
+def _jar_has(client: HttpClient, name: String) -> Bool:
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == name:
+            return True
+    return False
+
+
 def test_cookie_psl_example_co_uk_accepted() raises:
     """Domain=.example.co.uk is a valid registrable domain — cookie must be stored."""
     var client = HttpClient(allow_private_ips=True)
-    _ = client.get(BASE + "/set-cookie-psl-example-co-uk")
-    var found = False
-    for i in range(len(client._jar_names)):
-        if client._jar_names[i] == "psl":
-            found = True
-            break
-    if not found:
+    client._jar_store("www.example.co.uk", "/", True, "psl=1; Domain=.example.co.uk")
+    if not _jar_has(client, "psl"):
         raise Error("Valid domain .example.co.uk cookie was rejected, expected storage")
+
+
+def test_cookie_domain_must_match_request_host() raises:
+    """A host cannot set a cookie for another site (Domain=victim.example from evil.test)."""
+    var client = HttpClient(allow_private_ips=True)
+    client._jar_store("evil.test", "/", True, "sid=attacker; Domain=victim.example")
+    if _jar_has(client, "sid"):
+        raise Error("cookie for a foreign Domain was stored")
+    client._jar_store("evil.test", "/", True, "sid=attacker; Domain=evil.test.victim.example")
+    if _jar_has(client, "sid"):
+        raise Error("cookie for an unrelated Domain was stored")
+    client._jar_store("a.co.uk", "/", True, "sid=attacker; Domain=CO.UK")
+    client._jar_store("a.github.io", "/", True, "sid=attacker; Domain=GITHUB.IO")
+    if _jar_has(client, "sid"):
+        raise Error("an upper-case public suffix Domain was stored")
+    # a parent domain of the request host is fine, so is the host itself
+    client._jar_store("a.b.example.com", "/", True, "p=1; Domain=example.com")
+    client._jar_store("example.com", "/", True, "q=1; Domain=example.com")
+    if not _jar_has(client, "p") or not _jar_has(client, "q"):
+        raise Error("cookie for the host or a parent domain was rejected")
+    # a sibling or child is not
+    client._jar_store("example.com", "/", True, "c=1; Domain=sub.example.com")
+    if _jar_has(client, "c"):
+        raise Error("cookie for a child domain was stored")
+
+
+def test_cookie_rejects_control_chars() raises:
+    """CR/LF/NUL and other control characters in a cookie name or value drop the cookie."""
+    var client = HttpClient(allow_private_ips=True)
+    client._jar_store("example.com", "/", True, "a=x\x01y")
+    client._jar_store("example.com", "/", True, "b=x\x00y")
+    client._jar_store("example.com", "/", True, "c\x7f=1")
+    client._jar_store("example.com", "/", True, "d=ok")
+    if _jar_has(client, "a") or _jar_has(client, "b") or _jar_has(client, "c\x7f"):
+        raise Error("cookie with a control character was stored")
+    if not _jar_has(client, "d"):
+        raise Error("plain cookie was rejected")
+
+
+def test_cookie_jar_is_bounded() raises:
+    """The jar holds at most 3000 cookies and no cookie above 4096 bytes."""
+    var client = HttpClient(allow_private_ips=True)
+    for i in range(3100):
+        client._jar_store("example.com", "/", True, "k" + String(i) + "=v")
+    if len(client._jar_names) > 3000:
+        raise Error("jar grew to " + String(len(client._jar_names)))
+    client._jar_store("example.com", "/", True, "big=" + String("x") * 5000)
+    if _jar_has(client, "big"):
+        raise Error("a 5000-byte cookie was stored")
+
+
+def test_redirect_credentials_dropped_when_origin_changes() raises:
+    """Authorization, Cookie and Proxy-Authorization must not follow a redirect to
+    another scheme, host or port; other headers stay."""
+    var h = HttpHeaders()
+    h.add("Authorization", "Bearer s")
+    h.add("cookie", "sid=1")
+    h.add("Proxy-Authorization", "Basic x")
+    h.add("Accept", "*/*")
+    var base = parse_url("https://a.example/x")
+    for target in ["http://a.example/x", "https://b.example/x", "https://a.example:8443/x"]:
+        var out = _redirect_headers(h, base, parse_url(target))
+        if out.has("Authorization") or out.has("Cookie") or out.has("Proxy-Authorization"):
+            raise Error("credentials followed a redirect to " + target)
+        if not out.has("Accept"):
+            raise Error("non-credential header was dropped for " + target)
+    var same = _redirect_headers(h, base, parse_url("https://a.example/y?z=1"))
+    if not same.has("Authorization") or not same.has("Cookie") or not same.has("Proxy-Authorization"):
+        raise Error("credentials dropped on a same-origin redirect")
+
+
+def _unhex(h: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    var b = h.as_bytes()
+    for i in range(0, len(b), 2):
+        var v = 0
+        for j in range(2):
+            var c = Int(b[i + j])
+            v = v * 16 + (c - 48 if c < 58 else c - 87)
+        out.append(UInt8(v))
+    return out^
+
+
+def test_decompression_is_capped_by_max_response_bytes() raises:
+    """30000 bytes of gzip output (545 bytes in) must stop at a 10000-byte cap."""
+    var gz = _unhex("1f8b08000000000000ffedd05b4b930100806115cfe69639ac0b91498698269acaf2cb4064ded84d5336253c8538f098e724c5daf06223c402f313ca0e6b280aea0621e201d9347476041565b2f04256ba1b150d93d4fe81bfe07d7ec2a394eb334edc7bf6aaa4bf920597f796a139d5240d09f59dab5d97d46f9e3cb2b4d4797a4256534ac43bc3eb0f5ebd3873841db67f5b29989a4dd854e439668ea5bb11fd8e7c4d93bfb6e5bbe5a3c7e8339f55e18cfc33a95d3e1a5fb17a0ded489aef1726ea2fc65c0ffc15d0fdc478abd8d27355add26b9ef5fe369fee0b17de7e1a5b2bed54e8aa5cc18d419f732ee56e39ebdc0dd225b333aa2fb3facaeb98d8377daa555d966ff8434f7eb84d6bbd59e12afb97b6209e050e7c7d1e744f3b983db2516348b65b8e5aa365f14a8dbac638ac9f1e19155eb61e67a799653faed9ef668e0ab6d88638c3a428ec74292e8bfe0189cb82acf4f15aee6db7ba4d95fad3d6ab3b789f52699285fa891fdc8befbec8e5a6edf4a7b5bbe39d4595fde51d1371dd37945c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c5d5b957ff014a8a17e930750000")
+    var lib = open_zlib()
+    if not lib:
+        return  # no zlib on this machine
+    var ok = zlib_inflate(lib.value(), Int(gz.unsafe_ptr()), len(gz), True)
+    if len(ok) != 30000:
+        raise Error("uncapped inflate returned " + String(len(ok)) + " bytes")
+    var raised = False
+    try:
+        _ = zlib_inflate(lib.value(), Int(gz.unsafe_ptr()), len(gz), True, 10000)
+    except:
+        raised = True
+    if not raised:
+        raise Error("max_out=10000 did not stop a 30000-byte output")
+    # a cap that is not a power-of-two multiple of the buffer still lets a fit through
+    var fits = zlib_inflate(lib.value(), Int(gz.unsafe_ptr()), len(gz), True, 40000)
+    if len(fits) != 30000:
+        raise Error("an output under the cap was rejected")
+    _ = gz^  # keep the input alive until here: it is read through its address
+
+
+def test_stream_304_ends_without_body() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var s = client.get_stream(BASE + "/not-modified")
+    if s.status_code != 304 or s.read_all().byte_length() != 0:
+        raise Error("a 304 stream must be empty and end at once")
+
+
+def test_cookie_host_case_and_trailing_dot() raises:
+    """Host case does not matter; a trailing-dot public suffix Domain is still a public suffix."""
+    var client = HttpClient(allow_private_ips=True)
+    client._jar_store("Example.COM", "/", True, "a=1; Domain=EXAMPLE.com")
+    client._jar_store("Www.Example.com", "/", True, "b=2")
+    if client._jar_cookie_for("WWW.example.COM", "/", True).find("a=1") < 0:
+        raise Error("Domain cookie not replayed to a differently cased host")
+    if client._jar_cookie_for("Www.example.com", "/", True).find("b=2") < 0:
+        raise Error("host-only cookie not replayed to a differently cased host")
+    client._jar_store("a.co.uk.", "/", True, "sid=x; Domain=co.uk.")
+    if _jar_has(client, "sid"):
+        raise Error("trailing-dot public suffix Domain was stored")
 
 
 def test_follow_redirects_disabled() raises:
@@ -1665,6 +1820,7 @@ def main() raises:
 
     # Security validation tests
     run_test[test_crlf_header_value_rejected]("CRLF header value rejected", passed, failed)
+    run_test[test_control_chars_in_headers_rejected]("control chars in headers rejected", passed, failed)
     run_test[test_crlf_header_key_rejected]("CRLF header key rejected", passed, failed)
     run_test[test_header_key_with_colon_rejected]("header key with colon rejected", passed, failed)
     run_test[test_ssrf_private_ip_blocked]("SSRF private IP blocked", passed, failed)
@@ -1788,6 +1944,13 @@ def main() raises:
     run_test[test_cookie_psl_co_uk_rejected]("cookie PSL co.uk rejected", passed, failed)
     run_test[test_cookie_psl_github_io_rejected]("cookie PSL github.io rejected", passed, failed)
     run_test[test_cookie_psl_example_co_uk_accepted]("cookie PSL example.co.uk accepted", passed, failed)
+    run_test[test_cookie_domain_must_match_request_host]("cookie Domain must match request host", passed, failed)
+    run_test[test_cookie_rejects_control_chars]("cookie rejects control chars", passed, failed)
+    run_test[test_decompression_is_capped_by_max_response_bytes]("decompression capped by max_response_bytes", passed, failed)
+    run_test[test_stream_304_ends_without_body]("stream 304 ends without body", passed, failed)
+    run_test[test_cookie_host_case_and_trailing_dot]("cookie host case and trailing dot", passed, failed)
+    run_test[test_cookie_jar_is_bounded]("cookie jar is bounded", passed, failed)
+    run_test[test_redirect_credentials_dropped_when_origin_changes]("redirect drops credentials on origin change", passed, failed)
     run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)
     run_test[test_redirect_same_host_only]("redirect same host only", passed, failed)
 

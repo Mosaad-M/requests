@@ -1,3 +1,18 @@
+# requests 1.10.0 — security hardening
+
+Branch `release-1.10.0`; each item a commit with its test (verified failing first).
+- [x] Cookies: `Domain` must cover the request host (IP hosts exact), PSL check after lowercasing, control chars rejected, 4096-byte pair and 3000-cookie caps
+- [x] Redirects: Authorization/Cookie/Proxy-Authorization dropped on scheme, host or port change (`_redirect_headers`)
+- [x] Chunked body cut before the terminal chunk raises `ChunkedBodyError`; `get_stream` short Content-Length body and read timeouts raise; 204/304 streams end at once
+- [x] Decompression capped by `max_response_bytes`; zstd frame-size guard
+- [x] Control characters (incl. NUL) rejected in header names, values and paths
+- [x] HPACK: size update above our advertised limit (65536) is an error. The O(n) table insert stays: the limit bounds n (~2000 entries)
+- [x] Proxy SSRF policy: left unchanged and documented as a known gap (only IP literals could be checked; blocking would break proxies to internal hosts); opt-in setting if wanted
+- Reviewer pass found: uppercase `Domain=CO.UK` bypassing the PSL, HPACK limit below the advertised table size (broke all h2-local tests), 304 streams waiting for a body, zstd frame-size cast: all fixed. Left: jar cap has no eviction, initial decompression buffer can exceed a tiny cap.
+- Perf vs 1.9.0: small 155 ms, medium 356 ms, large 248 ms, chunked 173 ms (unchanged)
+
+---
+
 # requests 1.9.0 — contributor batch (#40, #41, #42, #46, #28 remainder) and trust_env (#36)
 
 Branch `release-1.9.0`. Contributor commits cherry-picked (authorship kept) and ported onto 1.8.1.

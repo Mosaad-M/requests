@@ -1553,6 +1553,26 @@ def test_decode_str_bounds() raises:
         raise Error("valid string must still decode")
 
 
+def test_size_update_above_advertised_limit_raises() raises:
+    # §6.3: a size update may not exceed SETTINGS_HEADER_TABLE_SIZE (4096).
+    var dt = HpackDynTable(4096)
+    var raised = False
+    try:
+        _ = hpack_decode_block(_hex_bytes("3f818d06"), dt)  # 100000
+    except:
+        raised = True
+    if not raised:
+        raise Error("size update to 100000 must raise")
+    var dt2 = HpackDynTable(4096)
+    _ = hpack_decode_block(_hex_bytes("3f45"), dt2)  # 100: fine
+    if dt2.max_size != 100:
+        raise Error("size update within the limit must apply")
+    # the limit survives a shrink: growing back to 4096 is still allowed
+    _ = hpack_decode_block(_hex_bytes("3fe11f"), dt2)  # 4096
+    if dt2.max_size != 4096:
+        raise Error("size update back up to the limit must apply")
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main() raises:
@@ -1709,6 +1729,7 @@ def main() raises:
     run_test[test_encode_rfc_c3_req1]("RFC §C.3.1 first request byte-for-byte", passed, failed)
     run_test[test_encode_rfc_c3_sequential]("RFC §C.3 three requests sequential — byte-for-byte", passed, failed)
 
+    run_test[test_size_update_above_advertised_limit_raises]("size update above the advertised limit raises", passed, failed)
     run_test[test_decode_str_bounds]("decode_str: truncated / oversized length raises", passed, failed)
 
     print()

@@ -202,6 +202,16 @@ def test_chunked_trailers_split_across_reads() raises:
     expect_text("/trailers-split", "hello")
 
 
+def test_chunked_body_cut_before_terminal_chunk_raises() raises:
+    var c = new_client()
+    var msg = String()
+    try:
+        _ = c.get(FR + "/chunked-truncated")
+    except e:
+        msg = String(e)
+    assert_true(msg.startswith("ChunkedBodyError"), "truncated chunked body: got '" + msg + "'")
+
+
 # ── The parser on its own ────────────────────────────────────────────────────
 
 
@@ -377,6 +387,24 @@ def test_get_stream_has_no_body_cap() raises:
     s.close()
 
 
+def test_get_stream_short_body_raises() raises:
+    # A body cut short of its Content-Length must not look like a complete one.
+    var c = new_client()
+    var s = c.get_stream(FR + "/cl-short-close")
+    var msg = String()
+    try:
+        _ = s.read_all()
+    except e:
+        msg = String(e)
+    assert_true(msg.startswith("ConnectionError"), "short stream body: got '" + msg + "'")
+
+
+def test_get_stream_ignores_bytes_past_content_length() raises:
+    var c = new_client()
+    var s = c.get_stream(FR + "/extra-after-body")
+    assert_str_eq(s.read_all(), "hello", "stream body")
+
+
 def test_get_stream_header_block_is_capped() raises:
     var c = new_client()
     var msg = String()
@@ -434,6 +462,7 @@ def main() raises:
     run_test[test_extra_bytes_after_content_length_body]("safe: extra bytes after the body", passed, failed)
     run_test[test_chunked_trailers_are_consumed]("safe: chunked trailers consumed", passed, failed)
     run_test[test_chunked_trailers_split_across_reads]("safe: chunked trailers split across reads", passed, failed)
+    run_test[test_chunked_body_cut_before_terminal_chunk_raises]("rejected: chunked body cut before the terminal chunk", passed, failed)
 
     run_test[test_unit_length_beyond_the_old_100mb_constant]("parser: length above 100 MB", passed, failed)
     run_test[test_unit_absurd_length_is_rejected]("parser: absurd length rejected", passed, failed)
@@ -456,6 +485,8 @@ def main() raises:
     run_test[test_unit_chunk_scan_resumes]("parser: chunk scan resumes across reads", passed, failed)
 
     run_test[test_get_stream_has_no_body_cap]("get_stream: no cap on a huge Content-Length", passed, failed)
+    run_test[test_get_stream_short_body_raises]("rejected: stream body shorter than Content-Length", passed, failed)
+    run_test[test_get_stream_ignores_bytes_past_content_length]("rejected: stream ignores bytes past Content-Length", passed, failed)
     run_test[test_get_stream_header_block_is_capped]("get_stream: header block capped", passed, failed)
 
     print()

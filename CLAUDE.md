@@ -41,9 +41,9 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (38) + test_framing (48) + test_client (126 HTTP + 4 HTTPS) against test_server.py
+pixi run test              # test_resilience (38) + test_framing (51) + test_client (134 HTTP + 4 HTTPS) against test_server.py
 pixi run test-h2-local     # 28 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18445)
-pixi run test-hpack        # 129
+pixi run test-hpack        # 130
 pixi run test-h2           # 70 (framing)
 pixi run test-h2-conn      # 4  (public internet)
 pixi run test-h2-client    # 3  (public internet)
@@ -91,5 +91,5 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 
 - **Input validation**: CRLF injection rejected in header keys/values and paths; method must be A-Z; port 1-65535; hosts reject NUL/CR/LF/space/slash.
 - **Response hardening**: chunk-size caps, truncation detection, status/version validation, header and body caps (above), HPACK decoded-list cap (`max_list`), decompression ratio (256x) and absolute (512 MB) caps, h2 frames above 16384 bytes rejected, PUSH_PROMISE refused (we send ENABLE_PUSH=0).
-- **Network**: SSRF filter on resolved addresses, TLS certificate and hostname verification (tls package), `Authorization` stripped on cross-host redirects, cookie jar checks the public-suffix list.
-- Known gaps: no revocation checking and no session resumption (tls package); decompression caps are constants; `Retry-After` HTTP-date form is not parsed; h2 request header blocks larger than the peer's max frame size are rejected (no CONTINUATION on send); plain-TCP deadline capping uses tcp's private `_set_socket_timeouts` (no public setter yet).
+- **Network**: SSRF filter on resolved addresses, TLS certificate and hostname verification (tls package), `Authorization`, `Cookie` and `Proxy-Authorization` stripped when a redirect changes scheme, host or port, cookie jar checks the public-suffix list and requires `Domain` to cover the request host (jar capped at 3000 cookies of 4096 bytes), control characters rejected in header names/values/paths and cookies, a chunked body or `get_stream` Content-Length body cut short raises, HPACK size updates above our advertised 65536 are errors.
+- Known gaps: `allow_private_ips` is not applied to the target of a proxied request (the proxy resolves it; the proxy itself is trusted); no revocation checking and no session resumption (tls package); decompressed output is capped by `max_response_bytes` and the 256x ratio; new cookies are dropped once the jar is full (no eviction); a chunked `get_stream` returns raw chunk framing and does not detect truncation; `Retry-After` HTTP-date form is not parsed; h2 request header blocks larger than the peer's max frame size are rejected (no CONTINUATION on send); plain-TCP deadline capping uses tcp's private `_set_socket_timeouts` (no public setter yet).
