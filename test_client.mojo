@@ -310,6 +310,31 @@ def test_crlf_header_value_rejected() raises:
         raise Error("expected error for CRLF in header value")
 
 
+def test_control_chars_in_headers_rejected() raises:
+    """NUL and other control characters are rejected in header names and values
+    (a tab in a value is fine)."""
+    var client = HttpClient(allow_private_ips=True)
+    for bad in ["a\x00b", "a\x01b", "a\x7fb"]:
+        var hv = HttpHeaders()
+        hv.add("X-Test", bad)
+        var hk = HttpHeaders()
+        hk.add("X-" + bad, "v")
+        var n = 0
+        try:
+            _ = client.get(BASE + "/", hv)
+        except:
+            n += 1
+        try:
+            _ = client.get(BASE + "/", hk)
+        except:
+            n += 1
+        if n != 2:
+            raise Error("control character was accepted in a header")
+    var ok = HttpHeaders()
+    ok.add("X-Test", "a\tb")
+    _ = client.get(BASE + "/", ok)
+
+
 def test_crlf_header_key_rejected() raises:
     """Header keys containing CRLF should be rejected."""
     var client = HttpClient(allow_private_ips=True)
@@ -1770,6 +1795,7 @@ def main() raises:
 
     # Security validation tests
     run_test[test_crlf_header_value_rejected]("CRLF header value rejected", passed, failed)
+    run_test[test_control_chars_in_headers_rejected]("control chars in headers rejected", passed, failed)
     run_test[test_crlf_header_key_rejected]("CRLF header key rejected", passed, failed)
     run_test[test_header_key_with_colon_rejected]("header key with colon rejected", passed, failed)
     run_test[test_ssrf_private_ip_blocked]("SSRF private IP blocked", passed, failed)

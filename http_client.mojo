@@ -3268,21 +3268,21 @@ def _validate_method(method: String) raises:
 
 
 def _validate_header_key(key: String) raises:
-    """Validate header key contains no CR, LF, or colon characters."""
+    """Validate header key contains no control characters or colon."""
     var bytes = key.as_bytes()
     for i in range(key.byte_length()):
         var b = bytes[i]
-        if b == 13 or b == 10 or b == 58:  # \r, \n, :
-            raise _err_validation("invalid header key: contains CR, LF, or colon")
+        if b < 32 or b == 127 or b == 58:  # control chars (incl. CR, LF, NUL), :
+            raise _err_validation("invalid header key: contains a control character or colon")
 
 
 def _validate_header_value(value: String) raises:
-    """Validate header value contains no CR or LF characters."""
+    """Validate header value contains no control characters (tab is allowed)."""
     var bytes = value.as_bytes()
     for i in range(value.byte_length()):
         var b = bytes[i]
-        if b == 13 or b == 10:  # \r, \n
-            raise _err_validation("invalid header value: contains CR or LF")
+        if (b < 32 and b != 9) or b == 127:  # incl. CR, LF, NUL
+            raise _err_validation("invalid header value: contains a control character")
 
 
 def _validate_path(path: String) raises:
@@ -3290,8 +3290,8 @@ def _validate_path(path: String) raises:
     var bytes = path.as_bytes()
     for i in range(path.byte_length()):
         var b = bytes[i]
-        if b == 13 or b == 10:  # \r, \n
-            raise _err_validation("invalid request path: contains CR or LF")
+        if b < 32 or b == 127:  # control chars, incl. CR, LF, NUL
+            raise _err_validation("invalid request path: contains a control character")
 
 
 # ============================================================================
