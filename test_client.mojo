@@ -9,6 +9,7 @@
 
 from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
+from std.os import setenv
 from codecs import Codecs, accept_encoding
 from http_client import _unix_time_secs
 
@@ -1319,6 +1320,98 @@ def test_brotli_corrupt_body_fails_fast() raises:
     assert_true(msg.startswith("BrotliDecodeError"), "expected BrotliDecodeError, got '" + msg + "'")
     assert_true(_unix_time_secs() - t0 < 3, "failed promptly")
 
+def test_no_content_does_not_wait_for_a_body() raises:
+    """204 and 304 have no body even without Content-Length (RFC 9112 6.3)."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=5)
+    var t0 = _unix_time_secs()
+    var r204 = client.get(BASE + "/no-content")
+    assert_eq(r204.status_code, 204, "204 status")
+    assert_eq(r204.body.byte_length(), 0, "204 body")
+    assert_true(_unix_time_secs() - t0 < 3, "answered without waiting for the timeout")
+    # (test_server.py is single-threaded: this one waits for it to finish
+    # holding the first connection, so it is not timed.)
+    var r304 = client.get(BASE + "/not-modified")
+    assert_eq(r304.status_code, 304, "304 status")
+
+
+def test_interim_100_continue_skipped() raises:
+    """A 100 Continue before the final response is not the response."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=5)
+    var resp = client.get(BASE + "/continue-then-ok")
+    assert_eq(resp.status_code, 200, "final status")
+    assert_str_eq(resp.body, "ok", "final body")
+
+def test_connections_opened_counts_connects() raises:
+    """test_server.py closes every connection, so each request opens one."""
+    var client = HttpClient(allow_private_ips=True)
+    assert_eq(client.connections_opened, 0, "fresh client")
+    for _ in range(3):
+        _ = client.get(BASE + "/status/200")
+    assert_eq(client.connections_opened, 3, "one per closed connection")
+
+def test_default_content_type_can_be_turned_off() raises:
+    """With default_content_type = "", a body goes out with no Content-Type
+    (an object store would otherwise store "application/json" for it)."""
+    var client = HttpClient(allow_private_ips=True)
+    client.default_content_type = ""
+    var data = client.put(BASE + "/echo", "raw bytes").json()
+    assert_str_eq(data["content_type"].as_string(), "", "no content-type sent")
+    var headers = HttpHeaders()
+    headers.add("Content-Type", "text/plain")
+    var data2 = client.put(BASE + "/echo", "raw bytes", headers).json()
+    assert_str_eq(data2["content_type"].as_string(), "text/plain", "caller's content-type")
+
+
+def test_empty_put_sends_content_length_zero() raises:
+    """An empty PUT/POST still says Content-Length: 0 (RFC 9110 8.6)."""
+    var client = HttpClient(allow_private_ips=True)
+    var put = client.put(BASE + "/echo", "").json()
+    assert_str_eq(put["content_length"].as_string(), "0", "PUT content-length")
+    var post = client.post(BASE + "/echo", "").json()
+    assert_str_eq(post["content_length"].as_string(), "0", "POST content-length")
+    var dele = client.delete(BASE + "/echo").json()
+    assert_str_eq(dele["content_length"].as_string(), "", "DELETE sends none")
+
+def _count_header(lines: JsonValue, name: String) raises -> Int:
+    var n = 0
+    for i in range(len(lines)):
+        var line = lines[i].as_string()
+        if line.lower().startswith(name.lower() + ":"):
+            n += 1
+    return n
+
+
+def test_caller_headers_replace_defaults() raises:
+    """A caller's Host or User-Agent replaces the client's, not doubles it."""
+    var client = HttpClient(allow_private_ips=True)
+    var headers = HttpHeaders()
+    headers.add("Host", "127.0.0.1:18080")
+    headers.add("User-Agent", "custom-agent/1.0")
+    headers.add("Connection", "keep-alive")
+    var data = client.get(BASE + "/headers-raw", headers).json()
+    var lines = data["lines"].copy()
+    assert_eq(_count_header(lines, "Host"), 1, "one Host")
+    assert_eq(_count_header(lines, "User-Agent"), 1, "one User-Agent")
+    assert_eq(_count_header(lines, "Connection"), 1, "one Connection")
+    var found = False
+    for i in range(len(lines)):
+        if lines[i].as_string() == "User-Agent: custom-agent/1.0":
+            found = True
+    assert_true(found, "the caller's User-Agent was sent")
+
+
+def test_decompress_off() raises:
+    """decompress=False: no Accept-Encoding, and an encoded body is left as
+    sent (byte ranges and Content-Length then describe the same bytes)."""
+    var client = HttpClient(allow_private_ips=True)
+    client.decompress = False
+    var lines = client.get(BASE + "/headers-raw").json()["lines"].copy()
+    assert_eq(_count_header(lines, "Accept-Encoding"), 0, "no Accept-Encoding")
+    var resp = client.get(BASE + "/gzip")
+    assert_str_eq(resp.headers.get("Content-Encoding"), "gzip", "still encoded")
+    var raw = resp.body.as_bytes()
+    assert_true(len(raw) > 2 and raw[0] == 0x1F and raw[1] == 0x8B, "gzip magic kept")
+
 
 def test_content_length_over_limit() raises:
     """Content-Length exceeding the 100 MB limit should raise before reading body.
@@ -1450,6 +1543,28 @@ def test_proxy_env_var() raises:
     assert_eq(resp.status_code, 200, "env proxy detection: direct fallback works")
 
 
+def test_trust_env_false_ignores_proxy_env() raises:
+    """trust_env = False never reads HTTP_PROXY, so a dead proxy in the
+    environment does not matter (e.g. for the cloud metadata service)."""
+    _ = setenv("HTTP_PROXY", "http://127.0.0.1:1", True)
+    var trusting = HttpClient(allow_private_ips=True, timeout_secs=2)
+    var failed_via_proxy = False
+    try:
+        _ = trusting.get(BASE + "/")
+    except:
+        failed_via_proxy = True
+    var direct = HttpClient(allow_private_ips=True, timeout_secs=2)
+    direct.trust_env = False
+    var status = 0
+    try:
+        status = direct.get(BASE + "/").status_code
+    except:
+        pass
+    _ = setenv("HTTP_PROXY", "", True)
+    assert_true(failed_via_proxy, "default client uses the env proxy")
+    assert_eq(status, 200, "trust_env=False goes direct")
+
+
 # ============================================================================
 # Phase 14 Tests — Streaming Decompression
 # ============================================================================
@@ -1518,6 +1633,14 @@ def main() raises:
     run_test[test_content_length_header_name_must_match_exactly]("Content-Length matched as a header name only", passed, failed)
 
     run_test[test_chunked_when_transfer_encoding_is_the_last_header]("chunked with Transfer-Encoding last", passed, failed)
+
+    run_test[test_no_content_does_not_wait_for_a_body]("204/304 without Content-Length", passed, failed)
+    run_test[test_interim_100_continue_skipped]("100 Continue skipped", passed, failed)
+    run_test[test_connections_opened_counts_connects]("connections_opened counter", passed, failed)
+    run_test[test_default_content_type_can_be_turned_off]("default Content-Type can be turned off", passed, failed)
+    run_test[test_empty_put_sends_content_length_zero]("empty PUT/POST sends Content-Length: 0", passed, failed)
+    run_test[test_caller_headers_replace_defaults]("caller headers replace defaults", passed, failed)
+    run_test[test_decompress_off]("decompress off", passed, failed)
     run_test[test_status_200]("status 200", passed, failed)
     run_test[test_status_404]("status 404", passed, failed)
     run_test[test_status_500]("status 500", passed, failed)
@@ -1673,6 +1796,7 @@ def main() raises:
     run_test[test_proxy_http_post]("proxy HTTP POST", passed, failed)
     run_test[test_no_proxy_when_unset]("no proxy when unset", passed, failed)
     run_test[test_proxy_env_var]("proxy env var auto-detect", passed, failed)
+    run_test[test_trust_env_false_ignores_proxy_env]("trust_env=False ignores the proxy env", passed, failed)
 
     # Phase 14 tests
     run_test[test_streaming_gzip_large]("streaming gzip large", passed, failed)

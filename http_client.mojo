@@ -488,6 +488,7 @@ struct HttpClient(Movable):
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
+    var trust_env: Bool                 # read HTTP(S)_PROXY / NO_PROXY from the environment (default True)
     var total_timeout_secs: Int         # deadline for a whole request incl. redirects and retries (0 = none)
     var max_retries: Int                # extra attempts after a retryable failure (0 = never retry)
     var retry_backoff_ms: Int           # base delay; doubles per attempt, jittered, capped at 30 s
@@ -495,6 +496,9 @@ struct HttpClient(Movable):
     var max_response_bytes: Int         # largest response body accepted (HTTP/1.1 and HTTP/2)
     var max_header_bytes: Int           # largest response header block accepted
     var max_batch_bytes: Int            # most body bytes held at once by one get_many batch
+    var connections_opened: Int         # TCP connections this client has opened (pool reuse = fewer)
+    var default_content_type: String    # Content-Type for a body sent without one ("" = send none)
+    var decompress: Bool                # send Accept-Encoding and decode bodies (default True)
     var _timeout_secs: Int              # socket send/recv timeout (seconds)
     var _deadline_ns: Int               # active deadline (perf_counter_ns instant; 0 = none)
     var _deadline_depth: Int            # nesting of calls sharing the active deadline
@@ -561,6 +565,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
         self.proxy_url = String("")
+        self.trust_env = True
         self.total_timeout_secs = 0
         self.max_retries = 0
         self.retry_backoff_ms = 200
@@ -568,6 +573,9 @@ struct HttpClient(Movable):
         self.max_response_bytes = MAX_RESPONSE_BYTES
         self.max_header_bytes = MAX_HEADER_BYTES
         self.max_batch_bytes = MAX_BATCH_BYTES
+        self.connections_opened = 0
+        self.default_content_type = String("application/json")
+        self.decompress = True
         self._timeout_secs = timeout_secs
         self._deadline_ns = 0
         self._deadline_depth = 0
@@ -623,6 +631,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = move.redirect_same_host_only
         self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
         self.proxy_url = move.proxy_url^
+        self.trust_env = move.trust_env
         self.total_timeout_secs = move.total_timeout_secs
         self.max_retries = move.max_retries
         self.retry_backoff_ms = move.retry_backoff_ms
@@ -630,6 +639,9 @@ struct HttpClient(Movable):
         self.max_response_bytes = move.max_response_bytes
         self.max_header_bytes = move.max_header_bytes
         self.max_batch_bytes = move.max_batch_bytes
+        self.connections_opened = move.connections_opened
+        self.default_content_type = move.default_content_type^
+        self.decompress = move.decompress
         self._timeout_secs = move._timeout_secs
         self._deadline_ns = move._deadline_ns
         self._deadline_depth = move._deadline_depth
@@ -892,6 +904,7 @@ struct HttpClient(Movable):
 
         var header_end = -1
 
+        self.connections_opened += 1
         if is_tls:
             if not self._ca_loaded:
                 self._ca_bundle = load_system_ca_bundle()
@@ -910,6 +923,8 @@ struct HttpClient(Movable):
                     raise _err_connection("stream: connection closed before headers")
                 _list_append(raw_buf, chunk)
                 header_end = _buf_find_crlf_crlf(raw_buf)
+                if (header_end < 0 and len(raw_buf) > self.max_header_bytes) or header_end + 4 > self.max_header_bytes:
+                    raise _err_connection("stream: response headers exceed size limit")
         else:
             http_sock.connect(
                 url.host, url.port,
@@ -924,6 +939,8 @@ struct HttpClient(Movable):
                     raise _err_connection("stream: connection closed before headers")
                 _list_append(raw_buf, chunk)
                 header_end = _buf_find_crlf_crlf(raw_buf)
+                if (header_end < 0 and len(raw_buf) > self.max_header_bytes) or header_end + 4 > self.max_header_bytes:
+                    raise _err_connection("stream: response headers exceed size limit")
 
         var hdr_str = _buf_to_string(raw_buf, header_end + 4)
         var parsed = _parse_response(hdr_str, url_str)
@@ -1321,25 +1338,39 @@ struct HttpClient(Movable):
         _append_str(req_buf, " ")
         _append_str(req_buf, url.request_path())
         _append_str(req_buf, " HTTP/1.1\r\n")
-        _append_str(req_buf, "Host: ")
-        _append_str(req_buf, url.host_header())
-        _append_str(req_buf, "\r\n")
-        _append_str(req_buf, "User-Agent: ")
-        _append_str(req_buf, self.user_agent)
-        _append_str(req_buf, "\r\n")
+        # A header the caller gives replaces the client's default rather than
+        # adding a second one: two Host headers are a 400 (RFC 9112 3.2), and
+        # a signed request (AWS SigV4) signs the Host it sends itself.
+        if not extra_headers.has("Host"):
+            _append_str(req_buf, "Host: ")
+            _append_str(req_buf, url.host_header())
+            _append_str(req_buf, "\r\n")
+        if not extra_headers.has("User-Agent"):
+            _append_str(req_buf, "User-Agent: ")
+            _append_str(req_buf, self.user_agent)
+            _append_str(req_buf, "\r\n")
         if not extra_headers.has("Accept"):
             _append_str(req_buf, "Accept: */*\r\n")
-        if not extra_headers.has("Accept-Encoding"):
+        if self.decompress and not extra_headers.has("Accept-Encoding"):
             _append_str(req_buf, "Accept-Encoding: " + self._accept_encoding() + "\r\n")
-        _append_str(req_buf, "Connection: keep-alive\r\n")
+        if not extra_headers.has("Connection"):
+            _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
         if body.byte_length() > 0:
             _append_str(req_buf, "Content-Length: ")
             _append_str(req_buf, String(body.byte_length()))
             _append_str(req_buf, "\r\n")
-            if not extra_headers.has("Content-Type"):
-                _append_str(req_buf, "Content-Type: application/json\r\n")
+            if (
+                not extra_headers.has("Content-Type")
+                and self.default_content_type.byte_length() > 0
+            ):
+                _append_str(req_buf, "Content-Type: " + self.default_content_type + "\r\n")
+        elif method == "POST" or method == "PUT" or method == "PATCH":
+            # These methods define a meaning for a body, so an empty one is
+            # still announced (RFC 9110 8.6); S3 and others answer a PUT
+            # without Content-Length with 411 Length Required.
+            _append_str(req_buf, "Content-Length: 0\r\n")
 
         # Auto-send cookies from jar for this host
         var jar_cookie = self._jar_cookie_for(url.host, url.request_path(), url.scheme == "https")
@@ -1581,7 +1612,7 @@ struct HttpClient(Movable):
         # Phase 14: use _ptr variants — decompress directly from the body's
         # internal byte buffer without an intermediate List[UInt8] copy.
         var ce = parsed.headers.get("Content-Encoding")
-        if ce.byte_length() > 0:
+        if self.decompress and ce.byte_length() > 0:
             var body_bytes = parsed.body.as_bytes()
             var decoded = self._decode_body(ce, Int(body_bytes.unsafe_ptr()), len(body_bytes))
             if decoded:
@@ -1860,22 +1891,26 @@ struct HttpClient(Movable):
         # :authority — host:port equivalent in HTTP/2
         h2_hdrs.append(HpackHeader(":authority", url.host_header()))
 
-        # user-agent
-        h2_hdrs.append(HpackHeader("user-agent", self.user_agent))
+        # user-agent (unless caller overrides)
+        if not extra_headers.has("User-Agent"):
+            h2_hdrs.append(HpackHeader("user-agent", self.user_agent))
 
         # accept (unless caller overrides)
         if not extra_headers.has("Accept"):
             h2_hdrs.append(HpackHeader("accept", "*/*"))
 
         # accept-encoding (unless caller overrides)
-        if not extra_headers.has("Accept-Encoding"):
+        if self.decompress and not extra_headers.has("Accept-Encoding"):
             h2_hdrs.append(HpackHeader("accept-encoding", self._accept_encoding()))
 
         # content-length and content-type for non-empty bodies
         if body.byte_length() > 0:
             h2_hdrs.append(HpackHeader("content-length", String(body.byte_length())))
-            if not extra_headers.has("Content-Type"):
-                h2_hdrs.append(HpackHeader("content-type", "application/json"))
+            if (
+                not extra_headers.has("Content-Type")
+                and self.default_content_type.byte_length() > 0
+            ):
+                h2_hdrs.append(HpackHeader("content-type", self.default_content_type))
 
         # cookies from jar
         var jar_cookie = self._jar_cookie_for(
@@ -1895,7 +1930,17 @@ struct HttpClient(Movable):
                     low.append(b + 32)
                 else:
                     low.append(b)
-            h2_hdrs.append(HpackHeader(String(unsafe_from_utf8=low), extra_headers._values[i]))
+            var name = String(unsafe_from_utf8=low)
+            # :authority already says what Host would, and HTTP/2 forbids
+            # connection-specific fields (RFC 9113 8.2.2): a caller's
+            # HTTP/1.1-style headers must not reset the stream.
+            if (
+                name == "host" or name == "connection" or name == "keep-alive"
+                or name == "proxy-connection" or name == "transfer-encoding"
+                or name == "upgrade"
+            ):
+                continue
+            h2_hdrs.append(HpackHeader(name, extra_headers._values[i]))
 
         return h2_hdrs^
 
@@ -1921,7 +1966,7 @@ struct HttpClient(Movable):
         # HTTP/2 headers are lowercase; use case-insensitive compare.
         # Convert resp_body → String first so as_bytes().unsafe_ptr() matches
         # the proven H1 decompression path exactly.
-        var ce = resp.headers.get("content-encoding")
+        var ce = resp.headers.get("content-encoding") if self.decompress else String("")
         if ce.byte_length() > 0:
             var body_str   = String(unsafe_from_utf8=resp_body)
             var body_bytes = body_str.as_bytes()
@@ -1946,19 +1991,21 @@ struct HttpClient(Movable):
     # -------------------------------------------------------------------------
 
     def _tcp_connect(
-        self, target_host: String, target_port: Int, scheme: String = "http"
+        mut self, target_host: String, target_port: Int, scheme: String = "http"
     ) raises -> TcpSocket:
         """Return a TcpSocket connected to target_host:target_port.
 
         If self.proxy_url is set, or if HTTP_PROXY / HTTPS_PROXY env vars are
         set (Phase 13B), connects through an HTTP CONNECT proxy tunnel.
         NO_PROXY env var is respected (comma-separated hostnames / .suffixes).
+        trust_env = False ignores all three variables (proxy_url still applies).
 
         If no proxy is configured, connects directly (normal behaviour).
         """
+        self.connections_opened += 1
         # Determine effective proxy URL: field takes priority over env vars
         var effective_proxy = self.proxy_url
-        if effective_proxy.byte_length() == 0:
+        if effective_proxy.byte_length() == 0 and self.trust_env:
             # Phase 13B: auto-detect from environment
             if scheme == "https":
                 effective_proxy = _getenv("HTTPS_PROXY")
@@ -1970,7 +2017,7 @@ struct HttpClient(Movable):
                     effective_proxy = _getenv("http_proxy")
 
         # Check NO_PROXY — bypass proxy for matching hosts
-        if effective_proxy.byte_length() > 0:
+        if effective_proxy.byte_length() > 0 and self.trust_env:
             var no_proxy = _getenv("NO_PROXY")
             if no_proxy.byte_length() == 0:
                 no_proxy = _getenv("no_proxy")
@@ -2666,6 +2713,20 @@ def _buf_chunked_complete(buf: List[UInt8], mut pos: Int) raises -> Bool:
         pos = p + chunk_size + 2  # skip data + \r\n
 
 
+def _buf_status_code(buf: List[UInt8]) -> Int:
+    """The status code of the response at the start of buf ("HTTP/1.1 204 ..."),
+    or 0 if the status line is malformed (the parser reports that later)."""
+    if len(buf) < 12 or buf[8] != 32:
+        return 0
+    var code = 0
+    for i in range(9, 12):
+        var c = buf[i]
+        if c < 48 or c > 57:
+            return 0
+        code = code * 10 + Int(c - 48)
+    return code
+
+
 def _lc(b: UInt8) -> UInt8:
     """Convert a byte to lowercase (ASCII A-Z only)."""
     if b >= 65 and b <= 90:
@@ -2880,20 +2941,31 @@ def _recv_tls_response(
 ) raises -> List[UInt8]:
     var buf = List[UInt8]()
 
-    # Phase 1: read until headers complete
+    # Phase 1: read until headers complete. An interim 1xx response (100
+    # Continue, 103 Early Hints) has no body and precedes the real one: drop
+    # it and read on.
     var header_end = -1
-    while header_end < 0:
-        _arm_tls(sock, lim)
-        var chunk = sock.recv(4096)
-        if len(chunk) == 0:
-            raise _err_connection("connection closed before response headers")
-        _list_append(buf, chunk)
+    var status = 0
+    while True:
+        while header_end < 0:
+            _arm_tls(sock, lim)
+            var chunk = sock.recv(4096)
+            if len(chunk) == 0:
+                raise _err_connection("connection closed before response headers")
+            _list_append(buf, chunk)
+            header_end = _buf_find_crlf_crlf(buf)
+            if (header_end < 0 and len(buf) > lim.max_header) or header_end + 4 > lim.max_header:
+                raise _err_connection("response headers exceed size limit")
+        status = _buf_status_code(buf)
+        if status < 100 or status >= 200 or status == 101:
+            break
+        buf = _buf_leftover(buf, header_end + 4)
         header_end = _buf_find_crlf_crlf(buf)
-        if (header_end < 0 and len(buf) > lim.max_header) or header_end + 4 > lim.max_header:
-            raise _err_connection("response headers exceed size limit")
 
-    # HEAD response: no body — return headers only
-    if skip_body:
+    # HEAD, 204 and 304 responses never have a body (RFC 9112 §6.3): return
+    # the headers only. Reading on would wait for a body that never comes
+    # and, on a keep-alive connection, hang until the read timeout.
+    if skip_body or status == 204 or status == 304:
         var headers_only = List[UInt8](capacity=header_end + 4)
         headers_only.extend(Span(buf)[0 : header_end + 4])
         return headers_only^
@@ -2990,20 +3062,31 @@ def _recv_http_response(
     """
     var buf = List[UInt8]()
 
-    # Phase 1: read until headers complete
+    # Phase 1: read until headers complete. An interim 1xx response (100
+    # Continue, 103 Early Hints) has no body and precedes the real one: drop
+    # it and read on.
     var header_end = -1
-    while header_end < 0:
-        _arm_tcp(sock, lim)
-        var chunk = sock.recv_bytes(4096)
-        if len(chunk) == 0:
-            raise _err_connection("connection closed before response headers")
-        _list_append(buf, chunk)
+    var status = 0
+    while True:
+        while header_end < 0:
+            _arm_tcp(sock, lim)
+            var chunk = sock.recv_bytes(4096)
+            if len(chunk) == 0:
+                raise _err_connection("connection closed before response headers")
+            _list_append(buf, chunk)
+            header_end = _buf_find_crlf_crlf(buf)
+            if (header_end < 0 and len(buf) > lim.max_header) or header_end + 4 > lim.max_header:
+                raise _err_connection("response headers exceed size limit")
+        status = _buf_status_code(buf)
+        if status < 100 or status >= 200 or status == 101:
+            break
+        buf = _buf_leftover(buf, header_end + 4)
         header_end = _buf_find_crlf_crlf(buf)
-        if (header_end < 0 and len(buf) > lim.max_header) or header_end + 4 > lim.max_header:
-            raise _err_connection("response headers exceed size limit")
 
-    # HEAD response: no body — return headers only
-    if skip_body:
+    # HEAD, 204 and 304 responses never have a body (RFC 9112 §6.3): return
+    # the headers only. Reading on would wait for a body that never comes
+    # and, on a keep-alive connection, hang until the read timeout.
+    if skip_body or status == 204 or status == 304:
         var headers_only = List[UInt8](capacity=header_end + 4)
         headers_only.extend(Span(buf)[0 : header_end + 4])
         return headers_only^

@@ -112,6 +112,8 @@ def _framing_server(port=18083):
         "/cl-and-te-stray": [H + b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n", 0.2, CH, 0.2, b"zz"],
         # announces 200 MB, sends 10 bytes: shows which limit stops the client
         "/cl-huge": [H + b"Content-Length: 200000000\r\n\r\n", 0.2, b"x" * 10],
+        # a header block that never ends: 4 MB of header lines
+        "/huge-headers": [H + b"".join(b"X-Pad-%d: %s\r\n" % (i, b"a" * 1000) for i in range(4000)) + b"Content-Length: 0\r\n\r\n"],
         "/extra-after-body": [H + b"Content-Length: 5\r\n\r\nhello\r\n"],
         # a second response starts inside the first one and ends later
         "/smuggled": [H + b"Content-Length: 5\r\n\r\nhello" + b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", 0.2, b"ok"],
@@ -273,6 +275,9 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._respond(404, "Not Found", {"error": "not found"})
         elif self.path == "/status/500":
             self._respond(500, "Internal Server Error", {"error": "server error"})
+        elif self.path == "/headers-raw":
+            # Every request header line as received, duplicates included.
+            self._respond(200, "OK", {"lines": ["%s: %s" % kv for kv in self.headers.items()]})
         elif self.path == "/headers":
             # Echo back all request headers
             headers = {}
@@ -334,6 +339,25 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(4)
             self.close_connection = True
+        elif self.path in ("/no-content", "/not-modified"):
+            # HTTP/1.1 keep-alive and no Content-Length, as S3 answers a
+            # DELETE: the client must not wait for a body.
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(204 if self.path == "/no-content" else 304)
+            self.send_header("ETag", '"abc"')
+            self.end_headers()
+            self.wfile.flush()
+            # Hold the connection open like a keep-alive server would; a
+            # client waiting for a body sees nothing until this returns.
+            time.sleep(4)
+        elif self.path == "/continue-then-ok":
+            self.protocol_version = "HTTP/1.1"
+            self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"ok")
         elif self.path == "/redirect/301":
             self.send_response(301, "Moved Permanently")
             self.send_header("Location", "/redirect/target")
@@ -666,6 +690,7 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             "method": self.command,
             "body": body,
             "content_type": content_type,
+            "content_length": self.headers.get("Content-Length", ""),
         })
 
     def _handle_method(self):

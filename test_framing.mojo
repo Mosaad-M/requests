@@ -368,6 +368,25 @@ def test_unit_chunk_scan_resumes() raises:
     assert_true(_buf_chunked_complete(_bytes(full), whole), "single scan")
 
 
+def test_get_stream_has_no_body_cap() raises:
+    # A 200 MB Content-Length is the caller's to read in pieces: opening the
+    # stream must not raise (#28).
+    var c = new_client()
+    var s = c.get_stream(FR + "/cl-huge")
+    assert_eq(s.status_code, 200, "status")
+    s.close()
+
+
+def test_get_stream_header_block_is_capped() raises:
+    var c = new_client()
+    var msg = String()
+    try:
+        _ = c.get_stream(FR + "/huge-headers")
+    except e:
+        msg = String(e)
+    assert_true(msg.find("exceed size limit") >= 0, "expected a header size error, got '" + msg + "'")
+
+
 def main() raises:
     var passed = 0
     var failed = 0
@@ -435,6 +454,9 @@ def main() raises:
 
     run_test[test_unit_chunk_size_overflow_raises]("parser: hostile chunk sizes raise", passed, failed)
     run_test[test_unit_chunk_scan_resumes]("parser: chunk scan resumes across reads", passed, failed)
+
+    run_test[test_get_stream_has_no_body_cap]("get_stream: no cap on a huge Content-Length", passed, failed)
+    run_test[test_get_stream_header_block_is_capped]("get_stream: header block capped", passed, failed)
 
     print()
     print("Results:", passed, "passed,", failed, "failed")
