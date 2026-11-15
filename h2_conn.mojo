@@ -65,6 +65,7 @@ struct Http2Conn(Movable):
         self._next_stream         = 1
         self._hpack_enc           = HpackDynTable(4096)
         self._hpack_dec           = HpackDynTable(4096)
+        self._hpack_dec.limit     = 65536  # what h2_make_initial_settings advertises
         self._peer_max_frame_size = 16384
         self._peer_initial_window = 65535
         self._conn_window         = 65535

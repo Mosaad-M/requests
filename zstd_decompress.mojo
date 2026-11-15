@@ -51,6 +51,8 @@ def zstd_decode(
         var cap_limit = data_len * _MAX_DECOMP_RATIO
         if cap_limit > max_out:
             cap_limit = max_out
+        if frame_size > UInt64(cap_limit):
+            raise Error("zstd decompression ratio limit exceeded")
         var wanted = Int(frame_size)
         if wanted > cap_limit:
             raise Error("zstd decompression ratio limit exceeded")

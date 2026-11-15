@@ -1517,6 +1517,10 @@ def test_cookie_domain_must_match_request_host() raises:
     client._jar_store("evil.test", "/", True, "sid=attacker; Domain=evil.test.victim.example")
     if _jar_has(client, "sid"):
         raise Error("cookie for an unrelated Domain was stored")
+    client._jar_store("a.co.uk", "/", True, "sid=attacker; Domain=CO.UK")
+    client._jar_store("a.github.io", "/", True, "sid=attacker; Domain=GITHUB.IO")
+    if _jar_has(client, "sid"):
+        raise Error("an upper-case public suffix Domain was stored")
     # a parent domain of the request host is fine, so is the host itself
     client._jar_store("a.b.example.com", "/", True, "p=1; Domain=example.com")
     client._jar_store("example.com", "/", True, "q=1; Domain=example.com")
@@ -1606,6 +1610,13 @@ def test_decompression_is_capped_by_max_response_bytes() raises:
     if len(fits) != 30000:
         raise Error("an output under the cap was rejected")
     _ = gz^  # keep the input alive until here: it is read through its address
+
+
+def test_stream_304_ends_without_body() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var s = client.get_stream(BASE + "/not-modified")
+    if s.status_code != 304 or s.read_all().byte_length() != 0:
+        raise Error("a 304 stream must be empty and end at once")
 
 
 def test_follow_redirects_disabled() raises:
@@ -1922,6 +1933,7 @@ def main() raises:
     run_test[test_cookie_domain_must_match_request_host]("cookie Domain must match request host", passed, failed)
     run_test[test_cookie_rejects_control_chars]("cookie rejects control chars", passed, failed)
     run_test[test_decompression_is_capped_by_max_response_bytes]("decompression capped by max_response_bytes", passed, failed)
+    run_test[test_stream_304_ends_without_body]("stream 304 ends without body", passed, failed)
     run_test[test_cookie_jar_is_bounded]("cookie jar is bounded", passed, failed)
     run_test[test_redirect_credentials_dropped_when_origin_changes]("redirect drops credentials on origin change", passed, failed)
     run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)

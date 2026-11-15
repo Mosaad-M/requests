@@ -946,6 +946,8 @@ struct HttpClient(Movable):
         var parsed = _parse_response(hdr_str, url_str)
         var fr = _frame_from_headers(raw_buf, header_end)
         var cl = fr.length if fr.kind == FRAME_LENGTH else -1
+        if parsed.status_code == 204 or parsed.status_code == 304:
+            cl = 0  # no body follows, whatever Content-Length says
         var leftover = _buf_leftover(raw_buf, header_end + 4)
 
         var stream = StreamResponse()
@@ -2262,6 +2264,7 @@ struct HttpClient(Movable):
                                 break
                         if not has_inner_dot:
                             return  # reject entire cookie — invalid Domain attr
+                        d = _to_lower(d)  # the PSL and the host check are case-sensitive
                         # Reject public suffixes (e.g. .co.uk, .github.io)
                         # to prevent supercookies that match any registrant
                         # under the suffix (Phase 11A — PSL validation).
@@ -2269,7 +2272,6 @@ struct HttpClient(Movable):
                             return  # reject entire cookie — public suffix Domain
                         # RFC 6265 §5.3 step 6: the request host must be the
                         # Domain or a subdomain of it (IP hosts: exact only).
-                        d = _to_lower(d)
                         var h = _to_lower(host)
                         var h_is_ip = True
                         for hb in h.as_bytes():
