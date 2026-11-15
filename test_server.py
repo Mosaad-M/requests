@@ -112,6 +112,8 @@ def _framing_server(port=18083):
         "/cl-and-te-stray": [H + b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n", 0.2, CH, 0.2, b"zz"],
         # announces 200 MB, sends 10 bytes: shows which limit stops the client
         "/cl-huge": [H + b"Content-Length: 200000000\r\n\r\n", 0.2, b"x" * 10],
+        # a header block that never ends: 4 MB of header lines
+        "/huge-headers": [H + b"".join(b"X-Pad-%d: %s\r\n" % (i, b"a" * 1000) for i in range(4000)) + b"Content-Length: 0\r\n\r\n"],
         "/extra-after-body": [H + b"Content-Length: 5\r\n\r\nhello\r\n"],
         # a second response starts inside the first one and ends later
         "/smuggled": [H + b"Content-Length: 5\r\n\r\nhello" + b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", 0.2, b"ok"],

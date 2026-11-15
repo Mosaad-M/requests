@@ -488,6 +488,7 @@ struct HttpClient(Movable):
     var redirect_same_host_only: Bool   # if True, stop following cross-host redirects
     var pool_idle_timeout_secs: Int     # evict pool connections idle longer than this (default 300)
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
+    var trust_env: Bool                 # read HTTP(S)_PROXY / NO_PROXY from the environment (default True)
     var total_timeout_secs: Int         # deadline for a whole request incl. redirects and retries (0 = none)
     var max_retries: Int                # extra attempts after a retryable failure (0 = never retry)
     var retry_backoff_ms: Int           # base delay; doubles per attempt, jittered, capped at 30 s
@@ -564,6 +565,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = False
         self.pool_idle_timeout_secs = 300
         self.proxy_url = String("")
+        self.trust_env = True
         self.total_timeout_secs = 0
         self.max_retries = 0
         self.retry_backoff_ms = 200
@@ -629,6 +631,7 @@ struct HttpClient(Movable):
         self.redirect_same_host_only = move.redirect_same_host_only
         self.pool_idle_timeout_secs = move.pool_idle_timeout_secs
         self.proxy_url = move.proxy_url^
+        self.trust_env = move.trust_env
         self.total_timeout_secs = move.total_timeout_secs
         self.max_retries = move.max_retries
         self.retry_backoff_ms = move.retry_backoff_ms
@@ -920,6 +923,8 @@ struct HttpClient(Movable):
                     raise _err_connection("stream: connection closed before headers")
                 _list_append(raw_buf, chunk)
                 header_end = _buf_find_crlf_crlf(raw_buf)
+                if (header_end < 0 and len(raw_buf) > self.max_header_bytes) or header_end + 4 > self.max_header_bytes:
+                    raise _err_connection("stream: response headers exceed size limit")
         else:
             http_sock.connect(
                 url.host, url.port,
@@ -934,6 +939,8 @@ struct HttpClient(Movable):
                     raise _err_connection("stream: connection closed before headers")
                 _list_append(raw_buf, chunk)
                 header_end = _buf_find_crlf_crlf(raw_buf)
+                if (header_end < 0 and len(raw_buf) > self.max_header_bytes) or header_end + 4 > self.max_header_bytes:
+                    raise _err_connection("stream: response headers exceed size limit")
 
         var hdr_str = _buf_to_string(raw_buf, header_end + 4)
         var parsed = _parse_response(hdr_str, url_str)
@@ -1991,13 +1998,14 @@ struct HttpClient(Movable):
         If self.proxy_url is set, or if HTTP_PROXY / HTTPS_PROXY env vars are
         set (Phase 13B), connects through an HTTP CONNECT proxy tunnel.
         NO_PROXY env var is respected (comma-separated hostnames / .suffixes).
+        trust_env = False ignores all three variables (proxy_url still applies).
 
         If no proxy is configured, connects directly (normal behaviour).
         """
         self.connections_opened += 1
         # Determine effective proxy URL: field takes priority over env vars
         var effective_proxy = self.proxy_url
-        if effective_proxy.byte_length() == 0:
+        if effective_proxy.byte_length() == 0 and self.trust_env:
             # Phase 13B: auto-detect from environment
             if scheme == "https":
                 effective_proxy = _getenv("HTTPS_PROXY")
@@ -2009,7 +2017,7 @@ struct HttpClient(Movable):
                     effective_proxy = _getenv("http_proxy")
 
         # Check NO_PROXY — bypass proxy for matching hosts
-        if effective_proxy.byte_length() > 0:
+        if effective_proxy.byte_length() > 0 and self.trust_env:
             var no_proxy = _getenv("NO_PROXY")
             if no_proxy.byte_length() == 0:
                 no_proxy = _getenv("no_proxy")
