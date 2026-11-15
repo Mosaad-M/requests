@@ -119,6 +119,8 @@ def _framing_server(port=18083):
         "/smuggled": [H + b"Content-Length: 5\r\n\r\nhello" + b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", 0.2, b"ok"],
         # the server closes before the terminal chunk: the body is incomplete
         "/chunked-truncated": [H + b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n", 0.1, "close"],
+        # announces 100 bytes, sends 10 and closes
+        "/cl-short-close": [H + b"Content-Length: 100\r\n\r\n0123456789", 0.1, "close"],
         "/trailers": [H + b"Transfer-Encoding: chunked\r\n\r\n", 0.2,
                       b"5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n"],
         # the trailer section arrives in two pieces

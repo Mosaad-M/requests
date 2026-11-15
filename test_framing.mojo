@@ -387,6 +387,18 @@ def test_get_stream_has_no_body_cap() raises:
     s.close()
 
 
+def test_get_stream_short_body_raises() raises:
+    # A body cut short of its Content-Length must not look like a complete one.
+    var c = new_client()
+    var s = c.get_stream(FR + "/cl-short-close")
+    var msg = String()
+    try:
+        _ = s.read_all()
+    except e:
+        msg = String(e)
+    assert_true(msg.startswith("ConnectionError"), "short stream body: got '" + msg + "'")
+
+
 def test_get_stream_header_block_is_capped() raises:
     var c = new_client()
     var msg = String()
@@ -467,6 +479,7 @@ def main() raises:
     run_test[test_unit_chunk_scan_resumes]("parser: chunk scan resumes across reads", passed, failed)
 
     run_test[test_get_stream_has_no_body_cap]("get_stream: no cap on a huge Content-Length", passed, failed)
+    run_test[test_get_stream_short_body_raises]("rejected: stream body shorter than Content-Length", passed, failed)
     run_test[test_get_stream_header_block_is_capped]("get_stream: header block capped", passed, failed)
 
     print()

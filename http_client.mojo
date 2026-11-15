@@ -2551,11 +2551,17 @@ struct StreamResponse(Movable):
                         chunk = self._tls_sock.recv(need)
                     else:
                         chunk = self._http_sock.recv_bytes(need)
-                except:
+                except e:
                     self._done = True
+                    # A read error before the announced length is a truncated
+                    # body (or a timeout), not the end of the stream.
+                    if self._content_length >= 0 or String(e).startswith(ERR_TIMEOUT):
+                        raise e^
                     chunk = List[UInt8]()
                 if len(chunk) == 0:
                     self._done = True
+                    if self._content_length >= 0 and self._body_read + len(result) < self._content_length:
+                        raise _err_connection("stream: connection closed before body complete")
                 else:
                     result.extend(Span(chunk))
 
