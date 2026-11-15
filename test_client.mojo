@@ -1465,17 +1465,64 @@ def test_cookie_psl_github_io_rejected() raises:
         raise Error("PSL suffix .github.io cookie was stored, expected rejection")
 
 
+def _jar_has(client: HttpClient, name: String) -> Bool:
+    for i in range(len(client._jar_names)):
+        if client._jar_names[i] == name:
+            return True
+    return False
+
+
 def test_cookie_psl_example_co_uk_accepted() raises:
     """Domain=.example.co.uk is a valid registrable domain — cookie must be stored."""
     var client = HttpClient(allow_private_ips=True)
-    _ = client.get(BASE + "/set-cookie-psl-example-co-uk")
-    var found = False
-    for i in range(len(client._jar_names)):
-        if client._jar_names[i] == "psl":
-            found = True
-            break
-    if not found:
+    client._jar_store("www.example.co.uk", "/", True, "psl=1; Domain=.example.co.uk")
+    if not _jar_has(client, "psl"):
         raise Error("Valid domain .example.co.uk cookie was rejected, expected storage")
+
+
+def test_cookie_domain_must_match_request_host() raises:
+    """A host cannot set a cookie for another site (Domain=victim.example from evil.test)."""
+    var client = HttpClient(allow_private_ips=True)
+    client._jar_store("evil.test", "/", True, "sid=attacker; Domain=victim.example")
+    if _jar_has(client, "sid"):
+        raise Error("cookie for a foreign Domain was stored")
+    client._jar_store("evil.test", "/", True, "sid=attacker; Domain=evil.test.victim.example")
+    if _jar_has(client, "sid"):
+        raise Error("cookie for an unrelated Domain was stored")
+    # a parent domain of the request host is fine, so is the host itself
+    client._jar_store("a.b.example.com", "/", True, "p=1; Domain=example.com")
+    client._jar_store("example.com", "/", True, "q=1; Domain=example.com")
+    if not _jar_has(client, "p") or not _jar_has(client, "q"):
+        raise Error("cookie for the host or a parent domain was rejected")
+    # a sibling or child is not
+    client._jar_store("example.com", "/", True, "c=1; Domain=sub.example.com")
+    if _jar_has(client, "c"):
+        raise Error("cookie for a child domain was stored")
+
+
+def test_cookie_rejects_control_chars() raises:
+    """CR/LF/NUL and other control characters in a cookie name or value drop the cookie."""
+    var client = HttpClient(allow_private_ips=True)
+    client._jar_store("example.com", "/", True, "a=x\x01y")
+    client._jar_store("example.com", "/", True, "b=x\x00y")
+    client._jar_store("example.com", "/", True, "c\x7f=1")
+    client._jar_store("example.com", "/", True, "d=ok")
+    if _jar_has(client, "a") or _jar_has(client, "b") or _jar_has(client, "c\x7f"):
+        raise Error("cookie with a control character was stored")
+    if not _jar_has(client, "d"):
+        raise Error("plain cookie was rejected")
+
+
+def test_cookie_jar_is_bounded() raises:
+    """The jar holds at most 3000 cookies and no cookie above 4096 bytes."""
+    var client = HttpClient(allow_private_ips=True)
+    for i in range(3100):
+        client._jar_store("example.com", "/", True, "k" + String(i) + "=v")
+    if len(client._jar_names) > 3000:
+        raise Error("jar grew to " + String(len(client._jar_names)))
+    client._jar_store("example.com", "/", True, "big=" + String("x") * 5000)
+    if _jar_has(client, "big"):
+        raise Error("a 5000-byte cookie was stored")
 
 
 def test_follow_redirects_disabled() raises:
@@ -1788,6 +1835,9 @@ def main() raises:
     run_test[test_cookie_psl_co_uk_rejected]("cookie PSL co.uk rejected", passed, failed)
     run_test[test_cookie_psl_github_io_rejected]("cookie PSL github.io rejected", passed, failed)
     run_test[test_cookie_psl_example_co_uk_accepted]("cookie PSL example.co.uk accepted", passed, failed)
+    run_test[test_cookie_domain_must_match_request_host]("cookie Domain must match request host", passed, failed)
+    run_test[test_cookie_rejects_control_chars]("cookie rejects control chars", passed, failed)
+    run_test[test_cookie_jar_is_bounded]("cookie jar is bounded", passed, failed)
     run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)
     run_test[test_redirect_same_host_only]("redirect same host only", passed, failed)
 

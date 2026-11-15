@@ -2146,6 +2146,16 @@ struct HttpClient(Movable):
         var val_buf = List[UInt8](capacity=semi - eq - 1)
         for i in range(eq + 1, semi):
             val_buf.append(bytes[i])
+        # Bounded and printable only: a control character would be replayed
+        # into the Cookie header, and an oversized pair would bloat every request.
+        if len(name_buf) + len(val_buf) > 4096:
+            return
+        for c in name_buf:
+            if (c < 32 and c != 9) or c == 127:
+                return
+        for c in val_buf:
+            if (c < 32 and c != 9) or c == 127:
+                return
         var name = String(unsafe_from_utf8=name_buf)
         var value = String(unsafe_from_utf8=val_buf)
 
@@ -2263,6 +2273,19 @@ struct HttpClient(Movable):
                         # under the suffix (Phase 11A — PSL validation).
                         if is_public_suffix(d):
                             return  # reject entire cookie — public suffix Domain
+                        # RFC 6265 §5.3 step 6: the request host must be the
+                        # Domain or a subdomain of it (IP hosts: exact only).
+                        d = _to_lower(d)
+                        var h = _to_lower(host)
+                        var h_is_ip = True
+                        for hb in h.as_bytes():
+                            if hb != 46 and (hb < 48 or hb > 57):
+                                h_is_ip = False
+                        if h_is_ip or h.find(":") >= 0:
+                            if h != d:
+                                return
+                        elif not _domain_matches(h, d, False):
+                            return
                         cookie_domain = d
                         host_only = False
 
@@ -2390,6 +2413,8 @@ struct HttpClient(Movable):
                 self._jar_samesite[i] = samesite
                 self._jar_httponly[i] = httponly
                 return
+        if len(self._jar_names) >= 3000:
+            return  # shortcut: new cookies are dropped once the jar is full, no eviction
         self._jar_domains.append(cookie_domain)
         self._jar_names.append(name)
         self._jar_values.append(value)
