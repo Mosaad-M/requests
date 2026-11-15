@@ -13,6 +13,8 @@ from std.os import setenv
 from codecs import Codecs, accept_encoding
 from http_client import _unix_time_secs, _redirect_headers
 from url import parse_url
+from codecs import open_zlib
+from zlib_decompress import zlib_inflate
 
 
 # ============================================================================
@@ -1546,6 +1548,41 @@ def test_redirect_credentials_dropped_when_origin_changes() raises:
         raise Error("credentials dropped on a same-origin redirect")
 
 
+def _unhex(h: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    var b = h.as_bytes()
+    for i in range(0, len(b), 2):
+        var v = 0
+        for j in range(2):
+            var c = Int(b[i + j])
+            v = v * 16 + (c - 48 if c < 58 else c - 87)
+        out.append(UInt8(v))
+    return out^
+
+
+def test_decompression_is_capped_by_max_response_bytes() raises:
+    """30000 bytes of gzip output (545 bytes in) must stop at a 10000-byte cap."""
+    var gz = _unhex("1f8b08000000000000ffedd05b4b930100806115cfe69639ac0b91498698269acaf2cb4064ded84d5336253c8538f098e724c5daf06223c402f313ca0e6b280aea0621e201d9347476041565b2f04256ba1b150d93d4fe81bfe07d7ec2a394eb334edc7bf6aaa4bf920597f796a139d5240d09f59dab5d97d46f9e3cb2b4d4797a4256534ac43bc3eb0f5ebd3873841db67f5b29989a4dd854e439668ea5bb11fd8e7c4d93bfb6e5bbe5a3c7e8339f55e18cfc33a95d3e1a5fb17a0ded489aef1726ea2fc65c0ffc15d0fdc478abd8d27355add26b9ef5fe369fee0b17de7e1a5b2bed54e8aa5cc18d419f732ee56e39ebdc0dd225b333aa2fb3facaeb98d8377daa555d966ff8434f7eb84d6bbd59e12afb97b6209e050e7c7d1e744f3b983db2516348b65b8e5aa365f14a8dbac638ac9f1e19155eb61e67a799653faed9ef668e0ab6d88638c3a428ec74292e8bfe0189cb82acf4f15aee6db7ba4d95fad3d6ab3b789f52699285fa891fdc8befbec8e5a6edf4a7b5bbe39d4595fde51d1371dd37945c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c515575c71c5d5b957ff014a8a17e930750000")
+    var lib = open_zlib()
+    if not lib:
+        return  # no zlib on this machine
+    var ok = zlib_inflate(lib.value(), Int(gz.unsafe_ptr()), len(gz), True)
+    if len(ok) != 30000:
+        raise Error("uncapped inflate returned " + String(len(ok)) + " bytes")
+    var raised = False
+    try:
+        _ = zlib_inflate(lib.value(), Int(gz.unsafe_ptr()), len(gz), True, 10000)
+    except:
+        raised = True
+    if not raised:
+        raise Error("max_out=10000 did not stop a 30000-byte output")
+    # a cap that is not a power-of-two multiple of the buffer still lets a fit through
+    var fits = zlib_inflate(lib.value(), Int(gz.unsafe_ptr()), len(gz), True, 40000)
+    if len(fits) != 30000:
+        raise Error("an output under the cap was rejected")
+    _ = gz^  # keep the input alive until here: it is read through its address
+
+
 def test_follow_redirects_disabled() raises:
     """follow_redirects=False should return 301 without following."""
     var client = HttpClient(allow_private_ips=True)
@@ -1858,6 +1895,7 @@ def main() raises:
     run_test[test_cookie_psl_example_co_uk_accepted]("cookie PSL example.co.uk accepted", passed, failed)
     run_test[test_cookie_domain_must_match_request_host]("cookie Domain must match request host", passed, failed)
     run_test[test_cookie_rejects_control_chars]("cookie rejects control chars", passed, failed)
+    run_test[test_decompression_is_capped_by_max_response_bytes]("decompression capped by max_response_bytes", passed, failed)
     run_test[test_cookie_jar_is_bounded]("cookie jar is bounded", passed, failed)
     run_test[test_redirect_credentials_dropped_when_origin_changes]("redirect drops credentials on origin change", passed, failed)
     run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)

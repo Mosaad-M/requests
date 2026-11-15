@@ -1097,15 +1097,15 @@ struct HttpClient(Movable):
         if _eq_ignore_case(ce, "gzip") or _eq_ignore_case(ce, "x-gzip") or _eq_ignore_case(ce, "deflate"):
             if not self._codecs.zlib:
                 raise missing_library("gzip" if not _eq_ignore_case(ce, "deflate") else "deflate")
-            return zlib_inflate(self._codecs.zlib.value(), addr, n, not _eq_ignore_case(ce, "deflate"))
+            return zlib_inflate(self._codecs.zlib.value(), addr, n, not _eq_ignore_case(ce, "deflate"), self.max_response_bytes)
         if _eq_ignore_case(ce, "br"):
             if not self._codecs.brotli:
                 raise missing_library("br")
-            return brotli_decode(self._codecs.brotli.value(), addr, n)
+            return brotli_decode(self._codecs.brotli.value(), addr, n, self.max_response_bytes)
         if _eq_ignore_case(ce, "zstd"):
             if not self._codecs.zstd:
                 raise missing_library("zstd")
-            return zstd_decode(self._codecs.zstd.value(), addr, n)
+            return zstd_decode(self._codecs.zstd.value(), addr, n, self.max_response_bytes)
         return None
 
     def _follow_redirects(

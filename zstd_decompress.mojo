@@ -35,7 +35,9 @@ comptime _MAX_DECOMP_BYTES: Int = 512 * 1024 * 1024
 comptime _ZSTD_SIZE_SENTINEL: UInt64 = UInt64(18446744073709551614)  # >= this = sentinel
 
 
-def zstd_decode(zstd: OwnedDLHandle, data_addr: Int, data_len: Int) raises -> List[UInt8]:
+def zstd_decode(
+    zstd: OwnedDLHandle, data_addr: Int, data_len: Int, max_out: Int = _MAX_DECOMP_BYTES
+) raises -> List[UInt8]:
     """Decompress Zstandard data from a raw address+length (no List copy)
     with an opened libzstd (codecs.open_zstd)."""
     if data_len == 0:
@@ -47,8 +49,8 @@ def zstd_decode(zstd: OwnedDLHandle, data_addr: Int, data_len: Int) raises -> Li
 
     if frame_size < _ZSTD_SIZE_SENTINEL:
         var cap_limit = data_len * _MAX_DECOMP_RATIO
-        if cap_limit > _MAX_DECOMP_BYTES:
-            cap_limit = _MAX_DECOMP_BYTES
+        if cap_limit > max_out:
+            cap_limit = max_out
         var wanted = Int(frame_size)
         if wanted > cap_limit:
             raise Error("zstd decompression ratio limit exceeded")
@@ -81,11 +83,13 @@ def zstd_decode(zstd: OwnedDLHandle, data_addr: Int, data_len: Int) raises -> Li
                 break
             var new_cap = out_capacity * 2
             var cap_limit = data_len * _MAX_DECOMP_RATIO
-            if cap_limit > _MAX_DECOMP_BYTES:
-                cap_limit = _MAX_DECOMP_BYTES
-            if new_cap > cap_limit:
+            if cap_limit > max_out:
+                cap_limit = max_out
+            if out_capacity >= cap_limit:
                 out_buf.unsafe_free()
                 raise Error("zstd decompression ratio limit exceeded")
+            if new_cap > cap_limit:
+                new_cap = cap_limit
             var new_buf = unsafe_alloc[UInt8](new_cap)
             _ = external_call["memcpy", Int](Int(new_buf), Int(out_buf), out_capacity)
             out_buf.unsafe_free()
