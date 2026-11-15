@@ -1,3 +1,18 @@
+# requests 1.9.0 — contributor batch (#40, #41, #42, #46, #28 remainder) and trust_env (#36)
+
+Branch `release-1.9.0`. Contributor commits cherry-picked (authorship kept) and ported onto 1.8.1.
+
+- [x] #40: interim 1xx skipped, 204/304 end at the headers in the HTTP and TLS receive loops
+- [x] #42: `connections_opened`
+- [x] #41: `default_content_type`, `Content-Length: 0` for empty POST/PUT/PATCH
+- [x] #46: caller headers replace Host/User-Agent/Connection defaults; `decompress=False`; h2 drops Host and connection-specific headers
+- [x] #28 remainder: `get_stream` header block capped by `max_header_bytes` (its body stays uncapped); PR #43 otherwise superseded by 1.7.0/1.8.0
+- [x] #36: `trust_env`
+- [ ] #48 (no ALPN answer -> HTTP/1.1) DEFERRED: tls 1.10.0 never reports an ALPN result for TLS 1.2 (`negotiated_protocol()` returns "" when `_is12`) though the ClientHello offers h2, so a TLS 1.2 server that picks h2 would get HTTP/1.1 bytes. Needs tls to parse ALPN from the 1.2 ServerHello first (tls release, bump the floor), then #48
+- [x] `pixi run test` 38 + 48 + 126 + 4
+
+---
+
 # requests 1.8.1 — brotli output buffer, response copies (PRs #45, #47)
 
 Branch `patch-1.8.1`. Contributor commits kept; merged cleanly except an adjacent-lines test conflict.
