@@ -41,7 +41,7 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (38) + test_framing (50) + test_client (134 HTTP + 4 HTTPS) against test_server.py
+pixi run test              # test_resilience (38) + test_framing (50) + test_client (133 HTTP + 4 HTTPS) against test_server.py
 pixi run test-h2-local     # 28 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18445)
 pixi run test-hpack        # 130
 pixi run test-h2           # 70 (framing)
