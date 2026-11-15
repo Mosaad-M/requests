@@ -7,7 +7,7 @@ Branch `release-1.10.0`; each item a commit with its test (verified failing firs
 - [x] Decompression capped by `max_response_bytes`; zstd frame-size guard
 - [x] Control characters (incl. NUL) rejected in header names, values and paths
 - [x] HPACK: size update above our advertised limit (65536) is an error. The O(n) table insert stays: the limit bounds n (~2000 entries)
-- [ ] Proxy SSRF policy for the CONNECT target: needs a decision (can break corporate proxies to internal hosts)
+- [x] Proxy SSRF policy: left unchanged and documented as a known gap (only IP literals could be checked; blocking would break proxies to internal hosts); opt-in setting if wanted
 - Reviewer pass found: uppercase `Domain=CO.UK` bypassing the PSL, HPACK limit below the advertised table size (broke all h2-local tests), 304 streams waiting for a body, zstd frame-size cast: all fixed. Left: jar cap has no eviction, initial decompression buffer can exceed a tiny cap.
 - Perf vs 1.9.0: small 155 ms, medium 356 ms, large 248 ms, chunked 173 ms (unchanged)
 
