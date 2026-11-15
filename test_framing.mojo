@@ -202,6 +202,16 @@ def test_chunked_trailers_split_across_reads() raises:
     expect_text("/trailers-split", "hello")
 
 
+def test_chunked_body_cut_before_terminal_chunk_raises() raises:
+    var c = new_client()
+    var msg = String()
+    try:
+        _ = c.get(FR + "/chunked-truncated")
+    except e:
+        msg = String(e)
+    assert_true(msg.startswith("ChunkedBodyError"), "truncated chunked body: got '" + msg + "'")
+
+
 # ── The parser on its own ────────────────────────────────────────────────────
 
 
@@ -434,6 +444,7 @@ def main() raises:
     run_test[test_extra_bytes_after_content_length_body]("safe: extra bytes after the body", passed, failed)
     run_test[test_chunked_trailers_are_consumed]("safe: chunked trailers consumed", passed, failed)
     run_test[test_chunked_trailers_split_across_reads]("safe: chunked trailers split across reads", passed, failed)
+    run_test[test_chunked_body_cut_before_terminal_chunk_raises]("rejected: chunked body cut before the terminal chunk", passed, failed)
 
     run_test[test_unit_length_beyond_the_old_100mb_constant]("parser: length above 100 MB", passed, failed)
     run_test[test_unit_absurd_length_is_rejected]("parser: absurd length rejected", passed, failed)

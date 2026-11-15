@@ -3033,6 +3033,8 @@ def _recv_tls_response(
                 raise _err_connection(es)
             if len(buf) - body_start > lim.max_body:
                 raise _err_connection("chunked body exceeds response size limit")
+        if not _buf_chunked_complete(buf, scan):
+            raise _err_chunked("chunked body truncated: connection closed before the final chunk")
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes
@@ -3143,6 +3145,8 @@ def _recv_http_response(
             _list_append(buf, chunk)
             if len(buf) - body_start > lim.max_body:
                 raise _err_connection("chunked body exceeds response size limit")
+        if not _buf_chunked_complete(buf, scan):
+            raise _err_chunked("chunked body truncated: connection closed before the final chunk")
         return buf^
     else:
         # No Content-Length or chunked — read until connection closes

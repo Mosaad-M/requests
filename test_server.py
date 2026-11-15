@@ -117,6 +117,8 @@ def _framing_server(port=18083):
         "/extra-after-body": [H + b"Content-Length: 5\r\n\r\nhello\r\n"],
         # a second response starts inside the first one and ends later
         "/smuggled": [H + b"Content-Length: 5\r\n\r\nhello" + b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", 0.2, b"ok"],
+        # the server closes before the terminal chunk: the body is incomplete
+        "/chunked-truncated": [H + b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n", 0.1, "close"],
         "/trailers": [H + b"Transfer-Encoding: chunked\r\n\r\n", 0.2,
                       b"5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n"],
         # the trailer section arrives in two pieces
@@ -153,6 +155,8 @@ def _framing_server(port=18083):
                 for part in R.get(path, R["/ok"]):
                     if isinstance(part, float):
                         time.sleep(part)
+                    elif part == "close":
+                        return
                     else:
                         conn.sendall(part)
         except OSError:
