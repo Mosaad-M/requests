@@ -399,6 +399,12 @@ def test_get_stream_short_body_raises() raises:
     assert_true(msg.startswith("ConnectionError"), "short stream body: got '" + msg + "'")
 
 
+def test_get_stream_ignores_bytes_past_content_length() raises:
+    var c = new_client()
+    var s = c.get_stream(FR + "/extra-after-body")
+    assert_str_eq(s.read_all(), "hello", "stream body")
+
+
 def test_get_stream_header_block_is_capped() raises:
     var c = new_client()
     var msg = String()
@@ -480,6 +486,7 @@ def main() raises:
 
     run_test[test_get_stream_has_no_body_cap]("get_stream: no cap on a huge Content-Length", passed, failed)
     run_test[test_get_stream_short_body_raises]("rejected: stream body shorter than Content-Length", passed, failed)
+    run_test[test_get_stream_ignores_bytes_past_content_length]("rejected: stream ignores bytes past Content-Length", passed, failed)
     run_test[test_get_stream_header_block_is_capped]("get_stream: header block capped", passed, failed)
 
     print()

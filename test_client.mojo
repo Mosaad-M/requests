@@ -1619,6 +1619,20 @@ def test_stream_304_ends_without_body() raises:
         raise Error("a 304 stream must be empty and end at once")
 
 
+def test_cookie_host_case_and_trailing_dot() raises:
+    """Host case does not matter; a trailing-dot public suffix Domain is still a public suffix."""
+    var client = HttpClient(allow_private_ips=True)
+    client._jar_store("Example.COM", "/", True, "a=1; Domain=EXAMPLE.com")
+    client._jar_store("Www.Example.com", "/", True, "b=2")
+    if client._jar_cookie_for("WWW.example.COM", "/", True).find("a=1") < 0:
+        raise Error("Domain cookie not replayed to a differently cased host")
+    if client._jar_cookie_for("Www.example.com", "/", True).find("b=2") < 0:
+        raise Error("host-only cookie not replayed to a differently cased host")
+    client._jar_store("a.co.uk.", "/", True, "sid=x; Domain=co.uk.")
+    if _jar_has(client, "sid"):
+        raise Error("trailing-dot public suffix Domain was stored")
+
+
 def test_follow_redirects_disabled() raises:
     """follow_redirects=False should return 301 without following."""
     var client = HttpClient(allow_private_ips=True)
@@ -1934,6 +1948,7 @@ def main() raises:
     run_test[test_cookie_rejects_control_chars]("cookie rejects control chars", passed, failed)
     run_test[test_decompression_is_capped_by_max_response_bytes]("decompression capped by max_response_bytes", passed, failed)
     run_test[test_stream_304_ends_without_body]("stream 304 ends without body", passed, failed)
+    run_test[test_cookie_host_case_and_trailing_dot]("cookie host case and trailing dot", passed, failed)
     run_test[test_cookie_jar_is_bounded]("cookie jar is bounded", passed, failed)
     run_test[test_redirect_credentials_dropped_when_origin_changes]("redirect drops credentials on origin change", passed, failed)
     run_test[test_follow_redirects_disabled]("follow_redirects=False", passed, failed)

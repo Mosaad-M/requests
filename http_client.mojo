@@ -2162,7 +2162,7 @@ struct HttpClient(Movable):
         var cookie_path = String("/")
         var secure = False
         var httponly = False
-        var cookie_domain = host
+        var cookie_domain = _norm_host(host)
         var host_only = True
         var samesite = String("Lax")  # RFC 6265bis default
 
@@ -2264,7 +2264,7 @@ struct HttpClient(Movable):
                                 break
                         if not has_inner_dot:
                             return  # reject entire cookie — invalid Domain attr
-                        d = _to_lower(d)  # the PSL and the host check are case-sensitive
+                        d = _norm_host(d)  # the PSL and the host check are case-sensitive
                         # Reject public suffixes (e.g. .co.uk, .github.io)
                         # to prevent supercookies that match any registrant
                         # under the suffix (Phase 11A — PSL validation).
@@ -2272,7 +2272,7 @@ struct HttpClient(Movable):
                             return  # reject entire cookie — public suffix Domain
                         # RFC 6265 §5.3 step 6: the request host must be the
                         # Domain or a subdomain of it (IP hosts: exact only).
-                        var h = _to_lower(host)
+                        var h = _norm_host(host)
                         var h_is_ip = True
                         for hb in h.as_bytes():
                             if hb != 46 and (hb < 48 or hb > 57):
@@ -2430,6 +2430,7 @@ struct HttpClient(Movable):
           - secure: Secure cookies not sent over HTTP
           - domain: exact match (host_only) or suffix match
         """
+        var hn = _norm_host(host)
         var now = _unix_time_secs()
         var result = List[UInt8](capacity=64)
         var first = True
@@ -2441,7 +2442,7 @@ struct HttpClient(Movable):
                 continue  # Secure cookie not sent over HTTP
             if not _path_matches(req_path, self._jar_paths[i]):
                 continue  # path doesn't match
-            if not _domain_matches(host, self._jar_domains[i], self._jar_host_only[i]):
+            if not _domain_matches(hn, self._jar_domains[i], self._jar_host_only[i]):
                 continue  # domain doesn't match
             if self._jar_samesite[i] == "None" and not is_https:
                 continue  # SameSite=None requires Secure (HTTPS)
@@ -2527,6 +2528,8 @@ struct StreamResponse(Movable):
 
         # Drain leftover bytes from initial header recv first
         var leftover_avail = len(self._leftover) - self._leftover_pos
+        if self._content_length >= 0:  # bytes past the announced length are not body
+            leftover_avail = min(leftover_avail, self._content_length - self._body_read)
         if leftover_avail > 0:
             var take_n = min(size, leftover_avail)
             result.extend(
@@ -3539,6 +3542,14 @@ def _path_matches(req_path: String, cookie_path: String) -> Bool:
     if rp_bytes[cp_len] == UInt8(47):  # next char is '/'
         return True
     return False
+
+
+def _norm_host(h: String) -> String:
+    """Cookie host form: lower case, no trailing dot."""
+    var l = _to_lower(h)
+    if l.byte_length() > 1 and l.as_bytes()[l.byte_length() - 1] == 46:
+        return String(l[byte=0 : l.byte_length() - 1])
+    return l
 
 
 def _domain_matches(host: String, cookie_domain: String, host_only: Bool) -> Bool:
