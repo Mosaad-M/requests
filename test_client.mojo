@@ -11,7 +11,7 @@ from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, Bearer
 from json import JsonValue
 from std.os import setenv
 from codecs import Codecs, accept_encoding
-from http_client import _unix_time_secs, _redirect_headers
+from http_client import _unix_time_secs, _redirect_headers, _decode_chunked
 from url import parse_url
 from codecs import open_zlib
 from zlib_decompress import zlib_inflate
@@ -1315,6 +1315,38 @@ def test_content_length_header_name_must_match_exactly() raises:
     assert_eq(resp.body.byte_length(), 100000, "whole body read")
     assert_str_eq(resp.headers.get("X-Amz-Meta-Content-Length"), "5", "metadata header kept")
 
+def test_chunked_decode_obeys_max_out() raises:
+    """_decode_chunked stops at the limit it is given, not at a constant."""
+    var body = String("5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n")
+    assert_str_eq(_decode_chunked(body, 10), "helloworld", "at the limit")
+    var raised = False
+    try:
+        _ = _decode_chunked(body, 9)
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected an error over the limit")
+
+
+def test_chunked_body_over_100mb_when_limit_raised() raises:
+    """A 101 MB chunked body is accepted once max_response_bytes allows it and
+    refused (as before) at the default. Fails on 1.11.0: the decoder checked
+    the 100 MB constant whatever the client's setting."""
+    var client = HttpClient(allow_private_ips=True, timeout_secs=30)
+    client.max_response_bytes = 200 * 1024 * 1024
+    var resp = client.get(BASE + "/bigchunked?kb=103424")
+    assert_eq(resp.status_code, 200, "status_code")
+    assert_eq(resp.body.byte_length(), 103424 * 1024, "body length")
+    var strict = HttpClient(allow_private_ips=True, timeout_secs=30)
+    var raised = False
+    try:
+        _ = strict.get(BASE + "/bigchunked?kb=103424")
+    except:
+        raised = True
+    if not raised:
+        raise Error("expected the 100 MB default to refuse a 101 MB chunked body")
+
+
 def test_chunked_when_transfer_encoding_is_the_last_header() raises:
     """A chunked body ends at its last chunk even when Transfer-Encoding is
     the last header line and the server keeps the connection open."""
@@ -1806,6 +1838,8 @@ def main() raises:
     run_test[test_query_string]("query string", passed, failed)
     run_test[test_case_insensitive_headers]("case-insensitive headers", passed, failed)
     run_test[test_chunked_response]("chunked response", passed, failed)
+    run_test[test_chunked_decode_obeys_max_out]("chunked decode obeys max_out", passed, failed)
+    run_test[test_chunked_body_over_100mb_when_limit_raised]("chunked body over 100 MB with raised limit", passed, failed)
     run_test[test_json_doc]("json_doc() read-only document", passed, failed)
 
     # POST / PUT / DELETE / PATCH tests
