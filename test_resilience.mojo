@@ -126,6 +126,16 @@ def test_body_limit_chunked() raises:
     assert_eq(c.get(BASE + "/bigchunked?kb=4").status_code, 200, "recovers")
 
 
+def test_body_limit_chunked_above_default() raises:
+    """A raised max_response_bytes also applies to chunked bodies."""
+    var c = new_client()
+    c.max_response_bytes = 128 * 1024 * 1024
+    var kb = MAX_RESPONSE_BYTES // 1024 + 64  # 64 KB over the default limit
+    var resp = c.get(BASE + "/bigchunked?kb=" + String(kb))
+    assert_eq(resp.status_code, 200, "status")
+    assert_eq(resp.body.byte_length(), kb * 1024, "whole chunked body decoded")
+
+
 def test_body_limit_close_delimited() raises:
     var c = new_client()
     c.max_response_bytes = 2048
@@ -533,6 +543,7 @@ def main() raises:
 
     run_test[test_body_limit_content_length]("body limit (Content-Length)", passed, failed)
     run_test[test_body_limit_chunked]("body limit (chunked)", passed, failed)
+    run_test[test_body_limit_chunked_above_default]("body limit (chunked, above default)", passed, failed)
     run_test[test_body_limit_close_delimited]("body limit (close-delimited)", passed, failed)
     run_test[test_header_limit]("header limit", passed, failed)
     run_test[test_default_header_limit_allows_normal_headers]("default header limit allows 60 KB", passed, failed)

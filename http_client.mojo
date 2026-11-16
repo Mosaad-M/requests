@@ -1550,7 +1550,9 @@ struct HttpClient(Movable):
         # Decide reuse before the String is built so the raw buffer is not kept alive
         var reusable = _connection_reusable(raw_bytes)
         var raw_response = String(unsafe_from_utf8=raw_bytes)
-        var parsed = _parse_response(raw_response, url_str)
+        var parsed = _parse_response(
+            raw_response, url_str, self.max_response_bytes
+        )
 
         # Decompress body if Content-Encoding is set.
         # Phase 14: use _ptr variants — decompress directly from the body's
@@ -3623,8 +3625,10 @@ def _hex_to_int(
     return result
 
 
-def _decode_chunked(body: String) raises -> String:
-    """Decode a chunked transfer-encoded body.
+def _decode_chunked(
+    body: String, max_bytes: Int = MAX_RESPONSE_BYTES
+) raises -> String:
+    """Decode a chunked transfer-encoded body of at most `max_bytes` bytes.
 
     Format: <hex-size>\\r\\n<data>\\r\\n ... 0\\r\\n\\r\\n
 
@@ -3664,7 +3668,7 @@ def _decode_chunked(body: String) raises -> String:
                 + " available"
             )
         total_decoded += chunk_size
-        if total_decoded > MAX_RESPONSE_BYTES:
+        if total_decoded > max_bytes:
             raise _err_connection("chunked body exceeds response size limit")
         var current_len = len(result)
         result.resize(current_len + chunk_size, 0)
@@ -3675,7 +3679,9 @@ def _decode_chunked(body: String) raises -> String:
     return String(unsafe_from_utf8=result)
 
 
-def _parse_response(raw: String, url: String) raises -> HttpResponse:
+def _parse_response(
+    raw: String, url: String, max_body_bytes: Int = MAX_RESPONSE_BYTES
+) raises -> HttpResponse:
     """Parse a raw HTTP response string into an HttpResponse.
 
     Uses UnsafePointer for zero-copy parsing — converts the raw response
@@ -3781,7 +3787,7 @@ def _parse_response(raw: String, url: String) raises -> HttpResponse:
 
     # Decode chunked body if needed
     if framing.kind == FRAME_CHUNKED:
-        response.body = _decode_chunked(response.body)
+        response.body = _decode_chunked(response.body, max_body_bytes)
 
     return response^
 

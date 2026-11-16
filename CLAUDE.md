@@ -41,7 +41,7 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (38) + test_framing (51) + test_client (134 HTTP + 4 HTTPS) against test_server.py
+pixi run test              # test_resilience (39) + test_framing (51) + test_client (134 HTTP + 4 HTTPS) against test_server.py
 pixi run test-h2-local     # 29 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
 pixi run test-alpn         # 1: HTTPS server answering no ALPN protocol gets HTTP/1.1 on one connection (test_alpn_fallback.mojo, alpn_test_server.py)
 pixi run test-hpack        # 130
