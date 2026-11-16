@@ -1,3 +1,13 @@
+# requests 1.11.1 — chunked bodies obey max_response_bytes (#28)
+
+Branch `fix/chunked-limit-1.11.1`. `_decode_chunked` (via `_parse_response`) compared the decoded size with the 100 MB constant, so a chunked body over 100 MB failed whatever `max_response_bytes` was. Both now take the client's limit.
+- [x] Tests fail before the fix, pass after (mutation): `_decode_chunked` with a limit, and a 101 MB chunked body with the limit raised (and refused at the default)
+- [x] `pixi run test`: resilience 38, framing 51, client 136 + 4 HTTPS
+- [x] Perf: bench_e2e large/chunked vs v1.11.0 within noise (chunked RSS 82-98 MB in both, 6 interleaved runs)
+- Not run: fuzz, PoCs, h2 suites (only a parameter threaded into the HTTP/1.1 decoder)
+
+---
+
 # requests 1.11.0 — no HTTP/2 probe (#48), tls >= 1.11.0
 
 Branch `release-1.11.0`. #48 cherry-picked (authorship kept) onto 1.10.0 and ported: the `proto == ""` branch is gone, so no ALPN answer is HTTP/1.1 on the connection we have.

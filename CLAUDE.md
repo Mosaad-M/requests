@@ -41,7 +41,7 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (38) + test_framing (51) + test_client (134 HTTP + 4 HTTPS) against test_server.py
+pixi run test              # test_resilience (38) + test_framing (51) + test_client (136 HTTP + 4 HTTPS) against test_server.py
 pixi run test-h2-local     # 29 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
 pixi run test-alpn         # 1: HTTPS server answering no ALPN protocol gets HTTP/1.1 on one connection (test_alpn_fallback.mojo, alpn_test_server.py)
 pixi run test-hpack        # 130
@@ -66,7 +66,7 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 | `timeout_secs` (ctor) | 30 | Per-socket send/recv timeout |
 | `total_timeout_secs` | 0 (off) | Deadline for a whole call incl. redirects, retries and body reads. Raises `TimeoutError`. Every read (HTTP, HTTPS, h2, pooled or fresh) is capped to the time left, 1 s granularity. If a retry's wait would pass the deadline, the last response is returned instead |
 | `max_retries` / `retry_backoff_ms` / `retry_non_idempotent` | 0 / 200 / False | Retry connect/read failures and 429/502/503/504; idempotent methods only unless opted in; exponential backoff with jitter capped at 30 s; `Retry-After` (seconds) honoured up to 60 s |
-| `max_response_bytes` | 100 MB | Body cap, HTTP/1.1 (Content-Length, chunked, close-delimited) and HTTP/2; raising it above 100 MB works (the parser has no constant cap). `get_stream` body is uncapped; its header block is capped by `max_header_bytes` |
+| `max_response_bytes` | 100 MB | Body cap, HTTP/1.1 (Content-Length, chunked, close-delimited) and HTTP/2; raising it above 100 MB works for Content-Length, chunked and close-delimited bodies (the chunk decoder took the 100 MB constant until 1.11.1). `get_stream` body is uncapped; its header block is capped by `max_header_bytes` |
 | `max_header_bytes` | 1 MB | Header block cap (HTTP/1.1 and HTTP/2, compressed, decoded, and cumulative with trailers) |
 | `max_batch_bytes` | 1 GB | Body bytes one `get_many` batch may hold; a stream past it is re-fetched alone |
 | `default_content_type` | `application/json` | Content-Type for a body sent without one; `""` sends none. Empty POST/PUT/PATCH send `Content-Length: 0` |
