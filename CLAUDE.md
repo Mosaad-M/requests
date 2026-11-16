@@ -49,6 +49,7 @@ pixi run test-h2           # 70 (framing)
 pixi run test-h2-conn      # 4  (public internet)
 pixi run test-h2-client    # 3  (public internet)
 pixi run test-std-compat   # 1
+pixi run fuzz              # mutation fuzzers (fuzz/): h1 framing/parse, chunk decoder, hpack, h2 frames, cookie jar; `bash fuzz/run.sh [iters] [seeds]`
 pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 ```
 
@@ -56,6 +57,7 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 - `test_client` ends by calling `/shutdown` on `test_server.py`, so `test_resilience` and `test_framing` run first in the `test` task.
 - `test_framing` talks to a raw keep-alive listener (port 18083) and follows every case with a **POST** on the same client: HttpClient replays a failed GET on a fresh connection, which would hide bytes left on a pooled connection. A response that must be rejected sends its head and body in separate writes, so it cannot pass by luck.
 - Tests that must prove a *negative* (flow control, deadlines) are verified by mutation: break the code, confirm the test fails. The h2 server credits uploaded data back 30 ms late on purpose, so a client that ignores flow control gets dropped. HttpClient silently retries a failed pooled request on a fresh connection, so a test that must see a protocol failure should use the raw `h2_request` on a hand-made `Http2Conn` (see `test_raw_upload_obeys_peer_windows`).
+- Run `pixi run fuzz` (100000 iterations x 3 seeds, a few minutes) after touching a parser, and before a release that does. It fails on an abort or hang; parse errors are counted, not failures. `fuzz_bytes` skips the cookie mode (invalid UTF-8 trips a stdlib assert when the harness builds the cookie String).
 - `test-h2-conn`/`test-h2-client`/HTTPS tests use the public internet and can flake.
 
 ## Public settings on `HttpClient` (all default to the previous behaviour)
