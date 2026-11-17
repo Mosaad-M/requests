@@ -87,3 +87,39 @@ jobs:
 
       - name: Std compatibility
         run: pixi run test-std-compat
+
+  fuzz:
+    # Fixed seeds, short: every parser that sees server bytes (see fuzz/run.sh).
+    # A failure prints the command that reproduces it. fuzz-nightly.yml runs
+    # random seeds for longer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check CPU features
+        run: |
+          echo "CPU model: $(grep 'model name' /proc/cpuinfo | head -1)"
+          echo "CPU flags: $(grep '^flags' /proc/cpuinfo | head -1)"
+          grep -q avx2 /proc/cpuinfo     || { echo "MISSING: avx2 — re-queue this job"; exit 1; }
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+
+      # No compression -dev packages: requests links no C libraries. zlib is
+      # the system's, libzstd and libbrotlidec come from the pixi env, all
+      # opened at runtime (codecs.mojo).
+
+      - name: Install mojo-pkg
+        run: |
+          mkdir -p "$HOME/.mojo/bin"
+          curl -fsSL https://github.com/Mosaad-M/mojo-pkg/releases/latest/download/mojo-pkg-linux-64.tar.gz \
+            | tar xz -C "$HOME/.mojo/bin"
+          echo "$HOME/.mojo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          LD_LIBRARY_PATH="$(pwd)/.pixi/envs/default/lib" \
+            $HOME/.mojo/bin/mojo-pkg install
+
+      - name: Fuzz
+        run: pixi run fuzz 50000 1 2
