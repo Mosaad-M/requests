@@ -184,8 +184,7 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         path = url.path
         length = int(self.headers.get("Content-Length", 0))
-        if length:
-            self.rfile.read(length)
+        req_body = self.rfile.read(length) if length else b""
         ident = q.get("id", "default")
 
         def reply(code, body=b"{}", headers=()):
@@ -209,6 +208,13 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
                 reply(int(q.get("code", 503)), b'{"flaky":true}', extra)
             else:
                 reply(200, json.dumps({"attempts": hit}).encode())
+        elif path == "/flaky-echo":
+            # Like /flaky, but the first success returns the request body unchanged.
+            hit = _hit(ident)
+            if hit <= int(q.get("n", 1)):
+                reply(503, b'{"flaky":true}')
+            else:
+                reply(200, req_body, [("X-Attempts", str(hit))])
         elif path == "/reset":
             # Promise a body, send part of it, then drop the connection.
             hit = _hit(ident)
@@ -318,6 +324,16 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(chunk2.encode() + b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
             return
+        elif self.path == "/echo-bytes":
+            self._handle_echo_bytes()
+        elif self.path == "/bytes-all":
+            body = bytes(range(256)) * 4
+            self.send_response(200, "OK")
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path.startswith("/echo?"):
             # Echo back query string
             query = self.path.split("?", 1)[1] if "?" in self.path else ""
@@ -699,6 +715,20 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             "content_length": self.headers.get("Content-Length", ""),
         })
 
+    def _handle_echo_bytes(self):
+        """Handle /echo-bytes: return the request body unchanged, as bytes."""
+        n = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(n) if n > 0 else b""
+        self.send_response(200, "OK")
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.send_header("X-Request-Content-Length", self.headers.get("Content-Length", ""))
+        self.send_header("X-Request-Content-Type", self.headers.get("Content-Type", ""))
+        self.send_header("X-Request-Method", self.command)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle_method(self):
         """Handle /method endpoint — return the HTTP method used."""
         self._respond(200, "OK", {"method": self.command})
@@ -709,6 +739,14 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
             self._resilience()
         elif self.path == "/echo":
             self._handle_echo()
+        elif self.path == "/echo-bytes":
+            self._handle_echo_bytes()
+        elif self.path in ("/redirect-bytes/307", "/redirect-bytes/303", "/redirect-bytes/302"):
+            self.send_response(int(self.path[-3:]), "Redirect")
+            self.send_header("Location", "/echo-bytes")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/method":
             self._handle_method()
         elif self.path == "/redirect/307":

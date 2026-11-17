@@ -386,6 +386,35 @@ def test_post_replayed_when_opted_in() raises:
     assert_eq(ka_hits("/stale-post2"), 2, "two requests reached the server")
 
 
+def test_binary_post_replayed_when_opted_in() raises:
+    var c = new_client()
+    c.retry_non_idempotent = True
+    var data = List[UInt8]()
+    for i in range(300):
+        data.append(UInt8(i % 256))
+    assert_eq(c.post(KA + "/stale-post3", data).status_code, 200, "first POST")
+    assert_eq(c.post(KA + "/stale-post3", Span(data)).status_code, 200, "replayed on a new connection")
+    assert_eq(ka_hits("/stale-post3"), 2, "two requests reached the server")
+
+
+def test_binary_body_resent_intact_on_retry_after_503() raises:
+    var c = new_client()
+    c.max_retries = 2
+    c.retry_non_idempotent = True
+    c.retry_backoff_ms = 10
+    var data = List[UInt8]()
+    for i in range(5000):
+        data.append(UInt8(i % 256))
+    var r = c.post(BASE + "/flaky-echo?id=bin-retry&n=2", Span(data))
+    assert_eq(r.status_code, 200, "status after two 503s")
+    assert_true(r.headers.get("X-Attempts") == "3", "third attempt succeeded")
+    var got = r.content()
+    assert_eq(len(got), len(data), "echoed length")
+    for i in range(len(data)):
+        if got[i] != data[i]:
+            raise Error("byte " + String(i) + " differs after retries")
+
+
 def test_get_replayed_on_stale_pooled_connection() raises:
     var c = new_client()
     assert_eq(c.get(KA + "/stale-get").status_code, 200, "first GET")
@@ -557,6 +586,8 @@ def main() raises:
     run_test[test_retry_after_past_deadline_returns_response]("retry: Retry-After past deadline returns the response", passed, failed)
     run_test[test_post_not_replayed_on_stale_pooled_connection]("pool: POST not replayed on a stale connection", passed, failed)
     run_test[test_post_replayed_when_opted_in]("pool: POST replayed when opted in", passed, failed)
+    run_test[test_binary_post_replayed_when_opted_in]("binary POST replayed when opted in", passed, failed)
+    run_test[test_binary_body_resent_intact_on_retry_after_503]("binary body resent intact on retry after 503", passed, failed)
     run_test[test_get_replayed_on_stale_pooled_connection]("pool: GET replayed on a stale connection", passed, failed)
     run_test[test_connection_reset_retried]("retry: dropped connection retried", passed, failed)
     run_test[test_connection_reset_raises_without_retries]("retry: dropped connection raises when off", passed, failed)

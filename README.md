@@ -39,6 +39,27 @@ var doc = resp.json_doc()     # read-only JsonDoc: faster, compact, lookups are 
 print(doc.get_string("name"))
 ```
 
+## Binary bodies and any method
+
+```mojo
+var data = List[UInt8]()   # Parquet, an image, ...
+...
+var h = HttpHeaders()
+h.add("Content-Type", "application/octet-stream")
+
+# List[UInt8] or Span[UInt8]: no String wrapping, no copy on the way in
+var r = client.put("https://store.example.com/obj", data, h)
+
+# any method; follows redirects like get() (a 303 turns it into a GET)
+var r2 = client.request("PUT", "https://store.example.com/obj", Span(data), h)
+
+# the response body as bytes: a view of `body` (no copy), or an owned copy
+var bytes_view = r.content()
+var owned = r.to_bytes()
+```
+
+`default_content_type` ("application/json") still applies to a body sent without a `Content-Type`; set it to `""` for binary uploads that set their own.
+
 ## Deadlines, retries and limits
 
 All off or at their old values by default; set them on the client:
@@ -97,8 +118,8 @@ never sends one the client cannot decode.
 ## Testing
 
 ```bash
-pixi run test            # resilience (38) + framing (51) + client (136 HTTP, 4 HTTPS)
-pixi run test-h2-local   # HTTP/2 against a local server (29); needs the python `h2` package (pixi installs it)
+pixi run test            # resilience (40) + framing (51) + client (143 HTTP, 4 HTTPS)
+pixi run test-h2-local   # HTTP/2 against a local server (30); needs the python `h2` package (pixi installs it)
 pixi run test-hpack      # 128
 pixi run test-h2         # 70
 ```

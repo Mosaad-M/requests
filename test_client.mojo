@@ -1347,6 +1347,122 @@ def test_chunked_body_over_100mb_when_limit_raised() raises:
         raise Error("expected the 100 MB default to refuse a 101 MB chunked body")
 
 
+def _all_bytes() -> List[UInt8]:
+    """1024 bytes: 0..255 four times (NUL, 0x80-0xFF, not valid UTF-8)."""
+    var out = List[UInt8](capacity=1024)
+    for i in range(1024):
+        out.append(UInt8(i % 256))
+    return out^
+
+
+def _check_echoed(r: HttpResponse, sent: List[UInt8], method: String, label: String) raises:
+    assert_eq(r.status_code, 200, label + " status")
+    assert_str_eq(r.headers.get("X-Request-Method"), method, label + " method")
+    assert_str_eq(r.headers.get("X-Request-Content-Length"), String(len(sent)), label + " Content-Length is the byte count")
+    var got = r.content()
+    assert_eq(len(got), len(sent), label + " echoed length")
+    for i in range(len(sent)):
+        if got[i] != sent[i]:
+            raise Error(label + ": byte " + String(i) + " differs")
+
+
+def test_binary_body_round_trip_list_and_span() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var data = _all_bytes()
+    var h = HttpHeaders()
+    h.add("Content-Type", "application/octet-stream")
+    _check_echoed(client.post(BASE + "/echo-bytes", data, h), data, "POST", "post List")
+    _check_echoed(client.put(BASE + "/echo-bytes", Span(data), h), data, "PUT", "put Span")
+    _check_echoed(client.patch(BASE + "/echo-bytes", data, h), data, "PATCH", "patch List")
+    _check_echoed(client.delete(BASE + "/echo-bytes", Span(data), h), data, "DELETE", "delete Span")
+    var r = client.post(BASE + "/echo-bytes", data, h)
+    assert_str_eq(r.headers.get("X-Request-Content-Type"), "application/octet-stream", "caller Content-Type kept")
+
+
+def test_binary_body_default_content_type_can_be_turned_off() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var data = _all_bytes()
+    var r = client.post(BASE + "/echo-bytes", data)
+    assert_str_eq(r.headers.get("X-Request-Content-Type"), "application/json", "documented default")
+    client.default_content_type = ""
+    var r2 = client.post(BASE + "/echo-bytes", Span(data))
+    assert_str_eq(r2.headers.get("X-Request-Content-Type"), "", "no Content-Type with default_content_type empty")
+
+
+def test_string_body_still_sent_unchanged() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var r = client.post(BASE + "/echo-bytes", String("h\u00e9llo"))
+    assert_str_eq(r.body, "h\u00e9llo", "text body")
+    assert_str_eq(r.headers.get("X-Request-Content-Length"), "6", "UTF-8 byte count")
+
+
+def test_request_any_method_with_bytes() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var data = _all_bytes()
+    var h = HttpHeaders()
+    h.add("Content-Type", "application/octet-stream")
+    _check_echoed(client.request("PUT", BASE + "/echo-bytes", data, h), data, "PUT", "request List")
+    _check_echoed(client.request("POST", BASE + "/echo-bytes", Span(data), h), data, "POST", "request Span")
+    var r = client.request("POST", BASE + "/echo-bytes", String("text"), h)
+    assert_str_eq(r.body, "text", "request String")
+    assert_eq(client.request("GET", BASE + "/").status_code, 200, "request GET, no body")
+    assert_eq(client.request("OPTIONS", BASE + "/").status_code, 200, "request OPTIONS")
+    var raised = False
+    try:
+        _ = client.request("get x", BASE + "/")
+    except:
+        raised = True
+    assert_true(raised, "invalid method still rejected")
+
+
+def test_request_redirects_keep_or_drop_the_binary_body() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var data = _all_bytes()
+    var h = HttpHeaders()
+    h.add("Content-Type", "application/octet-stream")
+    var r307 = client.request("PUT", BASE + "/redirect-bytes/307", data, h)
+    _check_echoed(r307, data, "PUT", "307 keeps method and body")
+    assert_eq(len(r307.history), 1, "one hop")
+    var r303 = client.request("PUT", BASE + "/redirect-bytes/303", data, h)
+    assert_eq(r303.status_code, 200, "303 status")
+    assert_str_eq(r303.headers.get("X-Request-Method"), "GET", "303 becomes GET")
+    assert_eq(len(r303.content()), 0, "303 drops the body")
+    assert_str_eq(r303.headers.get("X-Request-Content-Type"), "", "303 drops Content-Type")
+    assert_str_eq(r303.headers.get("X-Request-Content-Length"), "", "303 sends no Content-Length")
+    # 301/302 rewrite only POST (as Python requests): PUT and DELETE keep method and body.
+    _check_echoed(client.request("PUT", BASE + "/redirect-bytes/302", data, h), data, "PUT", "302 keeps PUT")
+    var r302 = client.request("DELETE", BASE + "/redirect-bytes/302", data, h)
+    assert_str_eq(r302.headers.get("X-Request-Method"), "DELETE", "302 keeps DELETE")
+    var rpost = client.request("POST", BASE + "/redirect-bytes/302", data, h)
+    assert_str_eq(rpost.headers.get("X-Request-Method"), "GET", "302 turns POST into GET")
+    assert_eq(len(rpost.content()), 0, "302 POST drops the body")
+    assert_str_eq(rpost.headers.get("X-Request-Content-Type"), "", "302 POST drops Content-Type")
+
+
+def test_response_content_and_to_bytes() raises:
+    var client = HttpClient(allow_private_ips=True)
+    var r = client.get(BASE + "/bytes-all")
+    assert_eq(len(r.content()), 1024, "content length")
+    assert_eq(r.body.byte_length(), 1024, "body length agrees")
+    var c = r.content()
+    for i in range(1024):
+        if c[i] != UInt8(i % 256):
+            raise Error("content byte " + String(i) + " differs")
+    var copy = r.to_bytes()
+    assert_eq(len(copy), 1024, "to_bytes length")
+    copy[0] = 7
+    assert_eq(Int(r.content()[0]), 0, "to_bytes is a copy")
+
+
+def test_session_binary_body_and_request() raises:
+    var s = Session(allow_private_ips=True)
+    var data = _all_bytes()
+    var h = HttpHeaders()
+    h.add("Content-Type", "application/octet-stream")
+    _check_echoed(s.post(BASE + "/echo-bytes", data, h), data, "POST", "session post List")
+    _check_echoed(s.request("PUT", BASE + "/echo-bytes", Span(data), h), data, "PUT", "session request Span")
+
+
 def test_chunked_when_transfer_encoding_is_the_last_header() raises:
     """A chunked body ends at its last chunk even when Transfer-Encoding is
     the last header line and the server keeps the connection open."""
@@ -1838,6 +1954,13 @@ def main() raises:
     run_test[test_query_string]("query string", passed, failed)
     run_test[test_case_insensitive_headers]("case-insensitive headers", passed, failed)
     run_test[test_chunked_response]("chunked response", passed, failed)
+    run_test[test_binary_body_round_trip_list_and_span]("binary body round trip (List, Span)", passed, failed)
+    run_test[test_binary_body_default_content_type_can_be_turned_off]("binary body default Content-Type", passed, failed)
+    run_test[test_string_body_still_sent_unchanged]("String body unchanged", passed, failed)
+    run_test[test_request_any_method_with_bytes]("request(): any method, bytes", passed, failed)
+    run_test[test_request_redirects_keep_or_drop_the_binary_body]("request(): redirects keep or drop the binary body", passed, failed)
+    run_test[test_response_content_and_to_bytes]("response content() and to_bytes()", passed, failed)
+    run_test[test_session_binary_body_and_request]("session binary body and request()", passed, failed)
     run_test[test_chunked_decode_obeys_max_out]("chunked decode obeys max_out", passed, failed)
     run_test[test_chunked_body_over_100mb_when_limit_raised]("chunked body over 100 MB with raised limit", passed, failed)
     run_test[test_json_doc]("json_doc() read-only document", passed, failed)

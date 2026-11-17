@@ -119,6 +119,29 @@ def test_tls12_server_that_selects_h2_still_gets_h2() raises:
     assert_eq(c.connections_opened, 1, "one connection for two requests")
 
 
+def test_binary_body_round_trip_over_h2() raises:
+    var c = local_client()
+    # The first request on a connection goes out before the server's smaller
+    # stream window arrives (as in test_upload_respects_flow_control, which starts
+    # with 1 byte), so warm the connection up first.
+    assert_eq(c.get(NORMAL + "/n/1").status_code, 200, "warm-up")
+    var data = List[UInt8]()
+    for i in range(70000):  # past one 16384-byte frame and the 65535 default window
+        data.append(UInt8(i % 256))
+    var h = HttpHeaders()
+    h.add("Content-Type", "application/octet-stream")
+    var r = c.post(NORMAL + "/echo-bytes", data, h)
+    assert_eq(r.status_code, 200, "status")
+    assert_eq(c.connections_opened, 1, "one connection")
+    var got = r.content()
+    assert_eq(len(got), len(data), "echoed length")
+    for i in range(len(data)):
+        if got[i] != data[i]:
+            raise Error("byte " + String(i) + " differs")
+    var r2 = c.request("PUT", NORMAL + "/echo-bytes", Span(data), h)
+    assert_eq(len(r2.content()), len(data), "request() Span echoed length")
+
+
 def test_get_many_in_order() raises:
     var c = local_client()
     var urls = List[String]()
@@ -516,6 +539,7 @@ def main() raises:
 
     run_test[test_single_get_over_h2]("single GET over h2", passed, failed)
     run_test[test_tls12_server_that_selects_h2_still_gets_h2]("TLS 1.2 server selecting h2 gets h2", passed, failed)
+    run_test[test_binary_body_round_trip_over_h2]("binary body round trip over h2", passed, failed)
     run_test[test_get_many_in_order]("get_many: in order", passed, failed)
     run_test[test_get_many_is_concurrent]("get_many: requests overlap", passed, failed)
     run_test[test_get_many_beyond_concurrent_stream_limit]("get_many: beyond MAX_CONCURRENT_STREAMS", passed, failed)
