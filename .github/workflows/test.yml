@@ -90,7 +90,7 @@ jobs:
 
   fuzz:
     # Fixed seeds, short: every parser that sees server bytes (see fuzz/run.sh).
-    # A failure prints the command that reproduces it. fuzz-nightly.yml runs
+    # A failure prints the command that reproduces it. fuzz-weekly.yml runs
     # random seeds for longer.
     runs-on: ubuntu-22.04
     steps:
