@@ -380,6 +380,18 @@ struct HttpResponse(Copyable, Movable, Deinitable):
         if self.status_code >= 400:
             raise _err_http(self.status_code, self.status_text)
 
+    def content(self) -> Span[Byte, origin_of(self)]:
+        """The body as bytes: a view of `body`, no copy. Valid while the
+        response lives. Use this for binary payloads; `body` holds the same
+        bytes as a String."""
+        return rebind[Span[Byte, origin_of(self)]](self.body.as_bytes())
+
+    def to_bytes(self) -> List[UInt8]:
+        """The body as an owned List[UInt8] (one copy)."""
+        var out = List[UInt8](capacity=self.body.byte_length())
+        out.extend(self.body.as_bytes())
+        return out^
+
     def json(self) raises -> JsonValue:
         """Parse response body as JSON.
 
@@ -682,41 +694,41 @@ struct HttpClient(Movable):
     def get(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP GET request, following redirects."""
         var headers = HttpHeaders()
-        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
+        return self._follow_redirects("GET", url, _no_body(), headers, True, self.max_redirects)
 
     def get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP GET request with custom headers."""
-        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
+        return self._follow_redirects("GET", url, _no_body(), headers, True, self.max_redirects)
 
     def get(mut self, url: String, params: Dict[String, String]) raises -> HttpResponse:
         """Perform an HTTP GET request with URL query parameters."""
         var headers = HttpHeaders()
-        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, self.max_redirects)
+        return self._follow_redirects("GET", _append_params_to_url(url, params), _no_body(), headers, True, self.max_redirects)
 
     def get(
         mut self, url: String, headers: HttpHeaders, params: Dict[String, String]
     ) raises -> HttpResponse:
         """Perform an HTTP GET request with custom headers and URL query parameters."""
-        return self._follow_redirects("GET", _append_params_to_url(url, params), String(""), headers, True, self.max_redirects)
+        return self._follow_redirects("GET", _append_params_to_url(url, params), _no_body(), headers, True, self.max_redirects)
 
     def get(mut self, url: String, auth: BasicAuth) raises -> HttpResponse:
         """Perform an HTTP GET request with Basic Authentication."""
         var headers = HttpHeaders()
         headers.add("Authorization", auth.header())
-        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
+        return self._follow_redirects("GET", url, _no_body(), headers, True, self.max_redirects)
 
     def get(mut self, url: String, auth: BearerAuth) raises -> HttpResponse:
         """Perform an HTTP GET request with Bearer Token Authentication."""
         var headers = HttpHeaders()
         headers.add("Authorization", auth.header())
-        return self._follow_redirects("GET", url, String(""), headers, True, self.max_redirects)
+        return self._follow_redirects("GET", url, _no_body(), headers, True, self.max_redirects)
 
     def get(
         mut self, url: String, allow_redirects: Bool
     ) raises -> HttpResponse:
         """Perform an HTTP GET request, optionally not following redirects."""
         var headers = HttpHeaders()
-        return self._follow_redirects("GET", url, String(""), headers, allow_redirects, self.max_redirects)
+        return self._follow_redirects("GET", url, _no_body(), headers, allow_redirects, self.max_redirects)
 
     def cookie_count(self) -> Int:
         """Return the number of cookies stored in the cookie jar."""
@@ -771,7 +783,7 @@ struct HttpClient(Movable):
             if have[i]:
                 continue
             results[i] = self._follow_redirects(
-                "GET", urls[i], String(""), headers, True, self.max_redirects
+                "GET", urls[i], _no_body(), headers, True, self.max_redirects
             )
             have[i] = True
             if keys[i].byte_length() == 0:
@@ -788,7 +800,7 @@ struct HttpClient(Movable):
             else:
                 for k in range(len(group)):
                     results[group[k]] = self._follow_redirects(
-                        "GET", urls[group[k]], String(""), headers, True, self.max_redirects
+                        "GET", urls[group[k]], _no_body(), headers, True, self.max_redirects
                     )
             for k in range(len(group)):
                 have[group[k]] = True
@@ -812,7 +824,7 @@ struct HttpClient(Movable):
                 H2Request(
                     "GET",
                     u.request_path(),
-                    self._h2_build_headers(u, String(""), headers),
+                    self._h2_build_headers(u, _no_body(), headers),
                     List[UInt8](),
                 )
             )
@@ -840,7 +852,7 @@ struct HttpClient(Movable):
                     results[g] = r^
             if again:
                 results[g] = self._follow_redirects(
-                    "GET", urls[g], String(""), headers, True, self.max_redirects
+                    "GET", urls[g], _no_body(), headers, True, self.max_redirects
                 )
 
     def _h2_find_slot(mut self, key: String) -> Int:
@@ -971,13 +983,13 @@ struct HttpClient(Movable):
     def post(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform an HTTP POST request."""
         var headers = HttpHeaders()
-        return self._do_request("POST", url, body, headers)
+        return self._do_request("POST", url, body.as_bytes(), headers)
 
     def post(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP POST request with custom headers."""
-        return self._do_request("POST", url, body, headers)
+        return self._do_request("POST", url, body.as_bytes(), headers)
 
     def post_form(
         mut self, url: String, data: Dict[String, String]
@@ -986,7 +998,7 @@ struct HttpClient(Movable):
         var form_body = _encode_params(data)
         var headers = HttpHeaders()
         headers.add("Content-Type", "application/x-www-form-urlencoded")
-        return self._do_request("POST", url, form_body, headers)
+        return self._do_request("POST", url, form_body.as_bytes(), headers)
 
     def post_multipart(
         mut self, url: String, fields: Dict[String, String]
@@ -1013,72 +1025,201 @@ struct HttpClient(Movable):
         var body = String(unsafe_from_utf8=buf)
         var headers = HttpHeaders()
         headers.add("Content-Type", "multipart/form-data; boundary=" + boundary)
-        return self._do_request("POST", url, body, headers)
+        return self._do_request("POST", url, body.as_bytes(), headers)
 
     # === PUT ===
 
     def put(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform an HTTP PUT request."""
         var headers = HttpHeaders()
-        return self._do_request("PUT", url, body, headers)
+        return self._do_request("PUT", url, body.as_bytes(), headers)
 
     def put(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP PUT request with custom headers."""
-        return self._do_request("PUT", url, body, headers)
+        return self._do_request("PUT", url, body.as_bytes(), headers)
 
     # === DELETE ===
 
     def delete(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP DELETE request with no body."""
         var headers = HttpHeaders()
-        return self._do_request("DELETE", url, String(""), headers)
+        return self._do_request("DELETE", url, _no_body(), headers)
 
     def delete(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP DELETE request with custom headers."""
-        return self._do_request("DELETE", url, String(""), headers)
+        return self._do_request("DELETE", url, _no_body(), headers)
 
     def delete(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP DELETE request with body and custom headers."""
-        return self._do_request("DELETE", url, body, headers)
+        return self._do_request("DELETE", url, body.as_bytes(), headers)
 
     # === PATCH ===
 
     def patch(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform an HTTP PATCH request."""
         var headers = HttpHeaders()
-        return self._do_request("PATCH", url, body, headers)
+        return self._do_request("PATCH", url, body.as_bytes(), headers)
 
     def patch(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform an HTTP PATCH request with custom headers."""
-        return self._do_request("PATCH", url, body, headers)
+        return self._do_request("PATCH", url, body.as_bytes(), headers)
 
     # === HEAD ===
 
     def head(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP HEAD request. Returns headers with empty body."""
         var headers = HttpHeaders()
-        return self._do_request("HEAD", url, String(""), headers)
+        return self._do_request("HEAD", url, _no_body(), headers)
 
     def head(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP HEAD request with custom headers."""
-        return self._do_request("HEAD", url, String(""), headers)
+        return self._do_request("HEAD", url, _no_body(), headers)
 
     # === OPTIONS ===
 
     def options(mut self, url: String) raises -> HttpResponse:
         """Perform an HTTP OPTIONS request."""
         var headers = HttpHeaders()
-        return self._do_request("OPTIONS", url, String(""), headers)
+        return self._do_request("OPTIONS", url, _no_body(), headers)
 
     def options(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform an HTTP OPTIONS request with custom headers."""
-        return self._do_request("OPTIONS", url, String(""), headers)
+        return self._do_request("OPTIONS", url, _no_body(), headers)
+
+    # === Binary bodies and request() ===
+    # The String overloads above forward their bytes unchanged, so a body is
+    # never copied on the way in. Content-Type still defaults to
+    # default_content_type ("application/json"): a binary upload sets its own
+    # header, or sets default_content_type = "".
+
+    def post(mut self, url: String, body: List[UInt8]) raises -> HttpResponse:
+        """Perform an HTTP POST request with a binary body."""
+        var headers = HttpHeaders()
+        return self._do_request("POST", url, Span(body), headers)
+
+    def post(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP POST request with a binary body and custom headers."""
+        return self._do_request("POST", url, Span(body), headers)
+
+    def post(mut self, url: String, body: Span[UInt8, _]) raises -> HttpResponse:
+        """Perform an HTTP POST request with a binary body."""
+        var headers = HttpHeaders()
+        return self._do_request("POST", url, body, headers)
+
+    def post(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP POST request with a binary body and custom headers."""
+        return self._do_request("POST", url, body, headers)
+
+    def put(mut self, url: String, body: List[UInt8]) raises -> HttpResponse:
+        """Perform an HTTP PUT request with a binary body."""
+        var headers = HttpHeaders()
+        return self._do_request("PUT", url, Span(body), headers)
+
+    def put(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP PUT request with a binary body and custom headers."""
+        return self._do_request("PUT", url, Span(body), headers)
+
+    def put(mut self, url: String, body: Span[UInt8, _]) raises -> HttpResponse:
+        """Perform an HTTP PUT request with a binary body."""
+        var headers = HttpHeaders()
+        return self._do_request("PUT", url, body, headers)
+
+    def put(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP PUT request with a binary body and custom headers."""
+        return self._do_request("PUT", url, body, headers)
+
+    def patch(mut self, url: String, body: List[UInt8]) raises -> HttpResponse:
+        """Perform an HTTP PATCH request with a binary body."""
+        var headers = HttpHeaders()
+        return self._do_request("PATCH", url, Span(body), headers)
+
+    def patch(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP PATCH request with a binary body and custom headers."""
+        return self._do_request("PATCH", url, Span(body), headers)
+
+    def patch(mut self, url: String, body: Span[UInt8, _]) raises -> HttpResponse:
+        """Perform an HTTP PATCH request with a binary body."""
+        var headers = HttpHeaders()
+        return self._do_request("PATCH", url, body, headers)
+
+    def patch(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP PATCH request with a binary body and custom headers."""
+        return self._do_request("PATCH", url, body, headers)
+
+    def delete(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP DELETE request with a binary body and custom headers."""
+        return self._do_request("DELETE", url, Span(body), headers)
+
+    def delete(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform an HTTP DELETE request with a binary body and custom headers."""
+        return self._do_request("DELETE", url, body, headers)
+
+    def request(
+        mut self, method: String, url: String, headers: HttpHeaders = HttpHeaders()
+    ) raises -> HttpResponse:
+        """Perform a request with any method and no body.
+
+        Unlike post() and the other verbs, redirects are followed for every
+        method, up to max_redirects. As in Python requests: 303 turns any
+        method but HEAD into a GET, 301/302 turn only POST into a GET (the body
+        and the headers describing it are dropped); 307/308 keep method and
+        body. Credentials are dropped when the origin changes, the body is not:
+        set redirect_same_host_only, or send with the verb methods, if the body
+        must not follow a redirect to another host. The method must be A-Z.
+        """
+        return self._follow_redirects(method, url, _no_body(), headers, True, self.max_redirects)
+
+    def request(
+        mut self,
+        method: String,
+        url: String,
+        body: String,
+        headers: HttpHeaders = HttpHeaders(),
+    ) raises -> HttpResponse:
+        """Perform a request with any method, a body and headers (see request(method, url))."""
+        return self._follow_redirects(method, url, body.as_bytes(), headers, True, self.max_redirects)
+
+    def request(
+        mut self,
+        method: String,
+        url: String,
+        body: List[UInt8],
+        headers: HttpHeaders = HttpHeaders(),
+    ) raises -> HttpResponse:
+        """Perform a request with any method, a binary body and headers (see request(method, url))."""
+        return self._follow_redirects(method, url, Span(body), headers, True, self.max_redirects)
+
+    def request(
+        mut self,
+        method: String,
+        url: String,
+        body: Span[UInt8, _],
+        headers: HttpHeaders = HttpHeaders(),
+    ) raises -> HttpResponse:
+        """Perform a request with any method, a binary body and headers (see request(method, url))."""
+        return self._follow_redirects(method, url, body, headers, True, self.max_redirects)
 
     # === Internal ===
 
@@ -1114,7 +1255,7 @@ struct HttpClient(Movable):
         mut self,
         method: String,
         url: String,
-        body: String,
+        body: Span[Byte, _],
         headers: HttpHeaders,
         allow_redirects: Bool,
         max_redirects: Int,
@@ -1135,7 +1276,7 @@ struct HttpClient(Movable):
         mut self,
         method: String,
         url: String,
-        body: String,
+        body: Span[Byte, _],
         headers: HttpHeaders,
         allow_redirects: Bool,
         max_redirects: Int,
@@ -1184,10 +1325,15 @@ struct HttpClient(Movable):
             # Determine next method and body
             var next_method = current_method
             var next_body = current_body
-            if sc == 301 or sc == 302 or sc == 303:
-                # Convert to GET, drop body (python requests behaviour)
+            var drop_body = False
+            if (sc == 303 and current_method != "HEAD") or (
+                (sc == 301 or sc == 302) and current_method == "POST"
+            ):
+                # Convert to GET, drop body (python requests behaviour: 303
+                # rewrites every method but HEAD, 301/302 only POST)
                 next_method = "GET"
-                next_body = String("")
+                next_body = body[0:0]
+                drop_body = True
 
             var base_parsed = parse_url(current_url)
             var next_parsed = parse_url(next_url)
@@ -1196,6 +1342,8 @@ struct HttpClient(Movable):
                 resp.history = history^
                 return resp^
             var next_headers = _redirect_headers(current_headers, base_parsed, next_parsed)
+            if drop_body:
+                next_headers = _without_body_headers(next_headers^)
 
             history.append(resp^)
             current_method = next_method
@@ -1251,7 +1399,7 @@ struct HttpClient(Movable):
         mut self,
         method: String,
         url_str: String,
-        body: String,
+        body: Span[Byte, _],
         extra_headers: HttpHeaders,
     ) raises -> HttpResponse:
         """Perform one request: retries (max_retries) inside the total deadline."""
@@ -1279,7 +1427,7 @@ struct HttpClient(Movable):
         mut self,
         method: String,
         url_str: String,
-        body: String,
+        body: Span[Byte, _],
         extra_headers: HttpHeaders,
     ) raises -> HttpResponse:
         var may_retry = self.max_retries > 0 and (
@@ -1313,7 +1461,7 @@ struct HttpClient(Movable):
         mut self,
         method: String,
         url_str: String,
-        body: String,
+        body: Span[Byte, _],
         extra_headers: HttpHeaders,
     ) raises -> HttpResponse:
         """One attempt of a request (no retries)."""
@@ -1353,9 +1501,9 @@ struct HttpClient(Movable):
             _append_str(req_buf, "Connection: keep-alive\r\n")
 
         # Add Content-Length and Content-Type for non-empty bodies
-        if body.byte_length() > 0:
+        if len(body) > 0:
             _append_str(req_buf, "Content-Length: ")
-            _append_str(req_buf, String(body.byte_length()))
+            _append_str(req_buf, String(len(body)))
             _append_str(req_buf, "\r\n")
             if (
                 not extra_headers.has("Content-Type")
@@ -1385,8 +1533,8 @@ struct HttpClient(Movable):
         _append_str(req_buf, "\r\n")  # End of headers
 
         # Append body if present
-        if body.byte_length() > 0:
-            _append_str(req_buf, body)
+        if len(body) > 0:
+            req_buf.extend(body)
 
         # Step 3: Send request and receive response (TLS or plain TCP)
         var raw_bytes = List[UInt8]()
@@ -1745,7 +1893,7 @@ struct HttpClient(Movable):
         slot:          Int,
         method:        String,
         url:           Url,
-        body:          String,
+        body:          Span[Byte, _],
         extra_headers: HttpHeaders,
     ) raises -> HttpResponse:
         """Execute one HTTP/2 request on H2 pool slot `slot`.
@@ -1763,18 +1911,15 @@ struct HttpClient(Movable):
             slot:          H2 pool slot index (0–3).
             method:        HTTP method ("GET", "POST", etc.).
             url:           Parsed request URL.
-            body:          Request body string (empty for GET/HEAD).
+            body:          Request body bytes (empty for GET/HEAD).
             extra_headers: Caller-supplied extra headers.
 
         Raises:
             Error on GOAWAY, RST_STREAM, TLS failure, or decompression error.
         """
         var h2_hdrs = self._h2_build_headers(url, body, extra_headers)
-        var body_bytes = List[UInt8]()
-        if body.byte_length() > 0:
-            var bb = body.as_bytes()
-            for i in range(len(bb)):
-                body_bytes.append(bb[i])
+        var body_bytes = List[UInt8](capacity=len(body))
+        body_bytes.extend(body)
 
         # ── Call h2_do_request on the correct pool slot ───────────────────
         var result: Tuple[Int, List[HpackHeader], List[UInt8]]
@@ -1823,7 +1968,7 @@ struct HttpClient(Movable):
         return result^
 
     def _h2_build_headers(
-        mut self, url: Url, body: String, extra_headers: HttpHeaders
+        mut self, url: Url, body: Span[Byte, _], extra_headers: HttpHeaders
     ) -> List[HpackHeader]:
         """HPACK header list for one request: authority, user-agent, accept,
         accept-encoding, content-length/type, cookies, extra headers. The
@@ -1848,8 +1993,8 @@ struct HttpClient(Movable):
             h2_hdrs.append(HpackHeader("accept-encoding", self._accept_encoding()))
 
         # content-length and content-type for non-empty bodies
-        if body.byte_length() > 0:
-            h2_hdrs.append(HpackHeader("content-length", String(body.byte_length())))
+        if len(body) > 0:
+            h2_hdrs.append(HpackHeader("content-length", String(len(body))))
             if (
                 not extra_headers.has("Content-Type")
                 and self.default_content_type.byte_length() > 0
@@ -2604,6 +2749,11 @@ def _buf_to_string(buf: List[UInt8], header_end: Int) -> String:
     return String(unsafe_from_utf8=copy_buf)
 
 
+def _no_body() -> Span[Byte, ImmutAnyOrigin]:
+    """An empty request body (GET, HEAD, OPTIONS, bodiless DELETE)."""
+    return Span[Byte, ImmutAnyOrigin]()
+
+
 def _list_append(mut out: List[UInt8], src: List[UInt8]):
     """Append src bytes to out (one memcpy, not a loop of appends: this
     carries every response body)."""
@@ -3204,6 +3354,21 @@ def _redirect_headers(headers: HttpHeaders, base: Url, target: Url) -> HttpHeade
             _eq_ignore_case(k, "Authorization")
             or _eq_ignore_case(k, "Cookie")
             or _eq_ignore_case(k, "Proxy-Authorization")
+        ):
+            out.add(k, headers._values[i])
+    return out^
+
+
+def _without_body_headers(var headers: HttpHeaders) -> HttpHeaders:
+    """Headers of a hop that dropped the request body: the ones that described it go too."""
+    var out = HttpHeaders()
+    for i in range(len(headers)):
+        var k = headers._keys[i]
+        if not (
+            _eq_ignore_case(k, "Content-Type")
+            or _eq_ignore_case(k, "Content-Length")
+            or _eq_ignore_case(k, "Content-Encoding")
+            or _eq_ignore_case(k, "Transfer-Encoding")
         ):
             out.add(k, headers._values[i])
     return out^
@@ -3885,47 +4050,167 @@ struct Session(Movable):
         """Perform a GET request with session headers."""
         var empty = HttpHeaders()
         var h = self._merged(empty)
-        return self.client._do_request("GET", url, String(""), h)
+        return self.client._do_request("GET", url, _no_body(), h)
 
     def get(mut self, url: String, headers: HttpHeaders) raises -> HttpResponse:
         """Perform a GET request merging caller headers with session defaults."""
         var h = self._merged(headers)
-        return self.client._do_request("GET", url, String(""), h)
+        return self.client._do_request("GET", url, _no_body(), h)
 
     def post(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform a POST request with session headers."""
         var empty = HttpHeaders()
         var h = self._merged(empty)
-        return self.client._do_request("POST", url, body, h)
+        return self.client._do_request("POST", url, body.as_bytes(), h)
 
     def post(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform a POST request merging caller headers with session defaults."""
         var h = self._merged(headers)
-        return self.client._do_request("POST", url, body, h)
+        return self.client._do_request("POST", url, body.as_bytes(), h)
 
     def put(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform a PUT request with session headers."""
         var empty = HttpHeaders()
         var h = self._merged(empty)
-        return self.client._do_request("PUT", url, body, h)
+        return self.client._do_request("PUT", url, body.as_bytes(), h)
 
     def put(
         mut self, url: String, body: String, headers: HttpHeaders
     ) raises -> HttpResponse:
         """Perform a PUT request merging caller headers with session defaults."""
         var h = self._merged(headers)
-        return self.client._do_request("PUT", url, body, h)
+        return self.client._do_request("PUT", url, body.as_bytes(), h)
 
     def delete(mut self, url: String) raises -> HttpResponse:
         """Perform a DELETE request with session headers."""
         var empty = HttpHeaders()
         var h = self._merged(empty)
-        return self.client._do_request("DELETE", url, String(""), h)
+        return self.client._do_request("DELETE", url, _no_body(), h)
 
     def patch(mut self, url: String, body: String) raises -> HttpResponse:
         """Perform a PATCH request with session headers."""
         var empty = HttpHeaders()
         var h = self._merged(empty)
+        return self.client._do_request("PATCH", url, body.as_bytes(), h)
+
+    # === Binary bodies and request() ===
+
+    def post(mut self, url: String, body: List[UInt8]) raises -> HttpResponse:
+        """Perform a POST request with session headers and a binary body."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("POST", url, Span(body), h)
+
+    def post(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a POST request merging caller headers with session defaults, binary body."""
+        var h = self._merged(headers)
+        return self.client._do_request("POST", url, Span(body), h)
+
+    def post(mut self, url: String, body: Span[UInt8, _]) raises -> HttpResponse:
+        """Perform a POST request with session headers and a binary body."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("POST", url, body, h)
+
+    def post(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a POST request merging caller headers with session defaults, binary body."""
+        var h = self._merged(headers)
+        return self.client._do_request("POST", url, body, h)
+
+    def put(mut self, url: String, body: List[UInt8]) raises -> HttpResponse:
+        """Perform a PUT request with session headers and a binary body."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("PUT", url, Span(body), h)
+
+    def put(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a PUT request merging caller headers with session defaults, binary body."""
+        var h = self._merged(headers)
+        return self.client._do_request("PUT", url, Span(body), h)
+
+    def put(mut self, url: String, body: Span[UInt8, _]) raises -> HttpResponse:
+        """Perform a PUT request with session headers and a binary body."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("PUT", url, body, h)
+
+    def put(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a PUT request merging caller headers with session defaults, binary body."""
+        var h = self._merged(headers)
+        return self.client._do_request("PUT", url, body, h)
+
+    def patch(mut self, url: String, body: List[UInt8]) raises -> HttpResponse:
+        """Perform a PATCH request with session headers and a binary body."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
+        return self.client._do_request("PATCH", url, Span(body), h)
+
+    def patch(
+        mut self, url: String, body: List[UInt8], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a PATCH request merging caller headers with session defaults, binary body."""
+        var h = self._merged(headers)
+        return self.client._do_request("PATCH", url, Span(body), h)
+
+    def patch(mut self, url: String, body: Span[UInt8, _]) raises -> HttpResponse:
+        """Perform a PATCH request with session headers and a binary body."""
+        var empty = HttpHeaders()
+        var h = self._merged(empty)
         return self.client._do_request("PATCH", url, body, h)
+
+    def patch(
+        mut self, url: String, body: Span[UInt8, _], headers: HttpHeaders
+    ) raises -> HttpResponse:
+        """Perform a PATCH request merging caller headers with session defaults, binary body."""
+        var h = self._merged(headers)
+        return self.client._do_request("PATCH", url, body, h)
+
+    def request(
+        mut self, method: String, url: String, headers: HttpHeaders = HttpHeaders()
+    ) raises -> HttpResponse:
+        """Perform a request with any method, session headers and redirects (see HttpClient.request)."""
+        var h = self._merged(headers)
+        return self.client.request(method, url, h)
+
+    def request(
+        mut self,
+        method: String,
+        url: String,
+        body: String,
+        headers: HttpHeaders = HttpHeaders(),
+    ) raises -> HttpResponse:
+        """Perform a request with any method and a body (see HttpClient.request)."""
+        var h = self._merged(headers)
+        return self.client.request(method, url, body, h)
+
+    def request(
+        mut self,
+        method: String,
+        url: String,
+        body: List[UInt8],
+        headers: HttpHeaders = HttpHeaders(),
+    ) raises -> HttpResponse:
+        """Perform a request with any method and a binary body (see HttpClient.request)."""
+        var h = self._merged(headers)
+        return self.client.request(method, url, Span(body), h)
+
+    def request(
+        mut self,
+        method: String,
+        url: String,
+        body: Span[UInt8, _],
+        headers: HttpHeaders = HttpHeaders(),
+    ) raises -> HttpResponse:
+        """Perform a request with any method and a binary body (see HttpClient.request)."""
+        var h = self._merged(headers)
+        return self.client.request(method, url, body, h)

@@ -1,3 +1,15 @@
+# requests 1.12.0 — bytes bodies and a public request() (#37)
+
+Branch `bytes-bodies-1.12.0`. Additive: the request path takes `Span[Byte, _]`; new `List[UInt8]`/`Span[UInt8]` overloads on post/put/patch/delete; `request(method, url, [body], [headers])` on HttpClient and Session; `HttpResponse.content()` (view) and `to_bytes()` (copy).
+- [x] Tests (binary round trip over HTTP/1.1 and h2, request() redirects, response accessors, retry after 503 with a binary body). Mutation-checked: Content-Length off by one, 303/302 body and header handling, h2 body byte flipped
+- [x] `pixi run test`: resilience 40, framing 51, client 143 + 4 HTTPS; test-h2-local 30; hpack 130; h2 70; alpn 1; std-compat 1
+- [x] Perf vs v1.11.1: e2e small/medium/large/chunked within noise; bench_h2/profile within noise; 3 x 32 MiB upload+echo: String body 192 ms -> 76-103 ms (memcpy instead of a byte loop), Span body 75-80 ms with 147 MB peak RSS (String paths 148-215 MB before, 181 MB after)
+- [x] Reviewer subagent: request() rewrote every method to GET on 301/302/303 and kept Content-Type after a dropped body: fixed (Python requests rules), tests added; retry test now checks bytes across 503 retries
+- [x] fuzz 3 seeds x 100000 clean
+- Not run: PoCs (they need per-PoC servers; no parser change), public-internet h2 tests
+
+---
+
 # requests 1.11.1 — chunked bodies obey max_response_bytes (#28)
 
 Branch `fix/chunked-limit-1.11.1`. `_decode_chunked` (via `_parse_response`) compared the decoded size with the 100 MB constant, so a chunked body over 100 MB failed whatever `max_response_bytes` was. Both now take the client's limit.

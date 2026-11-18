@@ -41,8 +41,8 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (38) + test_framing (51) + test_client (136 HTTP + 4 HTTPS) against test_server.py
-pixi run test-h2-local     # 29 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
+pixi run test              # test_resilience (40) + test_framing (51) + test_client (143 HTTP + 4 HTTPS) against test_server.py
+pixi run test-h2-local     # 30 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
 pixi run test-alpn         # 1: HTTPS server answering no ALPN protocol gets HTTP/1.1 on one connection (test_alpn_fallback.mojo, alpn_test_server.py)
 pixi run test-hpack        # 130
 pixi run test-h2           # 70 (framing)
@@ -80,6 +80,8 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 `get_many(urls, headers)` multiplexes URLs on the same HTTPS host that speaks HTTP/2 (first URL of a host goes alone to open the connection). It does not need threads. Streams that fail or redirect are re-fetched with `get()`.
 
 ## Key Design Decisions
+
+- **Bodies are bytes inside, String at the edge**: the request path (`_follow_redirects` ... `_h2_do_request`) takes `Span[Byte, _]`. `post/put/patch/delete` take `String`, `List[UInt8]` or `Span[UInt8]` (a String passes `as_bytes()`, no copy); `HttpResponse.body` stays a String and `content()` (zero-copy view) / `to_bytes()` (owned copy) read it as bytes. `request(method, url, [body], [headers])` (client and Session) follows redirects for every method, unlike the verb methods: 303 turns any method but HEAD into GET, 301/302 turn only POST into GET (body, Content-Type/Length/Encoding and Transfer-Encoding dropped), 307/308 keep method and body (credentials are stripped on a new origin, the body is not). Binary uploads set their own Content-Type or `default_content_type = ""`.
 
 - **Pure Mojo stack**: TLS is the `tls` package (no OpenSSL); sockets are the `tcp` package. Compression libs are loaded with `dlopen` at runtime, so programs need no linker flags.
 - **UnsafePointer-based parsing** for HTTP/URL/JSON hot paths, materialising `String` once. `String(unsafe_from_utf8=list^)` (no NUL terminator).

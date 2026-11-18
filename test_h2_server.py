@@ -10,6 +10,7 @@ Three listeners on localhost:
 Paths (all ports; ?ms= delays the response without blocking other streams):
   /n/<i>             200, body "resp-<i>"
   /large?kb=N        200, body of N KB (obeys the client's flow control)
+  /echo-bytes        200, the request body unchanged
   /echo              200, JSON {"len": bytes received, "ok": body is the pattern a,b,..,z,a,..}
   /rst               RST_STREAM(INTERNAL_ERROR) on that stream only
   /hdrbig?kb=N       200, with an N KB response header (needs CONTINUATION)
@@ -149,6 +150,8 @@ class Connection:
             elif path == "/echo":
                 body = json.dumps({"len": st["body_len"], "ok": st["ok"]}).encode()
                 self.send_response(stream_id, 200, [("content-type", "application/json")], body)
+            elif path == "/echo-bytes":
+                self.send_response(stream_id, 200, [("content-type", "application/octet-stream")], bytes(st["data"]))
             elif path == "/rst":
                 self.conn.reset_stream(stream_id, error_code=2)
             elif path == "/hdrbig":
@@ -235,12 +238,15 @@ class Connection:
                 "path": url.path,
                 "query": {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()},
                 "body_len": 0,
+                "data": bytearray(),
                 "ok": True,
                 "ended": False,
             }
         elif isinstance(ev, h2.events.DataReceived):
             st = self.streams.get(ev.stream_id)
             if st is not None:
+                if st["path"] == "/echo-bytes":
+                    st["data"] += ev.data
                 for b in ev.data:
                     if b != 97 + st["body_len"] % 26:
                         st["ok"] = False
