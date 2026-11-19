@@ -76,7 +76,7 @@ def expect_rejected(path: String, needle: String) raises:
         msg = String(e)
     assert_true(raised, path + ": expected an error")
     assert_true(msg.startswith("ParseError"), path + ": expected ParseError, got '" + msg + "'")
-    assert_true(msg.find(needle) >= 0, path + ": error should mention '" + needle + "', got '" + msg + "'")
+    assert_true(needle in msg, path + ": error should mention '" + needle + "', got '" + msg + "'")
     next_request_works(c, path)
 
 
@@ -319,7 +319,7 @@ def test_default_limit_stops_a_200mb_body() raises:
         _ = c.get(FR + "/cl-huge")
     except e:
         msg = String(e)
-    assert_true(msg.find("size limit") >= 0, "default 100 MB limit: expected a size-limit error, got '" + msg + "'")
+    assert_true("size limit" in msg, "default 100 MB limit: expected a size-limit error, got '" + msg + "'")
 
 
 def test_raised_limit_lets_a_200mb_body_through_the_header_check() raises:
@@ -332,7 +332,7 @@ def test_raised_limit_lets_a_200mb_body_through_the_header_check() raises:
         msg = String(e)
     # The server sends 10 bytes, so this ends in a timeout, not a size error.
     assert_true(msg.byte_length() > 0, "expected the read to time out")
-    assert_true(msg.find("size limit") < 0, "raised limit must not trip a size limit, got '" + msg + "'")
+    assert_true("size limit" not in msg, "raised limit must not trip a size limit, got '" + msg + "'")
 
 
 # ── Chunk-size parsing on hostile input ─────────────────────────────────────
@@ -412,7 +412,7 @@ def test_get_stream_header_block_is_capped() raises:
         _ = c.get_stream(FR + "/huge-headers")
     except e:
         msg = String(e)
-    assert_true(msg.find("exceed size limit") >= 0, "expected a header size error, got '" + msg + "'")
+    assert_true("exceed size limit" in msg, "expected a header size error, got '" + msg + "'")
 
 
 def main() raises:

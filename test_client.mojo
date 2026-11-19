@@ -1772,9 +1772,9 @@ def test_cookie_host_case_and_trailing_dot() raises:
     var client = HttpClient(allow_private_ips=True)
     client._jar_store("Example.COM", "/", True, "a=1; Domain=EXAMPLE.com")
     client._jar_store("Www.Example.com", "/", True, "b=2")
-    if client._jar_cookie_for("WWW.example.COM", "/", True).find("a=1") < 0:
+    if "a=1" not in client._jar_cookie_for("WWW.example.COM", "/", True):
         raise Error("Domain cookie not replayed to a differently cased host")
-    if client._jar_cookie_for("Www.example.com", "/", True).find("b=2") < 0:
+    if "b=2" not in client._jar_cookie_for("Www.example.com", "/", True):
         raise Error("host-only cookie not replayed to a differently cased host")
     client._jar_store("a.co.uk.", "/", True, "sid=x; Domain=co.uk.")
     if _jar_has(client, "sid"):

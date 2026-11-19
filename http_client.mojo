@@ -2370,7 +2370,7 @@ struct HttpClient(Movable):
                         for hb in h.as_bytes():
                             if hb != 46 and (hb < 48 or hb > 57):
                                 h_is_ip = False
-                        if h_is_ip or h.find(":") >= 0:
+                        if h_is_ip or ":" in h:
                             if h != d:
                                 return
                         elif not _domain_matches(h, d, False):
