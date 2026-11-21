@@ -7,7 +7,7 @@ No OpenSSL, no libcurl — TLS is handled entirely by the [tls](https://github.c
 
 - `GET`, `POST`, `PUT`, `DELETE`, `PATCH`
 - HTTP and HTTPS (TLS 1.3 + TLS 1.2); HTTP/2 over TLS is negotiated with ALPN
-- `get_many`: several URLs on one HTTP/2 host in flight at once
+- `get_many` / `request_many`: several requests to one HTTP/2 host in flight at once (`request_many`: own method, headers and body each, e.g. a `Range` per request)
 - Total request deadline, opt-in retries with backoff, configurable size limits
 - Custom headers and request body
 - Connection pooling (keep-alive) for repeated requests to the same host
@@ -79,7 +79,21 @@ var urls = List[String]()
 urls.append("https://example.com/a")
 urls.append("https://example.com/b")
 var responses = client.get_many(urls)   # same order as urls
+
+# Each request with its own method, headers and body (a Range read per request):
+var reqs = List[Request]()
+for i in range(16):
+    var h = HttpHeaders()
+    h.add("Range", "bytes=" + String(i * 1048576) + "-" + String((i + 1) * 1048576 - 1))
+    reqs.append(Request("GET", "https://example.com/big.parquet", h))
+var parts = client.request_many(reqs)   # same order as reqs
 ```
+
+`request_many` multiplexes GET, HEAD and OPTIONS to one HTTPS host that
+speaks HTTP/2; every other method, plain HTTP and HTTP/1.1-only hosts are
+sent one by one in order, like `request()`. Redirects, retries and
+`total_timeout_secs` behave as in `request()`; the first failing request
+raises.
 
 `total_timeout_secs` caps every read to the time left (whole seconds). If a
 retry's wait would pass the deadline, the last response is returned.
@@ -118,8 +132,8 @@ never sends one the client cannot decode.
 ## Testing
 
 ```bash
-pixi run test            # resilience (40) + framing (51) + client (143 HTTP, 4 HTTPS)
-pixi run test-h2-local   # HTTP/2 against a local server (30); needs the python `h2` package (pixi installs it)
+pixi run test            # resilience (40) + framing (51) + client (144 HTTP, 4 HTTPS)
+pixi run test-h2-local   # HTTP/2 against a local server (39); needs the python `h2` package (pixi installs it)
 pixi run test-hpack      # 128
 pixi run test-h2         # 70
 ```

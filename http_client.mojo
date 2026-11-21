@@ -480,6 +480,34 @@ struct BearerAuth(Copyable, Movable):
 # ============================================================================
 
 
+struct Request(Copyable, Movable):
+    """One request for request_many: method, URL, headers and an optional body."""
+
+    var method: String
+    var url: String
+    var headers: HttpHeaders
+    var body: List[UInt8]
+
+    def __init__(
+        out self,
+        method: String,
+        url: String,
+        headers: HttpHeaders = HttpHeaders(),
+        body: List[UInt8] = List[UInt8](),
+    ):
+        self.method = method
+        self.url = url
+        self.headers = headers.copy()
+        self.body = body.copy()
+
+    def __init__(out self, method: String, url: String, headers: HttpHeaders, body: String):
+        self.method = method
+        self.url = url
+        self.headers = headers.copy()
+        self.body = List[UInt8]()
+        self.body.extend(body.as_bytes())
+
+
 struct HttpClient(Movable):
     """HTTP client for making HTTP requests (GET, POST, PUT, DELETE, PATCH).
 
@@ -741,40 +769,62 @@ struct HttpClient(Movable):
     ) raises -> List[HttpResponse]:
         """GET several URLs and return their responses in the same order.
 
-        URLs on the same HTTPS host that speaks HTTP/2 share one connection and
-        their requests are in flight together (up to the server's concurrent-
-        stream limit), so N requests cost about one round trip instead of N.
-        Everything else (plain HTTP, HTTP/1.1-only hosts) is fetched one by
-        one, exactly like get().
+        The same headers go to every URL; see request_many for what is
+        multiplexed and how failures and redirects are handled."""
+        var reqs = List[Request]()
+        for i in range(len(urls)):
+            reqs.append(Request("GET", urls[i], headers))
+        return self.request_many(reqs)
 
-        The first URL of each host goes out alone: it opens (or reuses) the
+    def request_many(mut self, reqs: List[Request]) raises -> List[HttpResponse]:
+        """Run several requests and return their responses in the same order.
+
+        Requests with a safe method (GET, HEAD, OPTIONS) to the same HTTPS host
+        that speaks HTTP/2 share one connection and are
+        in flight together (up to the server's concurrent-stream limit), so N
+        requests cost about one round trip instead of N. Each has its own
+        headers and body, so a batch can carry a different Range header per
+        request. Everything else (PUT, DELETE, POST, PATCH, plain HTTP, HTTP/1.1-only
+        hosts) is sent one by one, exactly like request(): a request that may
+        change something on the server is never re-sent by the batch.
+
+        The first request of each host goes out alone: it opens (or reuses) the
         connection and shows whether the host speaks HTTP/2; the rest follow
-        as a batch. A URL whose stream fails, or that answers with a redirect,
-        is fetched again with get(), so redirects, retries and the total
-        timeout behave as they do there. Raises on the first URL that still
-        fails; responses fetched before it are discarded.
+        as a batch. A request whose stream fails, or that answers with a
+        redirect, is sent again through the normal path, so redirects, retries
+        and the total timeout behave as they do there. Raises on the first
+        request that still fails; responses fetched before it are discarded.
         """
+        # Check everything up front: nothing is sent if any request is invalid.
+        for i in range(len(reqs)):
+            _validate_method(reqs[i].method)
+            for j in range(len(reqs[i].headers)):
+                _validate_header_key(reqs[i].headers._keys[j])
+                _validate_header_value(reqs[i].headers._values[j])
         self._deadline_begin()
         try:
-            var r = self._get_many(urls, headers)
+            var r = self._request_many(reqs)
             self._deadline_end()
             return r^
         except e:
             self._deadline_end()
             raise e^
 
-    def _get_many(
-        mut self, urls: List[String], headers: HttpHeaders
-    ) raises -> List[HttpResponse]:
-        var n = len(urls)
+    def _send_one(mut self, req: Request) raises -> HttpResponse:
+        return self._follow_redirects(
+            req.method, req.url, Span(req.body), req.headers, True, self.max_redirects
+        )
+
+    def _request_many(mut self, reqs: List[Request]) raises -> List[HttpResponse]:
+        var n = len(reqs)
         var results = List[HttpResponse]()
         var have = List[Bool]()
-        var keys = List[String]()  # "host:port" for HTTPS URLs, "" for the rest
+        var keys = List[String]()  # "host:port" for batchable requests, "" for the rest
         for i in range(n):
             results.append(HttpResponse())
             have.append(False)
-            var u = parse_url(urls[i])
-            if u.scheme == "https":
+            var u = parse_url(reqs[i].url)
+            if u.scheme == "https" and _is_safe_method(reqs[i].method):
                 keys.append(u.host + ":" + String(u.port))
             else:
                 keys.append(String(""))
@@ -782,9 +832,7 @@ struct HttpClient(Movable):
         for i in range(n):
             if have[i]:
                 continue
-            results[i] = self._follow_redirects(
-                "GET", urls[i], _no_body(), headers, True, self.max_redirects
-            )
+            results[i] = self._send_one(reqs[i])
             have[i] = True
             if keys[i].byte_length() == 0:
                 continue
@@ -796,43 +844,41 @@ struct HttpClient(Movable):
                 continue
             var slot = self._h2_find_slot(keys[i])
             if slot >= 0:
-                self._get_batch(slot, urls, group, headers, results)
+                self._request_batch(slot, reqs, group, results)
             else:
                 for k in range(len(group)):
-                    results[group[k]] = self._follow_redirects(
-                        "GET", urls[group[k]], _no_body(), headers, True, self.max_redirects
-                    )
+                    results[group[k]] = self._send_one(reqs[group[k]])
             for k in range(len(group)):
                 have[group[k]] = True
         return results^
 
-    def _get_batch(
+    def _request_batch(
         mut self,
         slot: Int,
-        urls: List[String],
+        reqs: List[Request],
         group: List[Int],
-        headers: HttpHeaders,
         mut results: List[HttpResponse],
     ) raises:
-        """Fetch urls[group[k]] together on H2 slot `slot` into results."""
-        var reqs = List[H2Request]()
+        """Send reqs[group[k]] together on H2 slot `slot` into results."""
+        var h2reqs = List[H2Request]()
         var parsed = List[Url]()
         for k in range(len(group)):
-            var u = parse_url(urls[group[k]])
+            ref r = reqs[group[k]]
+            var u = parse_url(r.url)
             _validate_path(u.request_path())
-            reqs.append(
+            h2reqs.append(
                 H2Request(
-                    "GET",
+                    r.method,
                     u.request_path(),
-                    self._h2_build_headers(u, _no_body(), headers),
-                    List[UInt8](),
+                    self._h2_build_headers(u, Span(r.body), r.headers),
+                    r.body.copy(),
                 )
             )
             parsed.append(u^)
         var res = List[H2Response]()
         var ok = True
         try:
-            res = self._h2_many_slot(slot, reqs)
+            res = self._h2_many_slot(slot, h2reqs)
         except e:
             self._h2_close_slot(slot)
             if _is_fatal_reuse_error(String(e)):
@@ -851,9 +897,7 @@ struct HttpClient(Movable):
                 if not again:
                     results[g] = r^
             if again:
-                results[g] = self._follow_redirects(
-                    "GET", urls[g], _no_body(), headers, True, self.max_redirects
-                )
+                results[g] = self._send_one(reqs[g])
 
     def _h2_find_slot(mut self, key: String) -> Int:
         """H2 pool slot holding a live connection for host:port `key`, or -1."""
@@ -3283,6 +3327,12 @@ def _is_idempotent(method: String) -> Bool:
     )
 
 
+def _is_safe_method(method: String) -> Bool:
+    """Methods request_many may multiplex: re-sending one after a failure or a
+    redirect cannot repeat a side effect."""
+    return method == "GET" or method == "HEAD" or method == "OPTIONS"
+
+
 def _is_retryable_status(status: Int) -> Bool:
     return status == 429 or status == 502 or status == 503 or status == 504
 
@@ -4214,3 +4264,12 @@ struct Session(Movable):
         """Perform a request with any method and a binary body (see HttpClient.request)."""
         var h = self._merged(headers)
         return self.client.request(method, url, body, h)
+
+    def request_many(mut self, reqs: List[Request]) raises -> List[HttpResponse]:
+        """Run several requests with session headers merged into each (see HttpClient.request_many)."""
+        var merged = List[Request]()
+        for i in range(len(reqs)):
+            merged.append(
+                Request(reqs[i].method, reqs[i].url, self._merged(reqs[i].headers), reqs[i].body)
+            )
+        return self.client.request_many(merged)

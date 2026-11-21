@@ -27,7 +27,7 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 | File | Purpose |
 |------|---------|
-| `http_client.mojo` | `HttpClient` (+ `Session`, `StreamResponse`, `HttpResponse`, `HttpHeaders`, auth helpers), HTTP/1.1 protocol, pools, cookies, redirects, deadline/retries, `get_many` |
+| `http_client.mojo` | `HttpClient` (+ `Session`, `StreamResponse`, `HttpResponse`, `HttpHeaders`, auth helpers), HTTP/1.1 protocol, pools, cookies, redirects, deadline/retries, `get_many` / `request_many` |
 | `h2.mojo` | HTTP/2 framing (RFC 9113) |
 | `h2_conn.mojo` | HTTP/2 connection: preface/SETTINGS, `h2_request`, `h2_request_many` (multiplexing), flow control |
 | `hpack.mojo` | HPACK (RFC 7541) encode/decode, `hpack_decode_block(..., max_list)` |
@@ -41,8 +41,8 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (40) + test_framing (51) + test_client (143 HTTP + 4 HTTPS) against test_server.py
-pixi run test-h2-local     # 30 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
+pixi run test              # test_resilience (40) + test_framing (51) + test_client (144 HTTP + 4 HTTPS) against test_server.py
+pixi run test-h2-local     # 39 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
 pixi run test-alpn         # 1: HTTPS server answering no ALPN protocol gets HTTP/1.1 on one connection (test_alpn_fallback.mojo, alpn_test_server.py)
 pixi run test-hpack        # 130
 pixi run test-h2           # 70 (framing)
@@ -77,7 +77,7 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 | `connections_opened` (read-only) | 0 | TCP connections this client has opened; compare with requests made to check keep-alive pooling |
 | `max_redirects`, `follow_redirects`, `redirect_same_host_only`, `pool_idle_timeout_secs`, `proxy_url` | | as before |
 
-`get_many(urls, headers)` multiplexes URLs on the same HTTPS host that speaks HTTP/2 (first URL of a host goes alone to open the connection). It does not need threads. Streams that fail or redirect are re-fetched with `get()`.
+`request_many(List[Request])` (`Request(method, url, headers, body)`; `get_many(urls, headers)` is a wrapper) multiplexes safe requests (GET, HEAD, OPTIONS) on the same HTTPS host that speaks HTTP/2 (first request of a host goes alone to open the connection); each has its own headers and body. Everything else (PUT, DELETE, POST, PATCH, plain HTTP, HTTP/1.1-only hosts) goes one by one through `request()`. It does not need threads. Streams that fail or redirect are sent again through `request()`; only safe methods are batched, so the batch never repeats a request with side effects. Headers of every request are validated before anything is sent. `Session.request_many` merges session headers into each request.
 
 ## Key Design Decisions
 
