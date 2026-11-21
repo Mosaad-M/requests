@@ -7,7 +7,7 @@
 #
 # ============================================================================
 
-from http_client import HttpClient, HttpHeaders, HttpResponse, BasicAuth, BearerAuth, StreamResponse, Session
+from http_client import HttpClient, HttpHeaders, HttpResponse, Request, BasicAuth, BearerAuth, StreamResponse, Session
 from json import JsonValue
 from std.os import setenv
 from codecs import Codecs, accept_encoding
@@ -1439,6 +1439,29 @@ def test_request_redirects_keep_or_drop_the_binary_body() raises:
     assert_str_eq(rpost.headers.get("X-Request-Content-Type"), "", "302 POST drops Content-Type")
 
 
+def test_request_many_over_plain_http() raises:
+    """Plain HTTP is never multiplexed: every request goes the normal way, in order, with its own method, body and redirects."""
+    var client = HttpClient(allow_private_ips=True)
+    var data = _all_bytes()
+    var h = HttpHeaders()
+    h.add("Content-Type", "application/octet-stream")
+    var reqs = List[Request]()
+    reqs.append(Request("PUT", BASE + "/echo-bytes", h, data))
+    reqs.append(Request("POST", BASE + "/echo-bytes", h, String("text")))
+    reqs.append(Request("GET", BASE + "/"))
+    reqs.append(Request("PUT", BASE + "/redirect-bytes/307", h, data))
+    reqs.append(Request("PUT", BASE + "/redirect-bytes/303", h, data))
+    var rs = client.request_many(reqs)
+    assert_eq(len(rs), 5, "count")
+    _check_echoed(rs[0], data, "PUT", "0")
+    assert_str_eq(rs[1].body, "text", "1")
+    assert_eq(rs[2].status_code, 200, "2")
+    _check_echoed(rs[3], data, "PUT", "307 keeps method and body")
+    assert_str_eq(rs[4].headers.get("X-Request-Method"), "GET", "303 becomes GET")
+    assert_eq(len(rs[4].content()), 0, "303 drops the body")
+    assert_eq(len(client.request_many(List[Request]())), 0, "empty list")
+
+
 def test_response_content_and_to_bytes() raises:
     var client = HttpClient(allow_private_ips=True)
     var r = client.get(BASE + "/bytes-all")
@@ -1959,6 +1982,7 @@ def main() raises:
     run_test[test_string_body_still_sent_unchanged]("String body unchanged", passed, failed)
     run_test[test_request_any_method_with_bytes]("request(): any method, bytes", passed, failed)
     run_test[test_request_redirects_keep_or_drop_the_binary_body]("request(): redirects keep or drop the binary body", passed, failed)
+    run_test[test_request_many_over_plain_http]("request_many: plain HTTP, own method/body/redirects, in order", passed, failed)
     run_test[test_response_content_and_to_bytes]("response content() and to_bytes()", passed, failed)
     run_test[test_session_binary_body_and_request]("session binary body and request()", passed, failed)
     run_test[test_chunked_decode_obeys_max_out]("chunked decode obeys max_out", passed, failed)

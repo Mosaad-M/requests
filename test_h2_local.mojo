@@ -21,7 +21,7 @@ from h2_conn import (
     h2_request,
     h2_request_many,
 )
-from http_client import HttpClient, HttpHeaders
+from http_client import HttpClient, HttpHeaders, Request, Session, BearerAuth
 
 comptime NORMAL = "https://localhost:18443"
 comptime LIMITED = "https://localhost:18444"
@@ -208,6 +208,141 @@ def test_get_many_two_hosts() raises:
     assert_str(rs[1].body, "resp-b", "b")
     assert_str(rs[2].body, "resp-c", "c")
     assert_str(rs[3].body, "resp-d", "d")
+
+
+def _tag(t: String) -> HttpHeaders:
+    var h = HttpHeaders()
+    h.add("X-Tag", t)
+    return h^
+
+
+def test_request_many_range_reads_on_one_connection() raises:
+    # 16 range GETs, each with its own Range header: every body is its own slice
+    # of the server's 0,1,..,250,0,.. pattern, all over one h2 connection.
+    var c = local_client()
+    var reqs = List[Request]()
+    for i in range(16):
+        var h = HttpHeaders()
+        var lo = i * 3000 + 7
+        h.add("Range", "bytes=" + String(lo) + "-" + String(lo + 999))
+        reqs.append(Request("GET", NORMAL + "/range", h))
+    var rs = c.request_many(reqs)
+    assert_eq(len(rs), 16, "count")
+    for i in range(16):
+        var lo = i * 3000 + 7
+        assert_eq(rs[i].status_code, 206, "status " + String(i))
+        var b = rs[i].to_bytes()
+        assert_eq(len(b), 1000, "length " + String(i))
+        for j in range(1000):
+            if Int(b[j]) != (lo + j) % 251:
+                raise Error("range " + String(i) + " byte " + String(j) + " is not its own slice")
+    assert_eq(c.connections_opened, 1, "one connection for 16 requests")
+
+
+def test_request_many_each_request_is_its_own() raises:
+    var c = local_client()
+    var body = List[UInt8]()
+    for i in range(5):
+        body.append(UInt8(i))
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
+    reqs.append(Request("PUT", NORMAL + "/whoami", _tag("b"), body))
+    reqs.append(Request("DELETE", NORMAL + "/whoami", _tag("c")))
+    reqs.append(Request("GET", NORMAL + "/whoami"))
+    reqs.append(Request("PUT", NORMAL + "/whoami", _tag("e"), String("xyz")))
+    var rs = c.request_many(reqs)
+    assert_str(rs[0].body, "GET:0:a:", "0")
+    assert_str(rs[1].body, "PUT:5:b:", "1")
+    assert_str(rs[2].body, "DELETE:0:c:", "2")
+    assert_str(rs[3].body, "GET:0::", "3")
+    assert_str(rs[4].body, "PUT:3:e:", "4")
+
+
+def test_request_many_post_goes_alone_in_order() raises:
+    # POST/PATCH are never multiplexed (a replayed POST could repeat a side
+    # effect), but they keep their place in the result list.
+    var c = local_client()
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
+    reqs.append(Request("POST", NORMAL + "/whoami", _tag("b"), String("12")))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("c")))
+    reqs.append(Request("PATCH", NORMAL + "/whoami", _tag("d"), String("1234")))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("e")))
+    var rs = c.request_many(reqs)
+    assert_str(rs[0].body, "GET:0:a:", "0")
+    assert_str(rs[1].body, "POST:2:b:", "1")
+    assert_str(rs[2].body, "GET:0:c:", "2")
+    assert_str(rs[3].body, "PATCH:4:d:", "3")
+    assert_str(rs[4].body, "GET:0:e:", "4")
+    # Four POSTs held 300 ms each take about 1200 ms one after another; multiplexed they would take 300-600.
+    var posts = List[Request]()
+    for i in range(4):
+        posts.append(Request("POST", NORMAL + "/whoami?ms=300", _tag(String(i)), String("x")))
+    var t0 = now_ms()
+    _ = c.request_many(posts)
+    var took = now_ms() - t0
+    assert_true(took >= 1100, "POSTs were sent one by one, took " + String(took) + " ms")
+
+
+def test_request_many_redirect_in_batch_follows_with_its_own_method() raises:
+    # A redirect answer goes back through the normal path: 307 keeps PUT and its
+    # body, 303 turns it into GET. The others in the batch are unaffected.
+    var c = local_client()
+    var body = List[UInt8]()
+    for i in range(5):
+        body.append(UInt8(i))
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
+    reqs.append(Request("PUT", NORMAL + "/r307", _tag("b"), body))
+    reqs.append(Request("PUT", NORMAL + "/r303", _tag("c"), body))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("d")))
+    var rs = c.request_many(reqs)
+    assert_str(rs[0].body, "GET:0:a:", "0")
+    assert_str(rs[1].body, "PUT:5:b:", "307 keeps method and body")
+    assert_str(rs[2].body, "GET:0:c:", "303 becomes GET without the body; same-origin custom headers stay")
+    assert_str(rs[3].body, "GET:0:d:", "3")
+
+
+def test_request_many_is_concurrent() raises:
+    # Each held 400 ms by the server. The first goes alone, the other four overlap.
+    var c = local_client()
+    var reqs = List[Request]()
+    for i in range(5):
+        reqs.append(Request("GET", NORMAL + "/whoami?ms=400", _tag(String(i))))
+    var t0 = now_ms()
+    var rs = c.request_many(reqs)
+    var took = now_ms() - t0
+    for i in range(5):
+        assert_str(rs[i].body, "GET:0:" + String(i) + ":", "body " + String(i))
+    assert_true(took < 1500, "requests overlapped, took " + String(took) + " ms")
+
+
+def test_request_many_invalid_method_sends_nothing() raises:
+    var c = local_client()
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/whoami"))
+    reqs.append(Request("get", NORMAL + "/whoami"))
+    var raised = False
+    try:
+        _ = c.request_many(reqs)
+    except e:
+        raised = String(e).startswith("ValidationError")
+    assert_true(raised, "lowercase method rejected")
+    assert_eq(c.connections_opened, 0, "nothing was sent")
+
+
+def test_session_request_many_merges_session_headers() raises:
+    var s = Session(allow_private_ips=True)
+    s.client._ca_bundle = test_ca()
+    s.client._ca_loaded = True
+    s.set_auth(BearerAuth("tok"))
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("b")))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("c")))
+    var rs = s.request_many(reqs)
+    for i in range(3):
+        assert_str(rs[i].body, "GET:0:" + String(chr(97 + i)) + ":Bearer tok", "session auth on request " + String(i))
 
 
 def test_large_download_with_flow_control() raises:
@@ -545,6 +680,13 @@ def main() raises:
     run_test[test_get_many_beyond_concurrent_stream_limit]("get_many: beyond MAX_CONCURRENT_STREAMS", passed, failed)
     run_test[test_get_many_mixed_statuses]("get_many: mixed statuses", passed, failed)
     run_test[test_get_many_two_hosts]("get_many: two hosts interleaved", passed, failed)
+    run_test[test_request_many_range_reads_on_one_connection]("request_many: 16 range reads, one connection", passed, failed)
+    run_test[test_request_many_each_request_is_its_own]("request_many: own method, headers and body", passed, failed)
+    run_test[test_request_many_post_goes_alone_in_order]("request_many: POST/PATCH not multiplexed, order kept", passed, failed)
+    run_test[test_request_many_redirect_in_batch_follows_with_its_own_method]("request_many: redirect in a batch keeps or drops method and body", passed, failed)
+    run_test[test_request_many_is_concurrent]("request_many: requests overlap", passed, failed)
+    run_test[test_request_many_invalid_method_sends_nothing]("request_many: invalid method sends nothing", passed, failed)
+    run_test[test_session_request_many_merges_session_headers]("Session.request_many merges session headers", passed, failed)
     run_test[test_large_download_with_flow_control]("600 KB download", passed, failed)
     run_test[test_upload_respects_flow_control]("uploads 1 B .. 200 KB respect flow control", passed, failed)
     run_test[test_interim_response_skipped]("1xx interim response skipped", passed, failed)

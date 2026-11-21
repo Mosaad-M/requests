@@ -11,6 +11,9 @@ Paths (all ports; ?ms= delays the response without blocking other streams):
   /n/<i>             200, body "resp-<i>"
   /large?kb=N        200, body of N KB (obeys the client's flow control)
   /echo-bytes        200, the request body unchanged
+  /range             206, RANGE_BODY[a..b] for the Range header (bytes=a-b)
+  /r307, /r303       redirect to /whoami with that status
+  /whoami            200, "METHOD:body_len:X-Tag:Authorization"
   /echo              200, JSON {"len": bytes received, "ok": body is the pattern a,b,..,z,a,..}
   /rst               RST_STREAM(INTERNAL_ERROR) on that stream only
   /hdrbig?kb=N       200, with an N KB response header (needs CONTINUATION)
@@ -75,6 +78,8 @@ def ensure_certs():
             if os.path.exists(f):
                 os.remove(f)
 
+
+RANGE_BODY = bytes(i % 251 for i in range(65536))
 
 class Connection:
     def __init__(self, sock, mode):
@@ -152,6 +157,22 @@ class Connection:
                 self.send_response(stream_id, 200, [("content-type", "application/json")], body)
             elif path == "/echo-bytes":
                 self.send_response(stream_id, 200, [("content-type", "application/octet-stream")], bytes(st["data"]))
+            elif path == "/range":
+                # RANGE_BODY[a..b] for "Range: bytes=a-b", 206 with Content-Range
+                lo, hi = st["headers"]["range"][len("bytes="):].split("-")
+                lo, hi = int(lo), int(hi)
+                self.send_response(
+                    stream_id, 206, [("content-range", "bytes %d-%d/%d" % (lo, hi, len(RANGE_BODY)))],
+                    RANGE_BODY[lo:hi + 1],
+                )
+            elif path == "/whoami":
+                # method, request body length, X-Tag and Authorization, to check each request in a batch is its own
+                self.send_response(
+                    stream_id, 200, [],
+                    ("%s:%d:%s:%s" % (st["method"], st["body_len"], st["headers"].get("x-tag", ""), st["headers"].get("authorization", ""))).encode(),
+                )
+            elif path in ("/r307", "/r303"):
+                self.send_response(stream_id, int(path[2:]), [("location", "/whoami")], b"")
             elif path == "/rst":
                 self.conn.reset_stream(stream_id, error_code=2)
             elif path == "/hdrbig":
@@ -235,6 +256,7 @@ class Connection:
                 return
             self.streams[ev.stream_id] = {
                 "method": headers[":method"],
+                "headers": headers,
                 "path": url.path,
                 "query": {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()},
                 "body_len": 0,
