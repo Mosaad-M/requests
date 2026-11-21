@@ -13,15 +13,25 @@
 #           brew install brotli
 # ============================================================================
 
-from std.ffi import OwnedDLHandle
+from std.ffi import OwnedDLHandle, DEFAULT_RTLD
 from std.sys.info import CompilationTarget
+
+
+def _dl_flags() -> Int:
+    # RTLD_DEEPBIND (Linux): the library resolves its own symbols first. The
+    # Mojo 1.3 nightly's libLLVMSupport.so exports its own zlib, and without
+    # this libz's inflateInit2_ ends up calling LLVM's inflateReset2 (-2).
+    comptime if CompilationTarget.is_linux():
+        return DEFAULT_RTLD | 8
+    else:
+        return DEFAULT_RTLD
 
 
 def _open_first(names: List[String], symbol: String) -> Optional[OwnedDLHandle]:
     """The first library in `names` that loads and exports `symbol`."""
     for name in names:
         try:
-            var h = OwnedDLHandle(name)
+            var h = OwnedDLHandle(name, _dl_flags())
             if h.check_symbol(symbol):
                 return h^
         except:
