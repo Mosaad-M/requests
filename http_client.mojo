@@ -779,13 +779,14 @@ struct HttpClient(Movable):
     def request_many(mut self, reqs: List[Request]) raises -> List[HttpResponse]:
         """Run several requests and return their responses in the same order.
 
-        Requests with an idempotent method (GET, HEAD, OPTIONS, PUT, DELETE)
-        to the same HTTPS host that speaks HTTP/2 share one connection and are
+        Requests with a safe method (GET, HEAD, OPTIONS) to the same HTTPS host
+        that speaks HTTP/2 share one connection and are
         in flight together (up to the server's concurrent-stream limit), so N
         requests cost about one round trip instead of N. Each has its own
         headers and body, so a batch can carry a different Range header per
-        request. Everything else (POST and PATCH, plain HTTP, HTTP/1.1-only
-        hosts) is sent one by one, exactly like request().
+        request. Everything else (PUT, DELETE, POST, PATCH, plain HTTP, HTTP/1.1-only
+        hosts) is sent one by one, exactly like request(): a request that may
+        change something on the server is never re-sent by the batch.
 
         The first request of each host goes out alone: it opens (or reuses) the
         connection and shows whether the host speaks HTTP/2; the rest follow
@@ -794,8 +795,12 @@ struct HttpClient(Movable):
         and the total timeout behave as they do there. Raises on the first
         request that still fails; responses fetched before it are discarded.
         """
+        # Check everything up front: nothing is sent if any request is invalid.
         for i in range(len(reqs)):
             _validate_method(reqs[i].method)
+            for j in range(len(reqs[i].headers)):
+                _validate_header_key(reqs[i].headers._keys[j])
+                _validate_header_value(reqs[i].headers._values[j])
         self._deadline_begin()
         try:
             var r = self._request_many(reqs)
@@ -819,7 +824,7 @@ struct HttpClient(Movable):
             results.append(HttpResponse())
             have.append(False)
             var u = parse_url(reqs[i].url)
-            if u.scheme == "https" and _is_idempotent(reqs[i].method):
+            if u.scheme == "https" and _is_safe_method(reqs[i].method):
                 keys.append(u.host + ":" + String(u.port))
             else:
                 keys.append(String(""))
@@ -3320,6 +3325,12 @@ def _is_idempotent(method: String) -> Bool:
         method == "GET" or method == "HEAD" or method == "OPTIONS"
         or method == "PUT" or method == "DELETE" or method == "TRACE"
     )
+
+
+def _is_safe_method(method: String) -> Bool:
+    """Methods request_many may multiplex: re-sending one after a failure or a
+    redirect cannot repeat a side effect."""
+    return method == "GET" or method == "HEAD" or method == "OPTIONS"
 
 
 def _is_retryable_status(status: Int) -> Bool:

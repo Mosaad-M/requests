@@ -89,9 +89,9 @@ for i in range(16):
 var parts = client.request_many(reqs)   # same order as reqs
 ```
 
-`request_many` multiplexes GET, HEAD, OPTIONS, PUT and DELETE to one HTTPS
-host that speaks HTTP/2; POST and PATCH, plain HTTP and HTTP/1.1-only hosts
-are sent one by one in order, like `request()`. Redirects, retries and
+`request_many` multiplexes GET, HEAD and OPTIONS to one HTTPS host that
+speaks HTTP/2; every other method, plain HTTP and HTTP/1.1-only hosts are
+sent one by one in order, like `request()`. Redirects, retries and
 `total_timeout_secs` behave as in `request()`; the first failing request
 raises.
 
@@ -133,7 +133,7 @@ never sends one the client cannot decode.
 
 ```bash
 pixi run test            # resilience (40) + framing (51) + client (144 HTTP, 4 HTTPS)
-pixi run test-h2-local   # HTTP/2 against a local server (37); needs the python `h2` package (pixi installs it)
+pixi run test-h2-local   # HTTP/2 against a local server (39); needs the python `h2` package (pixi installs it)
 pixi run test-hpack      # 128
 pixi run test-h2         # 70
 ```

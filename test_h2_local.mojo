@@ -251,6 +251,7 @@ def test_request_many_each_request_is_its_own() raises:
     reqs.append(Request("GET", NORMAL + "/whoami"))
     reqs.append(Request("PUT", NORMAL + "/whoami", _tag("e"), String("xyz")))
     var rs = c.request_many(reqs)
+    assert_eq(c.connections_opened, 1, "all of it on one connection")
     assert_str(rs[0].body, "GET:0:a:", "0")
     assert_str(rs[1].body, "PUT:5:b:", "1")
     assert_str(rs[2].body, "DELETE:0:c:", "2")
@@ -258,9 +259,9 @@ def test_request_many_each_request_is_its_own() raises:
     assert_str(rs[4].body, "PUT:3:e:", "4")
 
 
-def test_request_many_post_goes_alone_in_order() raises:
-    # POST/PATCH are never multiplexed (a replayed POST could repeat a side
-    # effect), but they keep their place in the result list.
+def test_request_many_unsafe_methods_go_alone_in_order() raises:
+    # POST/PATCH/PUT/DELETE are never multiplexed (a re-sent one could repeat a
+    # side effect), but they keep their place in the result list.
     var c = local_client()
     var reqs = List[Request]()
     reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
@@ -274,33 +275,78 @@ def test_request_many_post_goes_alone_in_order() raises:
     assert_str(rs[2].body, "GET:0:c:", "2")
     assert_str(rs[3].body, "PATCH:4:d:", "3")
     assert_str(rs[4].body, "GET:0:e:", "4")
-    # Four POSTs held 300 ms each take about 1200 ms one after another; multiplexed they would take 300-600.
+    # Six held 300 ms each take about 1800 ms one after another; with PUT/DELETE multiplexed it would be about 1200.
     var posts = List[Request]()
-    for i in range(4):
-        posts.append(Request("POST", NORMAL + "/whoami?ms=300", _tag(String(i)), String("x")))
+    posts.append(Request("POST", NORMAL + "/whoami?ms=300", _tag("0"), String("x")))
+    posts.append(Request("PUT", NORMAL + "/whoami?ms=300", _tag("1"), String("x")))
+    posts.append(Request("PUT", NORMAL + "/whoami?ms=300", _tag("2"), String("x")))
+    posts.append(Request("DELETE", NORMAL + "/whoami?ms=300", _tag("3")))
+    posts.append(Request("DELETE", NORMAL + "/whoami?ms=300", _tag("4")))
+    posts.append(Request("PATCH", NORMAL + "/whoami?ms=300", _tag("5"), String("x")))
     var t0 = now_ms()
     _ = c.request_many(posts)
     var took = now_ms() - t0
-    assert_true(took >= 1100, "POSTs were sent one by one, took " + String(took) + " ms")
+    assert_true(took >= 1600, "unsafe methods were sent one by one, took " + String(took) + " ms")
 
 
-def test_request_many_redirect_in_batch_follows_with_its_own_method() raises:
-    # A redirect answer goes back through the normal path: 307 keeps PUT and its
-    # body, 303 turns it into GET. The others in the batch are unaffected.
+def test_request_many_redirect_in_batch_is_followed() raises:
+    # A redirect answer goes back through the normal path; the others in the batch are unaffected.
     var c = local_client()
-    var body = List[UInt8]()
-    for i in range(5):
-        body.append(UInt8(i))
     var reqs = List[Request]()
     reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
-    reqs.append(Request("PUT", NORMAL + "/r307", _tag("b"), body))
-    reqs.append(Request("PUT", NORMAL + "/r303", _tag("c"), body))
+    reqs.append(Request("GET", NORMAL + "/r307", _tag("b")))
+    reqs.append(Request("GET", NORMAL + "/r303", _tag("c")))
     reqs.append(Request("GET", NORMAL + "/whoami", _tag("d")))
     var rs = c.request_many(reqs)
     assert_str(rs[0].body, "GET:0:a:", "0")
-    assert_str(rs[1].body, "PUT:5:b:", "307 keeps method and body")
-    assert_str(rs[2].body, "GET:0:c:", "303 becomes GET without the body; same-origin custom headers stay")
+    assert_str(rs[1].body, "GET:0:b:", "307 followed")
+    assert_eq(len(rs[1].history), 1, "307 took one hop")
+    assert_str(rs[2].body, "GET:0:c:", "303 followed")
     assert_str(rs[3].body, "GET:0:d:", "3")
+
+
+def test_request_many_head_and_duplicates() raises:
+    var c = local_client()
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/n/1"))
+    reqs.append(Request("HEAD", NORMAL + "/n/1"))
+    reqs.append(Request("GET", NORMAL + "/n/1"))
+    reqs.append(Request("OPTIONS", NORMAL + "/n/1"))
+    var rs = c.request_many(reqs)
+    assert_str(rs[0].body, "resp-1", "GET")
+    assert_eq(rs[1].status_code, 200, "HEAD status")
+    assert_str(rs[2].body, "resp-1", "duplicate URL")
+    assert_eq(rs[3].status_code, 200, "OPTIONS status")
+    assert_eq(c.connections_opened, 1, "one connection")
+
+
+def test_request_many_bad_header_sends_nothing() raises:
+    # A header with CR/LF on a later request must be refused before anything goes out.
+    var c = local_client()
+    var reqs = List[Request]()
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("a")))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("b")))
+    reqs.append(Request("GET", NORMAL + "/whoami", _tag("v\r\nX-Evil: 1")))
+    var raised = False
+    try:
+        _ = c.request_many(reqs)
+    except e:
+        raised = String(e).startswith("ValidationError")
+    assert_true(raised, "CRLF in a header value rejected")
+    assert_eq(c.connections_opened, 0, "nothing was sent")
+    var h = HttpHeaders()
+    h.add("X A", "v")
+    h.add("Bad:Key", "v")
+    var reqs2 = List[Request]()
+    reqs2.append(Request("GET", NORMAL + "/whoami"))
+    reqs2.append(Request("GET", NORMAL + "/whoami", h))
+    raised = False
+    try:
+        _ = c.request_many(reqs2)
+    except e:
+        raised = String(e).startswith("ValidationError")
+    assert_true(raised, "colon in a header key rejected")
+    assert_eq(c.connections_opened, 0, "still nothing sent")
 
 
 def test_request_many_is_concurrent() raises:
@@ -682,8 +728,10 @@ def main() raises:
     run_test[test_get_many_two_hosts]("get_many: two hosts interleaved", passed, failed)
     run_test[test_request_many_range_reads_on_one_connection]("request_many: 16 range reads, one connection", passed, failed)
     run_test[test_request_many_each_request_is_its_own]("request_many: own method, headers and body", passed, failed)
-    run_test[test_request_many_post_goes_alone_in_order]("request_many: POST/PATCH not multiplexed, order kept", passed, failed)
-    run_test[test_request_many_redirect_in_batch_follows_with_its_own_method]("request_many: redirect in a batch keeps or drops method and body", passed, failed)
+    run_test[test_request_many_unsafe_methods_go_alone_in_order]("request_many: unsafe methods not multiplexed, order kept", passed, failed)
+    run_test[test_request_many_redirect_in_batch_is_followed]("request_many: redirect in a batch is followed", passed, failed)
+    run_test[test_request_many_head_and_duplicates]("request_many: HEAD, OPTIONS and duplicate URLs", passed, failed)
+    run_test[test_request_many_bad_header_sends_nothing]("request_many: bad header on a later request sends nothing", passed, failed)
     run_test[test_request_many_is_concurrent]("request_many: requests overlap", passed, failed)
     run_test[test_request_many_invalid_method_sends_nothing]("request_many: invalid method sends nothing", passed, failed)
     run_test[test_session_request_many_merges_session_headers]("Session.request_many merges session headers", passed, failed)

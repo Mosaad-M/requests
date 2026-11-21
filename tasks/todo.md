@@ -1,8 +1,10 @@
 # requests 1.13.0 — request_many (#35, h2 route)
 
-Branch `request-many-1.13.0`. Additive: `Request(method, url, headers, body)`, `HttpClient.request_many` and `Session.request_many`; `get_many` is now a wrapper over it (behaviour unchanged). Idempotent requests to one h2 host are multiplexed, each with its own headers and body (a `Range` per request); POST/PATCH, plain HTTP and HTTP/1.1 hosts go one by one through `request()`.
-- [x] Tests: h2-local 37 (16 range reads on one connection, own method/headers/body, POST not multiplexed, redirect in a batch, concurrency, invalid method sends nothing, Session merge), client 144 (plain-HTTP path). Mutation-checked: first request's headers for all, POST batched, redirect fallback ignoring the method
-- [ ] Full test suites, nightly build, perf profile vs v1.12.0 (+ 16 x 1 MiB bench), security profile, reviewer pass
+Branch `request-many-1.13.0`. Additive: `Request(method, url, headers, body)`, `HttpClient.request_many` and `Session.request_many`; `get_many` is now a wrapper over it (behaviour unchanged). Safe requests (GET, HEAD, OPTIONS) to one h2 host are multiplexed, each with its own headers (a `Range` per request); every other method, plain HTTP and HTTP/1.1 hosts go one by one through `request()`. Reviewer found: batched requests skipped header validation (now validated up front for all) and PUT/DELETE could be re-sent after a redirect or stream error (batching restricted to safe methods).
+- [x] Tests: h2-local 39 (16 range reads on one connection, own method/headers/body, POST not multiplexed, redirect in a batch, concurrency, invalid method sends nothing, Session merge), client 144 (plain-HTTP path). Mutation-checked: first request's headers for all, POST batched, redirect fallback ignoring the method
+- [x] Full suites green (resilience 40, framing 51, client 144+4, h2-local 39, hpack 130, h2 70, std-compat 1; alpn passed before the review fixes); perf vs v1.12.0 within noise (bench_h2, bench_profile; Request build 106 ns); 16 x 1 MiB range GETs on a node h2 server with 10 ms first-byte delay: sequential ~250 ms, request_many ~115-125 ms; fuzz 3 x 100000 clean; reviewer pass: fixed header validation for batched requests and PUT/DELETE re-send (batching limited to GET/HEAD/OPTIONS), mutation-checked
+- Not run: PoCs (no parser change), public-internet h2 tests, local nightly build (CI nightly dispatch after the push). Known: python test server is superlinear with many large streams (use a real h2 server to benchmark); multiplexed receive path ~240 MB/s vs ~400 MB/s single stream at zero latency (profile later)
+- [ ] Nightly dispatch on the PR branch
 - [ ] PR, CI, merge, tag v1.13.0, index, install check, #35 comment (held for the user)
 
 ---
