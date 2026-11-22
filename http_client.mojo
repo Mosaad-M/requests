@@ -17,7 +17,7 @@
 #
 # ============================================================================
 
-from tcp import TcpSocket, _set_socket_timeouts
+from tcp import TcpSocket, set_socket_timeout_ms
 from tls.socket import TlsSocket, load_system_ca_bundle
 from h2_conn import (
     Http2Conn, H2Request, H2Response, h2_preface_and_settings_exchange,
@@ -124,7 +124,7 @@ def _hex(data: List[UInt8]) -> String:
 #   ValidationError  — bad input (header keys/values, method, port, host)
 #   ParseError       — malformed HTTP response
 #   ChunkedBodyError — chunked encoding protocol violation
-#   TimeoutError     — total_timeout_secs deadline exceeded
+#   TimeoutError     — total_timeout_secs / total_timeout_ms deadline exceeded
 
 
 comptime ERR_HTTP = "HTTPError"
@@ -187,60 +187,64 @@ struct _Limits(Copyable, Movable):
 
     deadline_ns is a perf_counter_ns() instant (0 = no deadline). It is checked
     between reads; on TLS the socket timeout is also shrunk to the time left
-    (whole seconds), so a stalled peer cannot outlast the deadline by more than
-    a second. Plain TCP has no timeout setter after connect, so a stall there
-    overshoots by at most timeout_secs.
+    (milliseconds), so a stalled peer cannot outlast the deadline by more than
+    the kernel's timer tick.
     """
 
     var max_body: Int
     var max_header: Int
     var deadline_ns: Int
-    var timeout_secs: Int
+    var timeout_ms: Int
 
-    def __init__(out self, max_body: Int, max_header: Int, deadline_ns: Int, timeout_secs: Int):
+    def __init__(out self, max_body: Int, max_header: Int, deadline_ns: Int, timeout_ms: Int):
         self.max_body = max_body
         self.max_header = max_header
         self.deadline_ns = deadline_ns
-        self.timeout_secs = timeout_secs
+        self.timeout_ms = timeout_ms
 
     def __init__(out self, *, copy: Self):
         self.max_body = copy.max_body
         self.max_header = copy.max_header
         self.deadline_ns = copy.deadline_ns
-        self.timeout_secs = copy.timeout_secs
+        self.timeout_ms = copy.timeout_ms
 
     def __init__(out self, *, deinit move: Self):
         self.max_body = move.max_body
         self.max_header = move.max_header
         self.deadline_ns = move.deadline_ns
-        self.timeout_secs = move.timeout_secs
+        self.timeout_ms = move.timeout_ms
 
 
-def _secs_left(deadline_ns: Int) raises -> Int:
-    """Whole seconds (rounded up, >= 1) until deadline_ns; raises once it passed."""
+# A socket timeout is rounded to the kernel's tick, so a read capped to the
+# deadline can end a little before the instant; within this slack it counts as
+# the deadline.
+comptime _DEADLINE_SLACK_NS = 100_000_000
+
+
+def _ms_left(deadline_ns: Int) raises -> Int:
+    """Milliseconds (rounded up, >= 1: 0 would mean "no timeout") until
+    deadline_ns; raises once it passed."""
     var left = deadline_ns - Int(perf_counter_ns())
     if left <= 0:
         raise _err_timeout("total timeout exceeded")
-    return (left + 999_999_999) // 1_000_000_000
+    return (left + 999_999) // 1_000_000
 
 
 def _check_deadline(lim: _Limits) raises:
     if lim.deadline_ns != 0:
-        _ = _secs_left(lim.deadline_ns)
+        _ = _ms_left(lim.deadline_ns)
 
 
 def _arm_tcp(sock: TcpSocket, lim: _Limits) raises:
-    """Before a plain-TCP read: enforce the deadline and cap the read timeout to it.
-    shortcut: uses tcp's private _set_socket_timeouts (no public setter after
-    connect); switch to a public tcp API when one exists."""
+    """Before a plain-TCP read: enforce the deadline and cap the read timeout to it."""
     if lim.deadline_ns != 0:
-        _set_socket_timeouts(sock.fd, min(lim.timeout_secs, _secs_left(lim.deadline_ns)))
+        set_socket_timeout_ms(sock.fd, min(lim.timeout_ms, _ms_left(lim.deadline_ns)))
 
 
 def _arm_tls(mut sock: TlsSocket, lim: _Limits) raises:
     """Before a TLS read: enforce the deadline and cap the read timeout to it."""
     if lim.deadline_ns != 0:
-        sock.set_timeout(min(lim.timeout_secs, _secs_left(lim.deadline_ns)))
+        sock.set_timeout_ms(min(lim.timeout_ms, _ms_left(lim.deadline_ns)))
 
 
 # ============================================================================
@@ -530,6 +534,7 @@ struct HttpClient(Movable):
     var proxy_url: String               # HTTP proxy URL, e.g. "http://host:port" (empty = no proxy)
     var trust_env: Bool                 # read HTTP(S)_PROXY / NO_PROXY from the environment (default True)
     var total_timeout_secs: Int         # deadline for a whole request incl. redirects and retries (0 = none)
+    var total_timeout_ms: Int           # same in milliseconds; > 0 wins over total_timeout_secs
     var max_retries: Int                # extra attempts after a retryable failure (0 = never retry)
     var retry_backoff_ms: Int           # base delay; doubles per attempt, jittered, capped at 30 s
     var retry_non_idempotent: Bool      # also retry POST/PATCH (may repeat side effects)
@@ -539,7 +544,7 @@ struct HttpClient(Movable):
     var connections_opened: Int         # TCP connections this client has opened (pool reuse = fewer)
     var default_content_type: String    # Content-Type for a body sent without one ("" = send none)
     var decompress: Bool                # send Accept-Encoding and decode bodies (default True)
-    var _timeout_secs: Int              # socket send/recv timeout (seconds)
+    var _timeout_ms: Int                # socket send/recv timeout (milliseconds)
     var _deadline_ns: Int               # active deadline (perf_counter_ns instant; 0 = none)
     var _deadline_depth: Int            # nesting of calls sharing the active deadline
 
@@ -595,8 +600,11 @@ struct HttpClient(Movable):
         out self,
         allow_private_ips: Bool = False,
         timeout_secs: Int = 30,
+        timeout_ms: Int = 0,
     ) raises:
-        if timeout_secs <= 0:
+        if timeout_ms < 0:
+            raise _err_validation("timeout_ms must be >= 0, got " + String(timeout_ms))
+        if timeout_ms == 0 and timeout_secs <= 0:
             raise _err_validation("timeout_secs must be > 0, got " + String(timeout_secs))
         self.user_agent = String("MojoHTTP/0.1")
         self.allow_private_ips = allow_private_ips
@@ -607,6 +615,7 @@ struct HttpClient(Movable):
         self.proxy_url = String("")
         self.trust_env = True
         self.total_timeout_secs = 0
+        self.total_timeout_ms = 0
         self.max_retries = 0
         self.retry_backoff_ms = 200
         self.retry_non_idempotent = False
@@ -616,7 +625,7 @@ struct HttpClient(Movable):
         self.connections_opened = 0
         self.default_content_type = String("application/json")
         self.decompress = True
-        self._timeout_secs = timeout_secs
+        self._timeout_ms = timeout_ms if timeout_ms > 0 else min(timeout_secs, 1_000_000_000) * 1000
         self._deadline_ns = 0
         self._deadline_depth = 0
         self._ca_bundle = List[X509Cert]()
@@ -673,6 +682,7 @@ struct HttpClient(Movable):
         self.proxy_url = move.proxy_url^
         self.trust_env = move.trust_env
         self.total_timeout_secs = move.total_timeout_secs
+        self.total_timeout_ms = move.total_timeout_ms
         self.max_retries = move.max_retries
         self.retry_backoff_ms = move.retry_backoff_ms
         self.retry_non_idempotent = move.retry_non_idempotent
@@ -682,7 +692,7 @@ struct HttpClient(Movable):
         self.connections_opened = move.connections_opened
         self.default_content_type = move.default_content_type^
         self.decompress = move.decompress
-        self._timeout_secs = move._timeout_secs
+        self._timeout_ms = move._timeout_ms
         self._deadline_ns = move._deadline_ns
         self._deadline_depth = move._deadline_depth
         self._ca_bundle = move._ca_bundle^
@@ -916,18 +926,18 @@ struct HttpClient(Movable):
         var mb = self.max_response_bytes
         var mh = self.max_header_bytes
         var dl = self._deadline_ns
-        var ts = self._timeout_secs
+        var ts = self._timeout_ms
         if slot == 0:
-            self._h2_conn0._timeout_secs = ts
+            self._h2_conn0._timeout_ms = ts
             return h2_request_many(self._h2_conn0, reqs, mb, mh, dl, self.max_batch_bytes)
         elif slot == 1:
-            self._h2_conn1._timeout_secs = ts
+            self._h2_conn1._timeout_ms = ts
             return h2_request_many(self._h2_conn1, reqs, mb, mh, dl, self.max_batch_bytes)
         elif slot == 2:
-            self._h2_conn2._timeout_secs = ts
+            self._h2_conn2._timeout_ms = ts
             return h2_request_many(self._h2_conn2, reqs, mb, mh, dl, self.max_batch_bytes)
         else:
-            self._h2_conn3._timeout_secs = ts
+            self._h2_conn3._timeout_ms = ts
             return h2_request_many(self._h2_conn3, reqs, mb, mh, dl, self.max_batch_bytes)
 
     # === STREAM ===
@@ -968,7 +978,7 @@ struct HttpClient(Movable):
             http_sock.connect(
                 url.host, url.port,
                 reject_private_ips=not self.allow_private_ips,
-                timeout_secs=self._connect_timeout(),
+                timeout_ms=self._connect_timeout(),
             )
             tls_sock = TlsSocket(http_sock.detach())
             tls_sock.connect(url.host, self._ca_bundle)
@@ -985,7 +995,7 @@ struct HttpClient(Movable):
             http_sock.connect(
                 url.host, url.port,
                 reject_private_ips=not self.allow_private_ips,
-                timeout_secs=self._connect_timeout(),
+                timeout_ms=self._connect_timeout(),
             )
             var request = String(unsafe_from_utf8=req_buf)
             _ = http_sock.send(request)
@@ -1405,14 +1415,17 @@ struct HttpClient(Movable):
         """Start the total-timeout clock for the outermost call; nested calls
         (redirect hops, retries) share it."""
         if self._deadline_depth == 0:
-            if self.total_timeout_secs < 0:
-                raise _err_validation("total_timeout_secs must be >= 0")
+            if self.total_timeout_secs < 0 or self.total_timeout_ms < 0:
+                raise _err_validation("total_timeout_secs and total_timeout_ms must be >= 0")
             if self.max_retries < 0 or self.retry_backoff_ms < 0:
                 raise _err_validation("max_retries and retry_backoff_ms must be >= 0")
             if self.max_response_bytes <= 0 or self.max_header_bytes <= 0 or self.max_batch_bytes <= 0:
                 raise _err_validation("max_response_bytes, max_header_bytes and max_batch_bytes must be > 0")
-            if self.total_timeout_secs > 0:
-                self._deadline_ns = Int(perf_counter_ns()) + self.total_timeout_secs * 1_000_000_000
+            var total_ms = min(self.total_timeout_ms, 1_000_000_000_000)
+            if total_ms == 0:
+                total_ms = min(self.total_timeout_secs, 1_000_000_000) * 1000
+            if total_ms > 0:
+                self._deadline_ns = Int(perf_counter_ns()) + total_ms * 1_000_000
             else:
                 self._deadline_ns = 0
         self._deadline_depth += 1
@@ -1430,14 +1443,14 @@ struct HttpClient(Movable):
 
     def _limits(self) -> _Limits:
         return _Limits(
-            self.max_response_bytes, self.max_header_bytes, self._deadline_ns, self._timeout_secs
+            self.max_response_bytes, self.max_header_bytes, self._deadline_ns, self._timeout_ms
         )
 
     def _connect_timeout(self) raises -> Int:
-        """Socket timeout for a new connection: timeout_secs, capped to the time left."""
+        """Socket timeout (ms) for a new connection, capped to the time left."""
         if self._deadline_ns == 0:
-            return self._timeout_secs
-        return min(self._timeout_secs, _secs_left(self._deadline_ns))
+            return self._timeout_ms
+        return min(self._timeout_ms, _ms_left(self._deadline_ns))
 
     def _do_request(
         mut self,
@@ -1455,10 +1468,10 @@ struct HttpClient(Movable):
         except e:
             var es = String(e)
             var now = Int(perf_counter_ns())
-            # Reads time out in whole seconds, so one can end just before the instant.
+            # A read capped to the deadline can end just before the instant.
             var expired = self._deadline_ns != 0 and (
                 now >= self._deadline_ns
-                or (now + 1_000_000_000 >= self._deadline_ns and _str_contains(es, "timed out"))
+                or (now + _DEADLINE_SLACK_NS >= self._deadline_ns and _str_contains(es, "timed out"))
             )
             self._deadline_end()
             if expired and not es.startswith(ERR_TIMEOUT):
@@ -1970,7 +1983,7 @@ struct HttpClient(Movable):
         var mb = self.max_response_bytes
         var mh = self.max_header_bytes
         var dl = self._deadline_ns
-        var ts = self._timeout_secs
+        var ts = self._timeout_ms
         try:
             result = self._h2_run(slot, method, url, h2_hdrs, body_bytes, mb, mh, dl, ts)
         except e:
@@ -1994,19 +2007,19 @@ struct HttpClient(Movable):
     ) raises -> Tuple[Int, List[HpackHeader], List[UInt8]]:
         var result: Tuple[Int, List[HpackHeader], List[UInt8]]
         if slot == 0:
-            self._h2_conn0._timeout_secs = ts
+            self._h2_conn0._timeout_ms = ts
             result = h2_do_request(self._h2_conn0, method, url.request_path(),
                                    h2_hdrs, body_bytes, mb, mh, dl)
         elif slot == 1:
-            self._h2_conn1._timeout_secs = ts
+            self._h2_conn1._timeout_ms = ts
             result = h2_do_request(self._h2_conn1, method, url.request_path(),
                                    h2_hdrs, body_bytes, mb, mh, dl)
         elif slot == 2:
-            self._h2_conn2._timeout_secs = ts
+            self._h2_conn2._timeout_ms = ts
             result = h2_do_request(self._h2_conn2, method, url.request_path(),
                                    h2_hdrs, body_bytes, mb, mh, dl)
         else:
-            self._h2_conn3._timeout_secs = ts
+            self._h2_conn3._timeout_ms = ts
             result = h2_do_request(self._h2_conn3, method, url.request_path(),
                                    h2_hdrs, body_bytes, mb, mh, dl)
         return result^
@@ -2164,7 +2177,7 @@ struct HttpClient(Movable):
                 target_host,
                 target_port,
                 reject_private_ips=not self.allow_private_ips,
-                timeout_secs=self._connect_timeout(),
+                timeout_ms=self._connect_timeout(),
             )
             return sock^
 
@@ -2179,7 +2192,7 @@ struct HttpClient(Movable):
             proxy_host,
             proxy_port,
             reject_private_ips=False,
-            timeout_secs=self._connect_timeout(),
+            timeout_ms=self._connect_timeout(),
         )
 
         # Send CONNECT request
@@ -3104,7 +3117,7 @@ def _recv_tls_keepalive(
     var out = _recv_tls_response(sock, skip_body, lim)
     if lim.deadline_ns != 0:
         # The socket goes back to the pool: undo the deadline-shrunk timeout.
-        sock.set_timeout(lim.timeout_secs)
+        sock.set_timeout_ms(lim.timeout_ms)
     return out^
 
 
@@ -3219,7 +3232,7 @@ def _recv_http_keepalive(
     (see _recv_http_response); restores the pooled socket's normal timeout."""
     var out = _recv_http_response(sock, skip_body, lim)
     if lim.deadline_ns != 0:
-        _set_socket_timeouts(sock.fd, lim.timeout_secs)
+        set_socket_timeout_ms(sock.fd, lim.timeout_ms)
     return out^
 
 
@@ -4049,9 +4062,12 @@ struct Session(Movable):
         out self,
         allow_private_ips: Bool = False,
         timeout_secs: Int = 30,
+        timeout_ms: Int = 0,
     ) raises:
         self.client = HttpClient(
-            allow_private_ips=allow_private_ips, timeout_secs=timeout_secs
+            allow_private_ips=allow_private_ips,
+            timeout_secs=timeout_secs,
+            timeout_ms=timeout_ms,
         )
         self.default_headers = HttpHeaders()
         self._auth_basic = BasicAuth(String(""), String(""))

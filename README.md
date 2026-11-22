@@ -8,7 +8,7 @@ No OpenSSL, no libcurl — TLS is handled entirely by the [tls](https://github.c
 - `GET`, `POST`, `PUT`, `DELETE`, `PATCH`
 - HTTP and HTTPS (TLS 1.3 + TLS 1.2); HTTP/2 over TLS is negotiated with ALPN
 - `get_many` / `request_many`: several requests to one HTTP/2 host in flight at once (`request_many`: own method, headers and body each, e.g. a `Range` per request)
-- Total request deadline, opt-in retries with backoff, configurable size limits
+- Total request deadline (seconds or milliseconds), opt-in retries with backoff, configurable size limits
 - Custom headers and request body
 - Connection pooling (keep-alive) for repeated requests to the same host
 - CA bundle loaded from system (`/etc/ssl/certs/ca-certificates.crt` or `/etc/ssl/cert.pem`)
@@ -67,6 +67,7 @@ All off or at their old values by default; set them on the client:
 ```mojo
 var client = HttpClient()
 client.total_timeout_secs = 10      # whole call: redirects, retries, body (TimeoutError)
+client.total_timeout_ms = 250       # same in milliseconds; wins over total_timeout_secs
 client.max_retries = 3              # connect/read failures and 429/502/503/504
 client.retry_backoff_ms = 200       # doubles per attempt, jittered, capped at 30 s
 # Retry-After (seconds) is honoured. POST/PATCH are retried only with
@@ -95,7 +96,10 @@ sent one by one in order, like `request()`. Redirects, retries and
 `total_timeout_secs` behave as in `request()`; the first failing request
 raises.
 
-`total_timeout_secs` caps every read to the time left (whole seconds). If a
+`total_timeout_secs` / `total_timeout_ms` cap every read to the time left. The
+per-read socket timeout is `HttpClient(timeout_secs=30)` or, in milliseconds,
+`HttpClient(timeout_ms=500)` (it wins when both are given). The kernel rounds
+timeouts to its tick, a few milliseconds. If a
 retry's wait would pass the deadline, the last response is returned.
 A request that fails on a pooled keep-alive connection is sent again on a new
 one only if it is idempotent (GET, HEAD, OPTIONS, PUT, DELETE) or
@@ -132,8 +136,8 @@ never sends one the client cannot decode.
 ## Testing
 
 ```bash
-pixi run test            # resilience (40) + framing (51) + client (144 HTTP, 4 HTTPS)
-pixi run test-h2-local   # HTTP/2 against a local server (39); needs the python `h2` package (pixi installs it)
+pixi run test            # resilience (45) + framing (51) + client (144 HTTP, 4 HTTPS)
+pixi run test-h2-local   # HTTP/2 against a local server (41); needs the python `h2` package (pixi installs it)
 pixi run test-hpack      # 128
 pixi run test-h2         # 70
 ```

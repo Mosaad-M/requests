@@ -275,6 +275,95 @@ def test_deadline_resets_after_error() raises:
     assert_eq(c.get(BASE + "/delay?ms=1200").status_code, 200, "no stale deadline after a failure")
 
 
+# ── Millisecond timeouts (1.14.0) ───────────────────────────────────────────
+
+def test_ms_settings_validated() raises:
+    var c = new_client()
+    assert_eq(c.total_timeout_ms, 0, "total_timeout_ms default")
+    var raised = False
+    try:
+        var bad = HttpClient(allow_private_ips=True, timeout_ms=-1)
+        _ = bad.total_timeout_ms
+    except e:
+        raised = True
+        expect_error("ValidationError", String(e), "timeout_ms=-1")
+    assert_true(raised, "timeout_ms=-1 must raise")
+    # timeout_ms alone is enough; timeout_secs=0 is only an error when no ms is given
+    var ok = HttpClient(allow_private_ips=True, timeout_secs=0, timeout_ms=500)
+    assert_eq(ok.get(BASE + "/").status_code, 200, "timeout_ms with timeout_secs=0")
+    c.total_timeout_ms = -1
+    raised = False
+    try:
+        _ = c.get(BASE + "/")
+    except e:
+        raised = True
+        expect_error("ValidationError", String(e), "total_timeout_ms=-1")
+    assert_true(raised, "total_timeout_ms=-1 must raise")
+
+
+def test_total_timeout_ms_caps_a_stall() raises:
+    # Default 30 s socket timeout and a 300 ms total deadline.
+    var c = new_client()
+    c.total_timeout_ms = 300
+    var t0 = now_ms()
+    var raised = False
+    try:
+        _ = c.get(BASE + "/delay?ms=4000")
+    except e:
+        raised = True
+        expect_error("TimeoutError", String(e), "300 ms stall")
+    var took = now_ms() - t0
+    assert_true(raised, "stall must raise")
+    assert_true(took >= 250 and took < 2000, "300 ms deadline took " + String(took) + " ms")
+
+
+def test_huge_total_timeout_ms_is_a_long_deadline() raises:
+    # ms * 1_000_000 would overflow without the clamp and give an instant deadline
+    var c = new_client()
+    c.total_timeout_ms = Int.MAX
+    assert_eq(c.get(BASE + "/").status_code, 200, "Int.MAX ms total deadline")
+
+
+def test_total_timeout_ms_wins_over_secs() raises:
+    var c = new_client()
+    c.total_timeout_secs = 30
+    c.total_timeout_ms = 300
+    var t0 = now_ms()
+    var raised = False
+    try:
+        _ = c.get(BASE + "/delay?ms=4000")
+    except:
+        raised = True
+    assert_true(raised and now_ms() - t0 < 2000, "total_timeout_ms did not override total_timeout_secs")
+
+
+def test_timeout_ms_is_the_per_read_timeout() raises:
+    # No total deadline: a 300 ms socket timeout cuts a 3 s stall short.
+    var c = HttpClient(allow_private_ips=True, timeout_ms=300)
+    var t0 = now_ms()
+    var raised = False
+    try:
+        _ = c.get(BASE + "/delay?ms=3000")
+    except:
+        raised = True
+    var took = now_ms() - t0
+    assert_true(raised, "stall must raise")
+    assert_true(took >= 250 and took < 2000, "300 ms socket timeout took " + String(took) + " ms")
+    assert_eq(c.get(BASE + "/").status_code, 200, "fast request still works")
+
+
+def test_ms_deadline_restores_pooled_timeout() raises:
+    # After a call under a short deadline the pooled socket must get its own
+    # timeout back, or this 1 s response would be cut at the old cap.
+    var c = HttpClient(allow_private_ips=True, timeout_ms=2500)
+    assert_eq(c.get(KA + "/live-ok").status_code, 200, "warm the pool")
+    c.total_timeout_ms = 400
+    assert_eq(c.get(KA + "/live-ok").status_code, 200, "call under a 400 ms deadline")
+    c.total_timeout_ms = 0
+    assert_eq(c.get(KA + "/live-delay").status_code, 200, "no stale 400 ms cap afterwards")
+    assert_eq(c.connections_opened, 1, "all three calls shared one connection")
+
+
 # ── Retries ──────────────────────────────────────────────────────────────────
 
 
@@ -574,6 +663,12 @@ def main() raises:
     run_test[test_deadline_spans_redirects]("deadline: spans redirects", passed, failed)
     run_test[test_deadline_spans_retries]("deadline: spans retries", passed, failed)
     run_test[test_deadline_resets_after_error]("deadline: no stale state after failure", passed, failed)
+    run_test[test_ms_settings_validated]("ms timeouts: settings validated", passed, failed)
+    run_test[test_total_timeout_ms_caps_a_stall]("ms timeouts: 300 ms total deadline caps a stall", passed, failed)
+    run_test[test_huge_total_timeout_ms_is_a_long_deadline]("ms timeouts: huge total_timeout_ms is a long deadline", passed, failed)
+    run_test[test_total_timeout_ms_wins_over_secs]("ms timeouts: total_timeout_ms wins over seconds", passed, failed)
+    run_test[test_timeout_ms_is_the_per_read_timeout]("ms timeouts: timeout_ms is the socket timeout", passed, failed)
+    run_test[test_ms_deadline_restores_pooled_timeout]("ms timeouts: pooled socket timeout restored", passed, failed)
 
     run_test[test_no_retry_by_default]("retry: off by default", passed, failed)
     run_test[test_retry_recovers]("retry: recovers from 503", passed, failed)

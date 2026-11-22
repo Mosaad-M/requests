@@ -41,8 +41,8 @@ flatbuffers ──► arrow ──► fhir-arrow, hl7-arrow, 1brc_arrow
 
 ```bash
 pixi run run               # demo
-pixi run test              # test_resilience (40) + test_framing (51) + test_client (144 HTTP + 4 HTTPS) against test_server.py
-pixi run test-h2-local     # 39 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
+pixi run test              # test_resilience (45) + test_framing (51) + test_client (144 HTTP + 4 HTTPS) against test_server.py
+pixi run test-h2-local     # 41 HTTP/2 tests against test_h2_server.py (python `h2` package, ports 18443-18446; 18446 is TLS 1.2 only)
 pixi run test-alpn         # 1: HTTPS server answering no ALPN protocol gets HTTP/1.1 on one connection (test_alpn_fallback.mojo, alpn_test_server.py)
 pixi run test-hpack        # 130
 pixi run test-h2           # 70 (framing)
@@ -65,8 +65,9 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `allow_private_ips` (ctor) | `False` | Block loopback/private/link-local/CGNAT targets, checked on the **resolved** address at connect time (rebinding-safe) |
-| `timeout_secs` (ctor) | 30 | Per-socket send/recv timeout |
-| `total_timeout_secs` | 0 (off) | Deadline for a whole call incl. redirects, retries and body reads. Raises `TimeoutError`. Every read (HTTP, HTTPS, h2, pooled or fresh) is capped to the time left, 1 s granularity. If a retry's wait would pass the deadline, the last response is returned instead |
+| `timeout_secs` (ctor) | 30 | Per-socket send/recv timeout (seconds) |
+| `timeout_ms` (ctor) | 0 (use `timeout_secs`) | Same in milliseconds; > 0 wins over `timeout_secs` (which may then be 0) |
+| `total_timeout_secs` / `total_timeout_ms` | 0 (off) | Deadline for a whole call incl. redirects, retries and body reads. Raises `TimeoutError`. `total_timeout_ms` > 0 wins over the seconds field. Every read (HTTP, HTTPS, h2, pooled or fresh) is capped to the time left (ms; the kernel rounds to its tick, a few ms). If a retry's wait would pass the deadline, the last response is returned instead |
 | `max_retries` / `retry_backoff_ms` / `retry_non_idempotent` | 0 / 200 / False | Retry connect/read failures and 429/502/503/504; idempotent methods only unless opted in; exponential backoff with jitter capped at 30 s; `Retry-After` (seconds) honoured up to 60 s |
 | `max_response_bytes` | 100 MB | Body cap, HTTP/1.1 (Content-Length, chunked, close-delimited) and HTTP/2; raising it above 100 MB works for Content-Length, chunked and close-delimited bodies (the chunk decoder took the 100 MB constant until 1.11.1). `get_stream` body is uncapped; its header block is capped by `max_header_bytes` |
 | `max_header_bytes` | 1 MB | Header block cap (HTTP/1.1 and HTTP/2, compressed, decoded, and cumulative with trailers) |
@@ -98,4 +99,4 @@ pixi run bash build_and_run.sh bench_h2.mojo   # with both test servers running
 - **Input validation**: CRLF injection rejected in header keys/values and paths; method must be A-Z; port 1-65535; hosts reject NUL/CR/LF/space/slash.
 - **Response hardening**: chunk-size caps, truncation detection, status/version validation, header and body caps (above), HPACK decoded-list cap (`max_list`), decompression ratio (256x) and absolute (512 MB) caps, h2 frames above 16384 bytes rejected, PUSH_PROMISE refused (we send ENABLE_PUSH=0).
 - **Network**: SSRF filter on resolved addresses, TLS certificate and hostname verification (tls package), `Authorization`, `Cookie` and `Proxy-Authorization` stripped when a redirect changes scheme, host or port, cookie jar checks the public-suffix list and requires `Domain` to cover the request host (jar capped at 3000 cookies of 4096 bytes), control characters rejected in header names/values/paths and cookies, a chunked body or `get_stream` Content-Length body cut short raises, HPACK size updates above our advertised 65536 are errors.
-- Known gaps: `allow_private_ips` is not applied to the target of a proxied request (the proxy resolves it; the proxy itself is trusted); no revocation checking and no session resumption (tls package); decompressed output is capped by `max_response_bytes` and the 256x ratio; new cookies are dropped once the jar is full (no eviction); a chunked `get_stream` returns raw chunk framing and does not detect truncation; `Retry-After` HTTP-date form is not parsed; h2 request header blocks larger than the peer's max frame size are rejected (no CONTINUATION on send); plain-TCP deadline capping uses tcp's private `_set_socket_timeouts` (no public setter yet).
+- Known gaps: `allow_private_ips` is not applied to the target of a proxied request (the proxy resolves it; the proxy itself is trusted); no revocation checking and no session resumption (tls package); decompressed output is capped by `max_response_bytes` and the 256x ratio; new cookies are dropped once the jar is full (no eviction); a chunked `get_stream` returns raw chunk framing and does not detect truncation; `Retry-After` HTTP-date form is not parsed; h2 request header blocks larger than the peer's max frame size are rejected (no CONTINUATION on send).
