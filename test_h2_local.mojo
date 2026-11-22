@@ -617,6 +617,38 @@ def test_h2_deadline() raises:
     assert_str(c.get(NORMAL + "/n/ok").body, "resp-ok", "client usable afterwards")
 
 
+def test_h2_total_timeout_ms() raises:
+    var c = local_client()
+    # warm the pool: a pooled connection keeps its own timeout, so only the
+    # deadline cap can stop the stall below at 300 ms
+    assert_str(c.get(NORMAL + "/n/warm").body, "resp-warm", "warm the pool")
+    c.total_timeout_ms = 300
+    var t0 = now_ms()
+    var raised = False
+    try:
+        _ = c.get(NORMAL + "/n/1?ms=4000")
+    except e:
+        raised = True
+        assert_true(String(e).startswith("TimeoutError"), String(e))
+    var took = now_ms() - t0
+    assert_true(raised, "must time out")
+    assert_true(took >= 250 and took < 2000, "300 ms h2 deadline took " + String(took) + " ms")
+    # the pooled h2 connection gets its own timeout back
+    c.total_timeout_ms = 0
+    assert_str(c.get(NORMAL + "/n/ok?ms=800").body, "resp-ok", "client usable afterwards")
+
+
+def test_h2_ms_deadline_restores_pooled_timeout() raises:
+    var c = local_client()
+    assert_str(c.get(NORMAL + "/n/warm").body, "resp-warm", "warm the pool")
+    c.total_timeout_ms = 400
+    assert_str(c.get(NORMAL + "/n/fast").body, "resp-fast", "call under a 400 ms deadline")
+    c.total_timeout_ms = 0
+    # 800 ms > the 400 ms cap a missing restore would leave behind
+    assert_str(c.get(NORMAL + "/n/slow?ms=800").body, "resp-slow", "no stale cap afterwards")
+    assert_eq(c.connections_opened, 1, "all calls shared one connection")
+
+
 def test_get_many_deadline() raises:
     var c = local_client()
     c.total_timeout_secs = 1
@@ -754,6 +786,8 @@ def main() raises:
 
     run_test[test_get_many_survives_goaway]("get_many survives GOAWAY", passed, failed)
     run_test[test_h2_deadline]("h2 total deadline", passed, failed)
+    run_test[test_h2_total_timeout_ms]("h2 total_timeout_ms (300 ms)", passed, failed)
+    run_test[test_h2_ms_deadline_restores_pooled_timeout]("h2 ms deadline: pooled timeout restored", passed, failed)
     run_test[test_get_many_deadline]("get_many total deadline", passed, failed)
     run_test[test_h2_retry_on_503]("h2 retry on 503", passed, failed)
     run_test[test_header_and_trailer_limit_is_cumulative]("h2 header+trailer limit is cumulative", passed, failed)

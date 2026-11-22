@@ -27,7 +27,7 @@ def _stale_keepalive_server(port=18082):
     """Raw HTTP/1.1 listener for pooled-connection tests (test_resilience.mojo).
     Most paths: answer one request, claim keep-alive, then close, so the client
     pools a dead connection. Paths starting /live keep the connection open;
-    /live-stall then holds each reply for 6 s.
+    /live-stall then holds each reply for 6 s, /live-delay for 1 s.
     Each request received bumps hit counter "ka" + path."""
     import socket
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -55,6 +55,8 @@ def _stale_keepalive_server(port=18082):
                     rest += conn.recv(4096)
                 buf = rest[need:]
                 _hit("ka" + path)
+                if path.startswith("/live-delay"):
+                    time.sleep(1)  # a slow but healthy pooled connection
                 if path.startswith("/live-stall"):
                     time.sleep(6)  # a pooled connection that stalls mid-request
                 conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")

@@ -53,7 +53,7 @@ struct Http2Conn(Movable):
     var _conn_window:         Int          # outbound connection-level flow-control window
     var _peer_max_concurrent: Int          # from peer SETTINGS_MAX_CONCURRENT_STREAMS
     var _goaway:              Bool         # peer sent GOAWAY: open no new streams, drop after use
-    var _timeout_secs:        Int          # per-read socket timeout (restored after a deadline)
+    var _timeout_ms:        Int          # per-read socket timeout in ms (restored after a deadline)
 
     def __init__(out self):
         """Create an Http2Conn with a placeholder TLS socket (fd=0).
@@ -71,7 +71,7 @@ struct Http2Conn(Movable):
         self._conn_window         = 65535
         self._peer_max_concurrent = 100
         self._goaway              = False
-        self._timeout_secs        = 30
+        self._timeout_ms        = 30_000
 
     def __init__(out self, *, deinit move: Self):
         self._tls                 = move._tls^
@@ -83,7 +83,7 @@ struct Http2Conn(Movable):
         self._conn_window         = move._conn_window
         self._peer_max_concurrent = move._peer_max_concurrent
         self._goaway              = move._goaway
-        self._timeout_secs        = move._timeout_secs
+        self._timeout_ms        = move._timeout_ms
 
     def close(mut self) raises:
         """Close the underlying TLS connection."""
@@ -314,7 +314,7 @@ def _arm_read(mut conn: Http2Conn, deadline_ns: Int) raises:
         var left = deadline_ns - Int(perf_counter_ns())
         if left <= 0:
             raise Error("TimeoutError: total timeout exceeded")
-        conn._tls.set_timeout(min(conn._timeout_secs, (left + 999_999_999) // 1_000_000_000))
+        conn._tls.set_timeout_ms(min(conn._timeout_ms, (left + 999_999) // 1_000_000))
 
 
 def _status_of(headers: List[HpackHeader]) -> Int:
@@ -353,8 +353,9 @@ def _send_frame(mut conn: Http2Conn, frame: Http2Frame) raises:
 
 def _read_frame_by(mut conn: Http2Conn, deadline_ns: Int) raises -> Http2Frame:
     """Read one frame, failing with TimeoutError once deadline_ns passes. The
-    socket timeout is whole seconds, so a read can time out a hair before the
-    deadline instant: a timeout within a second of it counts as the deadline."""
+    socket timeout is rounded to the kernel tick, so a read can time out a hair
+    before the deadline instant: a timeout within 100 ms of it counts as the
+    deadline."""
     _arm_read(conn, deadline_ns)
     try:
         return _read_one_frame(conn)
@@ -362,7 +363,7 @@ def _read_frame_by(mut conn: Http2Conn, deadline_ns: Int) raises -> Http2Frame:
         var es = String(e)
         if deadline_ns != 0 and not es.startswith("TimeoutError"):
             var now = Int(perf_counter_ns())
-            if now >= deadline_ns or (now + 1_000_000_000 >= deadline_ns and "timed out" in es):
+            if now >= deadline_ns or (now + 100_000_000 >= deadline_ns and "timed out" in es):
                 raise Error("TimeoutError: total timeout exceeded (" + es + ")")
         raise e^
 
@@ -649,7 +650,7 @@ def h2_request_many(
         # PRIORITY and unknown frame types: ignored (RFC 9113 §4.1)
 
     if deadline_ns != 0:
-        conn._tls.set_timeout(conn._timeout_secs)
+        conn._tls.set_timeout_ms(conn._timeout_ms)
     return out^
 
 
