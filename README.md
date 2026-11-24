@@ -151,7 +151,7 @@ one the client cannot decode.
 
 ## Requirements
 
-- Mojo >= 1.2.0 (for Mojo 1.0 or 1.1, use requests 1.5.0)
+- Mojo >= 1.2.0
 - [tls](https://github.com/Mosaad-M/tls) >= 1.12.0, [tcp](https://github.com/Mosaad-M/tcp) >= 2.2.0,
   [url](https://github.com/Mosaad-M/url) >= 1.2.0 and [json](https://github.com/Mosaad-M/json) >= 3.1.0,
   all pure Mojo and installed by [mojo-pkg](https://github.com/Mosaad-M/mojo-pkg)
@@ -165,6 +165,8 @@ pixi run test-h2-local   # HTTP/2 against a local server (41); needs the python 
 pixi run test-hpack      # 130
 pixi run test-h2         # 70
 ```
+
+Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
