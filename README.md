@@ -14,7 +14,7 @@ and sockets from [tcp](https://github.com/Mosaad-M/tcp).
 ## Usage
 
 ```mojo
-from http_client import HttpClient
+from http_client import HttpClient, HttpHeaders
 
 var client = HttpClient()
 
@@ -23,12 +23,13 @@ var resp = client.get("https://api.example.com/data")
 print(resp.status_code)  # 200
 print(resp.body)
 
-# POST with JSON body
-var resp2 = client.post(
-    "https://api.example.com/items",
-    body='{"name": "test"}',
-    headers='Content-Type: application/json\r\n'
-)
+# POST with a JSON body (Content-Type defaults to application/json)
+var resp2 = client.post("https://api.example.com/items", '{"name": "test"}')
+
+# or with your own headers
+var h = HttpHeaders()
+h.add("X-Request-Id", "42")
+var resp3 = client.post("https://api.example.com/items", '{"name": "test"}', h)
 
 # Parse a JSON response
 var data = resp.json()        # mutable JsonValue tree
@@ -108,6 +109,21 @@ Every other method, plain HTTP and HTTP/1.1-only hosts are sent one by one in or
 like `request()`. Redirects, retries and the total deadline behave as in `request()`,
 and the first failing request raises. `max_batch_bytes` (default 1 GB) bounds the
 bodies one `get_many` holds.
+
+## Private addresses and proxies
+
+By default the client refuses to connect to loopback, private, link-local and CGNAT
+addresses. The check runs on the address the name resolved to, so DNS rebinding cannot
+get around it. To call a service on localhost or a private network, opt in:
+
+```mojo
+var client = HttpClient(allow_private_ips=True)
+```
+
+The client reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` from the environment. Set
+`trust_env = False` to ignore them, or `proxy_url = "http://host:port"` to choose a proxy
+explicitly. The private-address check does not cover the target of a proxied request,
+because the proxy resolves it.
 
 ## Certificates
 
