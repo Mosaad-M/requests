@@ -60,7 +60,7 @@ Set it to `""` for binary uploads that set their own.
 
 ## Deadlines, retries and limits
 
-Everything here is off, or at its old value, until you set it on the client:
+By default there is no total deadline and no retries. Size limits are 100 MB for the body and 1 MB for headers. Set any of these on the client:
 
 ```mojo
 var client = HttpClient()
