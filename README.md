@@ -1,23 +1,20 @@
-# requests — Pure Mojo HTTP Client
+# requests
 
-A pure-[Mojo](https://www.modular.com/mojo) HTTP/1.1 and HTTP/2 client with HTTPS support.
-No OpenSSL, no libcurl — TLS is handled entirely by the [tls](https://github.com/Mosaad-M/tls) package.
+A pure [Mojo](https://www.modular.com/mojo) HTTP/1.1 and HTTP/2 client with HTTPS. No
+OpenSSL and no libcurl: TLS comes from the [tls](https://github.com/Mosaad-M/tls) package
+and sockets from [tcp](https://github.com/Mosaad-M/tcp).
 
-## Features
-
-- `GET`, `POST`, `PUT`, `DELETE`, `PATCH`
-- HTTP and HTTPS (TLS 1.3 + TLS 1.2); HTTP/2 over TLS is negotiated with ALPN
-- `get_many` / `request_many`: several requests to one HTTP/2 host in flight at once (`request_many`: own method, headers and body each, e.g. a `Range` per request)
-- Total request deadline (seconds or milliseconds), opt-in retries with backoff, configurable size limits
-- Custom headers and request body
-- Connection pooling (keep-alive) for repeated requests to the same host
-- CA bundle loaded from system (`/etc/ssl/certs/ca-certificates.crt` or `/etc/ssl/cert.pem`)
-- `HttpClient` with lazy-loaded, cached CA bundle (146 system certs parsed once per client)
+- `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD` and `OPTIONS`, with custom headers and bodies
+- TLS 1.3 and 1.2; HTTP/2 is negotiated with ALPN
+- Keep-alive connection pooling, redirects, cookies and an HTTP CONNECT proxy
+- `get_many` and `request_many` run several requests to one HTTP/2 host at once
+- A deadline for the whole call, opt-in retries with backoff, and size limits
+- Transparent gzip, deflate, zstd and brotli decompression
 
 ## Usage
 
 ```mojo
-from http_client import HttpClient
+from http_client import HttpClient, HttpHeaders
 
 var client = HttpClient()
 
@@ -26,12 +23,13 @@ var resp = client.get("https://api.example.com/data")
 print(resp.status_code)  # 200
 print(resp.body)
 
-# POST with JSON body
-var resp2 = client.post(
-    "https://api.example.com/items",
-    body='{"name": "test"}',
-    headers='Content-Type: application/json\r\n'
-)
+# POST with a JSON body (Content-Type defaults to application/json)
+var resp2 = client.post("https://api.example.com/items", '{"name": "test"}')
+
+# or with your own headers
+var h = HttpHeaders()
+h.add("X-Request-Id", "42")
+var resp3 = client.post("https://api.example.com/items", '{"name": "test"}', h)
 
 # Parse a JSON response
 var data = resp.json()        # mutable JsonValue tree
@@ -58,11 +56,12 @@ var bytes_view = r.content()
 var owned = r.to_bytes()
 ```
 
-`default_content_type` ("application/json") still applies to a body sent without a `Content-Type`; set it to `""` for binary uploads that set their own.
+A body sent without a `Content-Type` gets `default_content_type` ("application/json").
+Set it to `""` for binary uploads that set their own.
 
 ## Deadlines, retries and limits
 
-All off or at their old values by default; set them on the client:
+By default there is no total deadline and no retries. Size limits are 100 MB for the body and 1 MB for headers. Set any of these on the client:
 
 ```mojo
 var client = HttpClient()
@@ -74,8 +73,23 @@ client.retry_backoff_ms = 200       # doubles per attempt, jittered, capped at 3
 # client.retry_non_idempotent = True (a retry can repeat side effects).
 client.max_response_bytes = 10 * 1024 * 1024   # default 100 MB
 client.max_header_bytes = 64 * 1024            # default 1 MB
+```
 
-# Several URLs on one HTTP/2 host share a connection and run concurrently:
+`HttpClient(timeout_secs=30)` sets the timeout of each socket read and write. In
+milliseconds it is `HttpClient(timeout_ms=500)`, which wins when both are given. The
+total deadline caps every read to the time left. The kernel rounds timeouts to its tick,
+a few milliseconds. If a retry's wait would pass the deadline, the last response is
+returned.
+
+A request that fails on a pooled keep-alive connection is sent again on a new one only
+if it is idempotent (GET, HEAD, OPTIONS, PUT, DELETE) or `retry_non_idempotent` is set,
+because the server may already have processed it.
+
+## Many requests at once
+
+Requests to one HTTP/2 host share a connection and run concurrently:
+
+```mojo
 var urls = List[String]()
 urls.append("https://example.com/a")
 urls.append("https://example.com/b")
@@ -90,58 +104,70 @@ for i in range(16):
 var parts = client.request_many(reqs)   # same order as reqs
 ```
 
-`request_many` multiplexes GET, HEAD and OPTIONS to one HTTPS host that
-speaks HTTP/2; every other method, plain HTTP and HTTP/1.1-only hosts are
-sent one by one in order, like `request()`. Redirects, retries and
-`total_timeout_secs` behave as in `request()`; the first failing request
-raises.
+`request_many` multiplexes GET, HEAD and OPTIONS to one HTTPS host that speaks HTTP/2.
+Every other method, plain HTTP and HTTP/1.1-only hosts are sent one by one in order,
+like `request()`. Redirects, retries and the total deadline behave as in `request()`,
+and the first failing request raises. `max_batch_bytes` (default 1 GB) bounds the
+bodies one `get_many` holds.
 
-`total_timeout_secs` / `total_timeout_ms` cap every read to the time left. The
-per-read socket timeout is `HttpClient(timeout_secs=30)` or, in milliseconds,
-`HttpClient(timeout_ms=500)` (it wins when both are given). The kernel rounds
-timeouts to its tick, a few milliseconds. If a
-retry's wait would pass the deadline, the last response is returned.
-A request that fails on a pooled keep-alive connection is sent again on a new
-one only if it is idempotent (GET, HEAD, OPTIONS, PUT, DELETE) or
-`retry_non_idempotent` is set: the server may already have processed it.
-`max_batch_bytes` (default 1 GB) bounds the bodies one `get_many` holds.
+## Private addresses and proxies
 
-## Dependencies
+By default the client refuses to connect to loopback, private, link-local and CGNAT
+addresses. The check runs on the address the name resolved to, so DNS rebinding cannot
+get around it. To call a service on localhost or a private network, opt in:
 
-- [tls](https://github.com/Mosaad-M/tls) — Pure Mojo TLS 1.3 + 1.2
-- [tcp](https://github.com/Mosaad-M/tcp) — TCP socket layer
-- [url](https://github.com/Mosaad-M/url) — URL parser
-- [json](https://github.com/Mosaad-M/json) — JSON parser (>= 3.0.1)
+```mojo
+var client = HttpClient(allow_private_ips=True)
+```
+
+The client reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` from the environment. Set
+`trust_env = False` to ignore them, or `proxy_url = "http://host:port"` to choose a proxy
+explicitly. The private-address check does not cover the target of a proxied request,
+because the proxy resolves it.
+
+## Certificates
+
+Server certificates are always verified against the trust anchors tls loads: the file
+named by `SSL_CERT_FILE`, else the platform's bundle (`/etc/ssl/cert.pem` on macOS, the
+distribution's file on Linux). The client parses the bundle once.
+
+macOS's `cert.pem` is a trimmed export of the system keychain and lacks some roots, such
+as the Comodo AAA Certificate Services root behind `example.com`'s chain. A site like
+that fails with `chain not trusted (no path to a trust anchor)`, although curl, which
+reads the keychain, connects. Set `SSL_CERT_FILE` to a fuller bundle, such as Mozilla's.
 
 ## Compression
 
 Responses in gzip, deflate, zstd and brotli are decompressed transparently. The
-libraries are opened at runtime, so a program using requests needs **no linker
-flags**:
+libraries are opened at runtime, so a program using requests needs no linker flags:
 
-- gzip / deflate: the system zlib
-- zstd: libzstd from the Mojo environment (or the system)
-- brotli: libbrotlidec, used only when installed (`pixi add brotli`,
+- gzip and deflate use the system zlib
+- zstd uses libzstd from the Mojo environment, or the system
+- brotli uses libbrotlidec, only when installed (`pixi add brotli`,
   `apt install libbrotli1` or `brew install brotli`)
 
-`Accept-Encoding` lists only the encodings whose library loaded, so a server
-never sends one the client cannot decode.
+`Accept-Encoding` lists only the encodings whose library loaded, so a server never sends
+one the client cannot decode.
 
 ## Requirements
 
-- Mojo `>=1.2.0` (for Mojo 1.0 / 1.1, use requests 1.5.0)
-- No C compiler or linker flags: every dependency is pure Mojo, and the
-  compression libraries are opened at runtime (see Compression)
+- Mojo >= 1.2.0
+- [tls](https://github.com/Mosaad-M/tls) >= 1.12.0, [tcp](https://github.com/Mosaad-M/tcp) >= 2.2.0,
+  [url](https://github.com/Mosaad-M/url) >= 1.2.0 and [json](https://github.com/Mosaad-M/json) >= 3.1.0,
+  all pure Mojo and installed by [mojo-pkg](https://github.com/Mosaad-M/mojo-pkg)
+- No C compiler or linker flags
 
 ## Testing
 
 ```bash
-pixi run test            # resilience (45) + framing (51) + client (144 HTTP, 4 HTTPS)
+pixi run test            # resilience (46) + framing (51) + client (144 HTTP, 4 HTTPS)
 pixi run test-h2-local   # HTTP/2 against a local server (41); needs the python `h2` package (pixi installs it)
-pixi run test-hpack      # 128
+pixi run test-hpack      # 130
 pixi run test-h2         # 70
 ```
 
+Release history is in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT, see [LICENSE](LICENSE).
